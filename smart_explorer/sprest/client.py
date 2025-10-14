@@ -106,18 +106,26 @@ class SharePointClient:
             server_relative_url = "/" + server_relative_url
         # Encode but keep slashes to match SharePoint expectations
         enc = urllib.parse.quote(server_relative_url, safe="/")
-        folders_url = f"{self.base_url}/_api/web/GetFolderByServerRelativeUrl('{enc}')/Folders?$select=Name,ServerRelativeUrl,TimeLastModified,UniqueId"
-        files_url = f"{self.base_url}/_api/web/GetFolderByServerRelativeUrl('{enc}')/Files?$select=Name,ServerRelativeUrl,Length,TimeLastModified,UniqueId"
+        select = (
+            "Name,ServerRelativeUrl,"
+            "Folders/Name,Folders/ServerRelativeUrl,Folders/TimeLastModified,"
+            "Files/Name,Files/ServerRelativeUrl,Files/Length,Files/TimeLastModified"
+        )
+        url = (
+            f"{self.base_url}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
+            f"?$expand=Folders,Files&$select={urllib.parse.quote(select, safe=',/')}"
+        )
         with self._http() as client:
-            rf = client.get(folders_url)
-            rf.raise_for_status()
-            rfi = client.get(files_url)
-            rfi.raise_for_status()
-            fdata = rf.json()
-            idata = rfi.json()
-        # Robustly support verbose/nometadata
-        folders = fdata.get("value") or fdata.get("d", {}).get("results", [])
-        files = idata.get("value") or idata.get("d", {}).get("results", [])
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        payload = data.get("d", data)
+        folders = payload.get("Folders", [])
+        if isinstance(folders, dict):
+            folders = folders.get("results", [])
+        files = payload.get("Files", [])
+        if isinstance(files, dict):
+            files = files.get("results", [])
         return folders, files
 
     # Rename by MoveTo to a new ServerRelativeUrl

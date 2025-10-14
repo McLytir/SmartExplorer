@@ -9,6 +9,7 @@ from .base import Translator
 class BackendTranslator(Translator):
     def __init__(self, base_url: str = "http://127.0.0.1:5001") -> None:
         self.client = BackendClient(base_url)
+        self._base_url = self.client.base_url
 
     def translate_title(self, title: str, target_language: str) -> Optional[str]:
         try:
@@ -39,3 +40,5 @@ class BackendTranslator(Translator):
         except Exception:
             return [None] * len(titles)
 
+    def cache_namespace(self) -> str:
+        return f"backend:{self._base_url}"

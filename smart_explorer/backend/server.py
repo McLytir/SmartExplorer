@@ -4,6 +4,8 @@ import fnmatch
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import List, Optional, Dict, Tuple
 import httpx
 
@@ -115,9 +117,12 @@ if getattr(cfg, "sp_base_url", None):
     except Exception:
         sp_client = None
 
-# Short TTL cache for SharePoint folder listing to reduce round-trips
-_SP_LIST_TTL = 15.0
+# SharePoint folder cache with background prefetch
+_SP_LIST_TTL = 300.0
+_SP_PREFETCH_LIMIT = 5
 _sp_list_cache: Dict[str, tuple[float, list[dict], list[dict]]] = {}
+_sp_cache_lock = Lock()
+_prefetch_executor = ThreadPoolExecutor(max_workers=4)
 
 # Small in-memory LRU cache for frequent names to reduce API calls
 from collections import OrderedDict
@@ -141,6 +146,57 @@ def _mem_put(key: str, value: str) -> None:
     _mem_cache[key] = value
     while len(_mem_cache) > _MEM_CACHE_MAX:
         _mem_cache.popitem(last=False)
+
+
+def _translator_namespace(language: str) -> str:
+    try:
+        key = translator.cache_namespace()
+    except Exception:
+        key = translator.__class__.__name__
+    return f"{language}|{key}"
+
+
+def _mem_key(language: str, name: str) -> str:
+    return f"{_translator_namespace(language)}\n{name}"
+
+
+def _cache_get(path: str) -> Optional[tuple[float, list[dict], list[dict]]]:
+    with _sp_cache_lock:
+        return _sp_list_cache.get(path)
+
+
+def _cache_put(path: str, folders: list[dict], files: list[dict]) -> None:
+    with _sp_cache_lock:
+        _sp_list_cache[path] = (time.time(), folders, files)
+
+
+def _prefetch_folder(path: str) -> None:
+    global sp_client
+    client = sp_client
+    if not client:
+        return
+    try:
+        cached = _cache_get(path)
+        if cached and (time.time() - cached[0]) < _SP_LIST_TTL:
+            return
+        folders, files = client.list_children(path)
+        _cache_put(path, folders, files)
+    except Exception:
+        pass
+
+
+def _schedule_prefetch(folders: List[dict]) -> None:
+    if not folders:
+        return
+    scheduled = 0
+    for entry in folders:
+        path = entry.get("ServerRelativeUrl") or entry.get("path")
+        if not path:
+            continue
+        if scheduled >= _SP_PREFETCH_LIMIT:
+            break
+        _prefetch_executor.submit(_prefetch_folder, path)
+        scheduled += 1
 
 
 @app.get("/api/health")
@@ -222,13 +278,13 @@ def sp_list(site_relative_url: str = Query(..., description="e.g., /sites/PeakEn
     if not sp_client:
         raise HTTPException(status_code=400, detail="SharePoint base URL not configured. Set via /api/settings or /api/sp/cookies.")
     try:
-        now = time.time()
-        cached = _sp_list_cache.get(folder_server_relative_url)
-        if cached and (now - cached[0]) < _SP_LIST_TTL:
+        cached = _cache_get(folder_server_relative_url)
+        if cached and (time.time() - cached[0]) < _SP_LIST_TTL:
             folders, files = cached[1], cached[2]
         else:
             folders, files = sp_client.list_children(folder_server_relative_url)
-            _sp_list_cache[folder_server_relative_url] = (now, folders, files)
+            _cache_put(folder_server_relative_url, folders, files)
+            _schedule_prefetch(folders)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
     except Exception as e:
@@ -289,8 +345,10 @@ def sp_rename(req: SPRenameRequest):
     try:
         new_path = sp_client.rename(req.server_relative_url, req.new_name, req.is_folder)
         # Invalidate parent folder cache
-        parent = (req.server_relative_url if req.is_folder else req.server_relative_url).rsplit('/', 1)[0]
-        _sp_list_cache.pop(parent, None)
+        parent = req.server_relative_url.rsplit('/', 1)[0]
+        with _sp_cache_lock:
+            _sp_list_cache.pop(parent, None)
+            _sp_list_cache.pop(req.server_relative_url, None)
         return RenameResponse(newPath=new_path)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
@@ -307,6 +365,8 @@ def translate(req: TranslateRequest):
     n = len(req.items)
     out: List[str] = [""] * n
 
+    namespace = _translator_namespace(language)
+
     # First pass: fill from caches; collect misses
     miss_indices: List[int] = []
     miss_names: List[str] = []
@@ -319,12 +379,12 @@ def translate(req: TranslateRequest):
             continue
 
         # Try caches in order: in-memory name-only -> by-path -> by-name
-        mem_key = f"{language}\n{name}"
+        mem_key = _mem_key(language, name)
         translated = _mem_get(mem_key)
         if not translated and item.path and item.mtime is not None:
-            translated = cache.get(language, item.path, name, float(item.mtime))
+            translated = cache.get(namespace, item.path, name, float(item.mtime))
         if not translated:
-            translated = cache.get_by_name(language, name)
+            translated = cache.get_by_name(namespace, name)
 
         if translated:
             out[idx] = translated
@@ -345,15 +405,20 @@ def translate(req: TranslateRequest):
 
         # Assign results and update caches
         for name, tr in zip(unique_names, results):
-            translated = tr or name
-            cache.set_by_name(language, name, translated)
-            _mem_put(f"{language}\n{name}", translated)
+            translated: str
+            cleaned = tr.strip() if isinstance(tr, str) else ""
+            if cleaned:
+                translated = cleaned
+                cache.set_by_name(namespace, name, translated)
+                _mem_put(_mem_key(language, name), translated)
+            else:
+                translated = name
             for idx in miss_name_to_indices.get(name, []):
                 item = req.items[idx]
                 out[idx] = translated
-                if item.path and item.mtime is not None:
+                if translated != name and item.path and item.mtime is not None:
                     try:
-                        cache.set(language, item.path, item.name, float(item.mtime), translated)
+                        cache.set(namespace, item.path, item.name, float(item.mtime), translated)
                     except Exception:
                         pass
 

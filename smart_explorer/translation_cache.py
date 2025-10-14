@@ -13,9 +13,9 @@ class TranslationCache:
     def __init__(self, path: Optional[str] = None) -> None:
         self._path = os.path.abspath(path or CACHE_FILENAME)
         self._lock = threading.Lock()
-        # by_path: language -> composite_key -> translated
+        # by_path: namespace -> composite_key -> translated
         self._data_by_path: Dict[str, Dict[str, str]] = {}
-        # by_name: language -> name -> translated (fallback when path/mtime unknown)
+        # by_name: namespace -> name -> translated (fallback when path/mtime unknown)
         self._data_by_name: Dict[str, Dict[str, str]] = {}
         self._load()
 
@@ -48,29 +48,29 @@ class TranslationCache:
             pass
 
     @staticmethod
-    def _key(language: str, file_path: str, name: str, mtime: float) -> str:
-        # Store by language + path + mtime + current name to keep it stable
-        return f"{language}\n{file_path}\n{mtime}\n{name}"
+    def _key(namespace: str, file_path: str, name: str, mtime: float) -> str:
+        # Store by namespace + path + mtime + current name to keep it stable
+        return f"{namespace}\n{file_path}\n{mtime}\n{name}"
 
-    def get(self, language: str, file_path: str, name: str, mtime: float) -> Optional[str]:
-        key = self._key(language, file_path, name, mtime)
+    def get(self, namespace: str, file_path: str, name: str, mtime: float) -> Optional[str]:
+        key = self._key(namespace, file_path, name, mtime)
         with self._lock:
-            return self._data_by_path.get(language, {}).get(key)
+            return self._data_by_path.get(namespace, {}).get(key)
 
-    def set(self, language: str, file_path: str, name: str, mtime: float, translated: str) -> None:
-        key = self._key(language, file_path, name, mtime)
+    def set(self, namespace: str, file_path: str, name: str, mtime: float, translated: str) -> None:
+        key = self._key(namespace, file_path, name, mtime)
         with self._lock:
-            bucket = self._data_by_path.setdefault(language, {})
+            bucket = self._data_by_path.setdefault(namespace, {})
             bucket[key] = translated
         self._save()
 
     # Name-only fallback cache
-    def get_by_name(self, language: str, name: str) -> Optional[str]:
+    def get_by_name(self, namespace: str, name: str) -> Optional[str]:
         with self._lock:
-            return self._data_by_name.get(language, {}).get(name)
+            return self._data_by_name.get(namespace, {}).get(name)
 
-    def set_by_name(self, language: str, name: str, translated: str) -> None:
+    def set_by_name(self, namespace: str, name: str, translated: str) -> None:
         with self._lock:
-            bucket = self._data_by_name.setdefault(language, {})
+            bucket = self._data_by_name.setdefault(namespace, {})
             bucket[name] = translated
         self._save()

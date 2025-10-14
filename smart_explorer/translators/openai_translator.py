@@ -17,6 +17,9 @@ class OpenAITranslator(Translator):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
+    def cache_namespace(self) -> str:
+        return f"openai:{self.model}"
+
     def translate_title(self, title: str, target_language: str) -> Optional[str]:
         m = _EXT_RE.match(title)
         if not m:

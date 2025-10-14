@@ -55,6 +55,15 @@ class TranslatedProxyModel(QIdentityProxyModel):
         self._signals.done.connect(self._on_done)
         self._signals.fail.connect(self._on_fail)
 
+    def _cache_namespace(self) -> str:
+        key = "default"
+        if hasattr(self._translator, "cache_namespace"):
+            try:
+                key = self._translator.cache_namespace()
+            except Exception:
+                key = self._translator.__class__.__name__
+        return f"{self._target_language}|{key}"
+
     def set_target_language(self, language: str) -> None:
         if language != self._target_language:
             self._target_language = language
@@ -109,10 +118,11 @@ class TranslatedProxyModel(QIdentityProxyModel):
             except Exception:
                 pass
             if self._disk_cache:
-                cached = self._disk_cache.get(self._target_language, path, name, mtime)
+                namespace = self._cache_namespace()
+                cached = self._disk_cache.get(namespace, path, name, mtime)
                 if not cached:
                     # Fallback to name-only cache (common names across locations)
-                    cached = self._disk_cache.get_by_name(self._target_language, name)
+                    cached = self._disk_cache.get_by_name(namespace, name)
                 if cached:
                     self._cache[path] = cached
                     return cached
@@ -137,8 +147,9 @@ class TranslatedProxyModel(QIdentityProxyModel):
                 mtime = os.path.getmtime(path)
             except Exception:
                 mtime = 0.0
-            self._disk_cache.set(self._target_language, path, name, mtime, translated)
-            self._disk_cache.set_by_name(self._target_language, name, translated)
+            namespace = self._cache_namespace()
+            self._disk_cache.set(namespace, path, name, mtime, translated)
+            self._disk_cache.set_by_name(namespace, name, translated)
         # Find the index and notify view
         src_model = self.sourceModel()
         if not hasattr(src_model, "index"):

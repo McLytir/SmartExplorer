@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import webbrowser
+from urllib.parse import urlparse
+
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget, QMessageBox
 )
 
 from ..api.backend_client import BackendClient
 from ..settings import AppConfig, save_config
+from ..services.browser_cookies import collect_sharepoint_cookies
 
 
 class SettingsDialog(QDialog):
@@ -85,15 +89,18 @@ class SettingsDialog(QDialog):
         btn_row = QHBoxLayout()
         self.btn_save = QPushButton("Save", self)
         self.btn_send = QPushButton("Send to Backend", self)
+        self.btn_capture = QPushButton("Capture Cookies", self)
         self.btn_close = QPushButton("Close", self)
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_send)
+        btn_row.addWidget(self.btn_capture)
         btn_row.addStretch(1)
         btn_row.addWidget(self.btn_close)
         root.addLayout(btn_row)
 
         self.btn_save.clicked.connect(self._on_save)
         self.btn_send.clicked.connect(self._on_send)
+        self.btn_capture.clicked.connect(self._on_capture)
         self.btn_close.clicked.connect(self.accept)
 
     def _on_save(self):
@@ -134,3 +141,44 @@ class SettingsDialog(QDialog):
             if not cookies:
                 cookies = None
         self.backend.set_sp_cookies(base_url=base, cookies=cookies, cookie_header=cookie_header)
+
+    def _on_capture(self):
+        base = self.sp_base.text().strip()
+        if not base:
+            QMessageBox.information(self, "SharePoint", "Enter the SharePoint Site URL before capturing cookies.")
+            return
+        burl = self.backend_url.text().strip() or "http://127.0.0.1:5001"
+        self.backend.base_url = burl.rstrip('/')
+        parsed = urlparse(base)
+        if not parsed.scheme or not parsed.netloc:
+            QMessageBox.warning(self, "SharePoint", "SharePoint Site URL is invalid.")
+            return
+
+        webbrowser.open(base)
+        QMessageBox.information(
+            self,
+            "Sign In to SharePoint",
+            "Your default browser has been opened. Please complete the SharePoint sign-in, then return here and click OK to capture cookies.",
+        )
+
+        cookies = collect_sharepoint_cookies(parsed.netloc)
+        if not cookies:
+            QMessageBox.warning(
+                self,
+                "Cookie Capture",
+                "Could not locate SharePoint cookies. Ensure you are signed in using Edge, Chrome, or Firefox on this machine.",
+            )
+            return
+
+        fed = cookies.get("FedAuth")
+        rt = cookies.get("rtFa")
+        if fed:
+            self.fedauth.setText(fed)
+        if rt:
+            self.rtfa.setText(rt)
+
+        try:
+            self.backend.set_sp_cookies(base_url=base, cookies=cookies)
+            QMessageBox.information(self, "Cookie Capture", "Cookies captured and sent to backend.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Backend Error", f"Failed to send cookies: {exc}")
