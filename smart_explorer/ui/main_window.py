@@ -24,6 +24,7 @@ from ..models.translated_fs_model import TranslatedProxyModel, PATH_ROLE
 from ..settings import AppConfig, load_config, save_config
 from ..translators.base import IdentityTranslator
 from ..translators.openai_translator import OpenAITranslator
+from ..translators.backend_translator import BackendTranslator
 from ..services.rename_service import apply_rename
 from ..translation_cache import TranslationCache
 from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE
@@ -210,6 +211,13 @@ class MainWindow(QMainWindow):
         api_key = (self._cfg.api_key or "").strip()
         if api_key:
             return OpenAITranslator(api_key=api_key, model=self._cfg.model)
+        # Try backend translator when local key absent
+        try:
+            info = self._backend.get_settings()
+            if info.get("has_api_key"):
+                return BackendTranslator(self._backend.base_url)
+        except Exception:
+            pass
         return IdentityTranslator()
 
     def _choose_root(self) -> None:
