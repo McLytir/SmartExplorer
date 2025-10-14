@@ -1,0 +1,18 @@
+{
+  "api_key": "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",
+  "model": "gpt-4o-mini",
+  "target_language": "English",
+  "root_path": "C:/Users/Charles Devaux/Downloads",
+  "ignore_patterns": [
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "*.tmp"
+  ],
+  "webdav_roots": [],
+  "sp_base_url": "https://peakenergyasia.sharepoint.com/sites/PeakEnergy-All",
+  "sp_library_root": "/sites/PeakEnergy-All/Shared Documents/General",
+  "backend_url": "http://127.0.0.1:5001",
+  "last_source": "SharePoint"
+}
