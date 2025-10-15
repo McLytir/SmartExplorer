@@ -45,8 +45,14 @@ class Digest:
 class SharePointClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self._cookies_store = _load_cookies()  # base_url -> {cookie: value}
-        self._digest: Optional[Digest] = None
+        self._cookies_store = _load_cookies()  # host -> {cookie: value}
+        parsed = urllib.parse.urlparse(self.base_url)
+        self._resource_base = f"{parsed.scheme}://{parsed.netloc}"
+        self._digests: Dict[str, Digest] = {}
+        # Migrate legacy cookie entries stored by full base URL
+        legacy = self._cookies_store.get(self.base_url)
+        if legacy and self._cookie_store_key() not in self._cookies_store:
+            self._cookies_store[self._cookie_store_key()] = legacy
 
     # Cookies management
     def set_cookies_from_header(self, cookie_header: str) -> None:
@@ -57,31 +63,34 @@ class SharePointClient:
                 k, v = p.split("=", 1)
                 if k.lower() in ("fedauth", "rtfa") or k.isalpha():
                     jar[k] = v
-        self._cookies_store[self.base_url] = jar
+        self._cookies_store[self._cookie_store_key()] = jar
         _save_cookies(self._cookies_store)
 
     def set_cookie(self, name: str, value: str) -> None:
-        jar = self._cookies_store.setdefault(self.base_url, {})
+        jar = self._cookies_store.setdefault(self._cookie_store_key(), {})
         jar[name] = value
         _save_cookies(self._cookies_store)
 
     def has_cookies(self) -> bool:
-        return bool(self._cookies_store.get(self.base_url))
+        return bool(self._cookies_store.get(self._cookie_store_key()))
 
     def _http(self) -> httpx.Client:
         cookies = httpx.Cookies()
-        for k, v in (self._cookies_store.get(self.base_url) or {}).items():
-            cookies.set(k, v, domain=urllib.parse.urlparse(self.base_url).hostname)
+        domain = urllib.parse.urlparse(self._resource_base).hostname
+        for k, v in (self._cookies_store.get(self._cookie_store_key()) or {}).items():
+            cookies.set(k, v, domain=domain)
         return httpx.Client(cookies=cookies, timeout=30.0, headers={
             "Accept": "application/json;odata=nometadata",
             "User-Agent": "SmartExplorer/0.1",
         })
 
     # Digest handling
-    def _ensure_digest(self) -> str:
-        if self._digest and self._digest.valid():
-            return self._digest.value
-        url = f"{self.base_url}/_api/contextinfo"
+    def _ensure_digest(self, site_relative_url: Optional[str] = None) -> str:
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._digests.get(site_base)
+        if digest and digest.valid():
+            return digest.value
+        url = f"{site_base}/_api/contextinfo"
         with self._http() as client:
             resp = client.post(url)
             resp.raise_for_status()
@@ -96,14 +105,16 @@ class SharePointClient:
             or data.get("d", {}).get("GetContextWebInformation", {}).get("FormDigestTimeoutSeconds")
             or 1800
         )
-        self._digest = Digest(value=val, expires_at=time.time() + float(timeout_sec))
-        return self._digest.value
+        new_digest = Digest(value=val, expires_at=time.time() + float(timeout_sec))
+        self._digests[site_base] = new_digest
+        return new_digest.value
 
     # List folder children (folders + files)
-    def list_children(self, server_relative_url: str) -> Tuple[List[dict], List[dict]]:
+    def list_children(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> Tuple[List[dict], List[dict]]:
         # Ensure starts with /
         if not server_relative_url.startswith("/"):
             server_relative_url = "/" + server_relative_url
+        site_base = self._resolve_site(site_relative_url)
         # Encode but keep slashes to match SharePoint expectations
         enc = urllib.parse.quote(server_relative_url, safe="/")
         select = (
@@ -112,7 +123,7 @@ class SharePointClient:
             "Files/Name,Files/ServerRelativeUrl,Files/Length,Files/TimeLastModified"
         )
         url = (
-            f"{self.base_url}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
+            f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
             f"?$expand=Folders,Files&$select={urllib.parse.quote(select, safe=',/')}"
         )
         with self._http() as client:
@@ -129,7 +140,7 @@ class SharePointClient:
         return folders, files
 
     # Rename by MoveTo to a new ServerRelativeUrl
-    def rename(self, server_relative_url: str, new_name: str, is_folder: bool) -> str:
+    def rename(self, server_relative_url: str, new_name: str, is_folder: bool, *, site_relative_url: Optional[str] = None) -> str:
         # Compute new target URL
         if not server_relative_url.startswith("/"):
             server_relative_url = "/" + server_relative_url
@@ -143,13 +154,14 @@ class SharePointClient:
             "X-RequestDigest": digest,
             "IF-MATCH": "*",
         }
+        site_base = self._resolve_site(site_relative_url)
         with self._http() as client:
             if is_folder:
                 # Folder moveTo
-                url = f"{self.base_url}/_api/web/GetFolderByServerRelativeUrl('{enc_old}')/moveTo(newurl='{enc_new}')"
+                url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_old}')/moveTo(newurl='{enc_new}')"
             else:
                 # File moveto flags=1 => overwrite if exists (we rely on conflict check beforehand)
-                url = f"{self.base_url}/_api/web/GetFileByServerRelativeUrl('{enc_old}')/moveto(newurl='{enc_new}',flags=1)"
+                url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_old}')/moveto(newurl='{enc_new}',flags=1)"
             resp = client.post(url, headers=headers)
             if resp.status_code >= 400:
                 # Some tenants require POST with X-HTTP-Method: MERGE
@@ -189,3 +201,242 @@ class SharePointClient:
             # Fallback to site root
             return ("", "/")
         return title_of(chosen), url_of(chosen)
+
+    def list_sites(self) -> List[dict]:
+        sites: List[dict] = []
+        # Include current site
+        try:
+            with self._http() as client:
+                resp = client.get(f"{self.base_url}/_api/web?$select=Title,ServerRelativeUrl,Url,Id")
+                resp.raise_for_status()
+                root = resp.json().get("d", resp.json())
+                sites.append({
+                    "title": root.get("Title"),
+                    "serverRelativeUrl": root.get("ServerRelativeUrl"),
+                    "url": root.get("Url") or self.base_url,
+                    "id": root.get("Id"),
+                })
+        except Exception:
+            pass
+        try:
+            with self._http() as client:
+                resp = client.get(f"{self.base_url}/_api/web/webs?$select=Title,ServerRelativeUrl,Url,Id")
+                resp.raise_for_status()
+                data = resp.json()
+            items = data.get("value") or data.get("d", {}).get("results", [])
+            for it in items:
+                sites.append({
+                    "title": it.get("Title"),
+                    "serverRelativeUrl": it.get("ServerRelativeUrl"),
+                    "url": it.get("Url"),
+                    "id": it.get("Id"),
+                })
+        except Exception:
+            pass
+        return sites
+
+    def list_libraries(self, site_relative_url: Optional[str] = None) -> List[dict]:
+        select = "Title,RootFolder/ServerRelativeUrl,RootFolder/Name,RootFolder/UniqueId,Hidden,BaseTemplate"
+        url = f"{self._resolve_site(site_relative_url)}/_api/web/Lists?$select={urllib.parse.quote(select)}&$expand=RootFolder&$filter=BaseTemplate eq 101"
+        with self._http() as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        lists = data.get("value") or data.get("d", {}).get("results", [])
+        libraries: List[dict] = []
+        for lst in lists:
+            if lst.get("Hidden"):
+                continue
+            root_folder = lst.get("RootFolder") or {}
+            path = root_folder.get("ServerRelativeUrl") or ""
+            if not path:
+                path = (root_folder.get("ServerRelativePath") or {}).get("DecodedUrl") or ""
+            if not path:
+                list_id = lst.get("Id") or root_folder.get("UniqueId")
+                if list_id:
+                    try:
+                        path = self._fetch_list_root_path(list_id, site_relative_url)
+                    except Exception:
+                        path = ""
+            if not path and site_relative_url:
+                name = (root_folder.get("Name") or "").strip()
+                if name:
+                    path = f"{site_relative_url.rstrip('/')}/{name}"
+            path = (path or "").strip()
+            if path and not path.startswith("/"):
+                path = "/" + path
+            if not path or path == "/":
+                continue
+            libraries.append({
+                "title": lst.get("Title"),
+                "server_relative_url": path,
+                "name": root_folder.get("Name"),
+                "id": lst.get("Id") or root_folder.get("UniqueId"),
+            })
+        return libraries
+
+    def _fetch_list_root_path(self, list_id: str, site_relative_url: Optional[str]) -> str:
+        site_base = self._resolve_site(site_relative_url)
+        list_id = (list_id or "").strip("{}")
+        if not list_id:
+            return ""
+        url = f"{site_base}/_api/web/Lists(guid'{list_id}')/RootFolder?$select=ServerRelativeUrl,ServerRelativePath"
+        with self._http() as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        root = data.get("d", data) or {}
+        path = (root.get("ServerRelativeUrl") or "").strip()
+        if not path:
+            path = ((root.get("ServerRelativePath") or {}).get("DecodedUrl") or "").strip()
+        if path and not path.startswith("/"):
+            path = "/" + path
+        return path
+
+    def copy_item(self, source_server_relative: str, target_server_relative: str, *,
+                  is_folder: bool, overwrite: bool = False,
+                  site_relative_url: Optional[str] = None) -> str:
+        if not source_server_relative.startswith("/"):
+            source_server_relative = "/" + source_server_relative
+        if not target_server_relative.startswith("/"):
+            target_server_relative = "/" + target_server_relative
+        enc_src = urllib.parse.quote(source_server_relative, safe="/")
+        enc_dst = urllib.parse.quote(target_server_relative, safe="/")
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "IF-MATCH": "*",
+        }
+        site_base = self._resolve_site(site_relative_url)
+        with self._http() as client:
+            if is_folder:
+                url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_src}')/copyTo(strNewUrl='{enc_dst}')"
+            else:
+                url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_src}')/copyTo(strNewUrl='{enc_dst}',boverwrite={'true' if overwrite else 'false'})"
+            resp = client.post(url, headers=headers)
+            resp.raise_for_status()
+        return target_server_relative
+
+    def move_item(self, source_server_relative: str, target_server_relative: str, *,
+                  is_folder: bool, overwrite: bool = False,
+                  site_relative_url: Optional[str] = None) -> str:
+        if not source_server_relative.startswith("/"):
+            source_server_relative = "/" + source_server_relative
+        if not target_server_relative.startswith("/"):
+            target_server_relative = "/" + target_server_relative
+        enc_src = urllib.parse.quote(source_server_relative, safe="/")
+        enc_dst = urllib.parse.quote(target_server_relative, safe="/")
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "IF-MATCH": "*",
+        }
+        site_base = self._resolve_site(site_relative_url)
+        with self._http() as client:
+            if is_folder:
+                url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_src}')/moveTo(newurl='{enc_dst}')"
+            else:
+                url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_src}')/moveTo(newUrl='{enc_dst}',flags={'1' if overwrite else '0'})"
+            resp = client.post(url, headers=headers)
+            if resp.status_code >= 400:
+                headers2 = dict(headers)
+                headers2["X-HTTP-Method"] = "MERGE"
+                resp = client.post(url, headers=headers2)
+            resp.raise_for_status()
+        return target_server_relative
+
+    def delete_item(self, server_relative_url: str, *, is_folder: bool,
+                    site_relative_url: Optional[str] = None, recycle: bool = True) -> None:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "IF-MATCH": "*",
+        }
+        site_base = self._resolve_site(site_relative_url)
+        with self._http() as client:
+            if is_folder:
+                if recycle:
+                    url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')/recycle()"
+                else:
+                    url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
+            else:
+                if recycle:
+                    url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/recycle()"
+                else:
+                    url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')"
+            if recycle:
+                resp = client.post(url, headers=headers)
+            else:
+                resp = client.post(url, headers=dict(headers, **{"X-HTTP-Method": "DELETE"}))
+            resp.raise_for_status()
+
+    def create_folder(self, parent_server_relative: str, name: str, *,
+                      site_relative_url: Optional[str] = None) -> str:
+        if not parent_server_relative.startswith("/"):
+            parent_server_relative = "/" + parent_server_relative
+        parent_enc = urllib.parse.quote(parent_server_relative, safe="/")
+        digest = self._ensure_digest(site_relative_url)
+        headers = {"X-RequestDigest": digest}
+        site_base = self._resolve_site(site_relative_url)
+        safe_name = name.replace("'", "''")
+        url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{parent_enc}')/Folders/AddUsingPath(DecodedUrl='{safe_name}')"
+        with self._http() as client:
+            resp = client.post(url, headers=headers)
+            resp.raise_for_status()
+        return f"{parent_server_relative.rstrip('/')}/{name}"
+
+    def upload_file(self, parent_server_relative: str, name: str, content: bytes, *,
+                    site_relative_url: Optional[str] = None, overwrite: bool = True) -> str:
+        if not parent_server_relative.startswith("/"):
+            parent_server_relative = "/" + parent_server_relative
+        parent_enc = urllib.parse.quote(parent_server_relative, safe="/")
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "Content-Type": "application/octet-stream",
+        }
+        site_base = self._resolve_site(site_relative_url)
+        safe_name = name.replace("'", "''")
+        url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{parent_enc}')/Files/Add(url='{safe_name}',overwrite={'true' if overwrite else 'false'})"
+        with self._http() as client:
+            resp = client.post(url, headers=headers, content=content)
+            resp.raise_for_status()
+        return f"{parent_server_relative.rstrip('/')}/{name}"
+
+    def download_file(self, server_relative_url: str, *,
+                      site_relative_url: Optional[str] = None) -> bytes:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/$value"
+        with self._http() as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            return resp.content
+
+    def web_url(self, server_relative_url: str, *,
+                site_relative_url: Optional[str] = None) -> str:
+        site = self._resolve_site(site_relative_url)
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        parsed = urllib.parse.urlparse(site)
+        return urllib.parse.urljoin(f"{parsed.scheme}://{parsed.netloc}", server_relative_url)
+
+    def share_link(self, server_relative_url: str, *,
+                   site_relative_url: Optional[str] = None) -> str:
+        # Basic fallback: return direct browser URL. More advanced link generation can be added later.
+        return self.web_url(server_relative_url, site_relative_url=site_relative_url)
+
+    # New helpers
+    def _resolve_site(self, site_relative_url: Optional[str]) -> str:
+        if not site_relative_url:
+            return self.base_url
+        site_relative_url = site_relative_url.lstrip("/")
+        return f"{self._resource_base}/{site_relative_url}"
+
+    def _cookie_store_key(self) -> str:
+        return self._resource_base

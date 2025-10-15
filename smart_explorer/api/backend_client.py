@@ -15,10 +15,12 @@ class BackendClient:
             return r.json()
 
     def post(self, path: str, json: Optional[dict] = None) -> dict:
-        with httpx.Client(timeout=15.0) as c:
+        with httpx.Client(timeout=60.0) as c:
             r = c.post(self.base_url + path, json=json)
             r.raise_for_status()
-            return r.json()
+            if r.headers.get("content-type", "").startswith("application/json"):
+                return r.json()
+            return {}
 
     def get_settings(self) -> dict:
         return self.get("/api/settings")
@@ -41,15 +43,88 @@ class BackendClient:
         }
         return self.get("/api/sp/list", params=params)
 
-    def sp_rename(self, server_relative_url: str, new_name: str, is_folder: bool) -> dict:
+    def sp_rename(self, server_relative_url: str, new_name: str, is_folder: bool, *, site_relative_url: Optional[str] = None) -> dict:
         return self.post(
             "/api/sp/rename",
             json={
                 "server_relative_url": server_relative_url,
                 "new_name": new_name,
                 "is_folder": is_folder,
+                "site_relative_url": site_relative_url,
             },
         )
 
     def sp_default_doclib(self) -> dict:
         return self.get("/api/sp/default_doclib")
+
+    def sp_sites(self) -> dict:
+        return self.get("/api/sp/sites")
+
+    def sp_libraries(self, site_relative_url: Optional[str] = None) -> dict:
+        params = {"site_relative_url": site_relative_url} if site_relative_url else None
+        return self.get("/api/sp/libraries", params=params)
+
+    def sp_copy(self, source: str, target: str, *, is_folder: bool, overwrite: bool = False, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "source_server_relative_url": source,
+            "target_server_relative_url": target,
+            "is_folder": is_folder,
+            "overwrite": overwrite,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/copy", json=payload)
+
+    def sp_move(self, source: str, target: str, *, is_folder: bool, overwrite: bool = False, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "source_server_relative_url": source,
+            "target_server_relative_url": target,
+            "is_folder": is_folder,
+            "overwrite": overwrite,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/move", json=payload)
+
+    def sp_delete(self, server_relative_url: str, *, is_folder: bool, site_relative_url: Optional[str] = None, recycle: bool = True) -> dict:
+        payload = {
+            "server_relative_url": server_relative_url,
+            "is_folder": is_folder,
+            "site_relative_url": site_relative_url,
+            "recycle": recycle,
+        }
+        return self.post("/api/sp/delete", json=payload)
+
+    def sp_create_folder(self, parent_server_relative_url: str, name: str, *, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "parent_server_relative_url": parent_server_relative_url,
+            "name": name,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/folder", json=payload)
+
+    def sp_upload(self, parent_server_relative_url: str, name: str, content_base64: str, *, site_relative_url: Optional[str] = None, overwrite: bool = True) -> dict:
+        payload = {
+            "parent_server_relative_url": parent_server_relative_url,
+            "name": name,
+            "content_base64": content_base64,
+            "site_relative_url": site_relative_url,
+            "overwrite": overwrite,
+        }
+        return self.post("/api/sp/upload", json=payload)
+
+    def sp_share_link(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "server_relative_url": server_relative_url,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/share-link", json=payload)
+
+    def sp_download(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> bytes:
+        params = {
+            "server_relative_url": server_relative_url,
+        }
+        if site_relative_url:
+            params["site_relative_url"] = site_relative_url
+        with httpx.Client(timeout=60.0) as c:
+            r = c.get(self.base_url + "/api/sp/download", params=params)
+            r.raise_for_status()
+            return r.content

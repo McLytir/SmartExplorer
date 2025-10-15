@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import fnmatch
+import io
 import os
 import sys
 import time
@@ -10,6 +12,7 @@ from typing import List, Optional, Dict, Tuple
 import httpx
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -123,6 +126,10 @@ _SP_PREFETCH_LIMIT = 5
 _sp_list_cache: Dict[str, tuple[float, list[dict], list[dict]]] = {}
 _sp_cache_lock = Lock()
 _prefetch_executor = ThreadPoolExecutor(max_workers=4)
+_SP_SITES_TTL = 600.0
+_sp_sites_cache: Optional[tuple[float, List[dict]]] = None
+_SP_LIB_TTL = 300.0
+_sp_libraries_cache: Dict[str, tuple[float, List[dict]]] = {}
 
 # Small in-memory LRU cache for frequent names to reduce API calls
 from collections import OrderedDict
@@ -160,32 +167,36 @@ def _mem_key(language: str, name: str) -> str:
     return f"{_translator_namespace(language)}\n{name}"
 
 
-def _cache_get(path: str) -> Optional[tuple[float, list[dict], list[dict]]]:
+def _cache_key(site: Optional[str], path: str) -> str:
+    return f"{site or ''}|{path}"
+
+
+def _cache_get(site: Optional[str], path: str) -> Optional[tuple[float, list[dict], list[dict]]]:
     with _sp_cache_lock:
-        return _sp_list_cache.get(path)
+        return _sp_list_cache.get(_cache_key(site, path))
 
 
-def _cache_put(path: str, folders: list[dict], files: list[dict]) -> None:
+def _cache_put(site: Optional[str], path: str, folders: list[dict], files: list[dict]) -> None:
     with _sp_cache_lock:
-        _sp_list_cache[path] = (time.time(), folders, files)
+        _sp_list_cache[_cache_key(site, path)] = (time.time(), folders, files)
 
 
-def _prefetch_folder(path: str) -> None:
+def _prefetch_folder(path: str, site: Optional[str]) -> None:
     global sp_client
     client = sp_client
     if not client:
         return
     try:
-        cached = _cache_get(path)
+        cached = _cache_get(site, path)
         if cached and (time.time() - cached[0]) < _SP_LIST_TTL:
             return
-        folders, files = client.list_children(path)
-        _cache_put(path, folders, files)
+        folders, files = client.list_children(path, site_relative_url=site)
+        _cache_put(site, path, folders, files)
     except Exception:
         pass
 
 
-def _schedule_prefetch(folders: List[dict]) -> None:
+def _schedule_prefetch(folders: List[dict], site: Optional[str]) -> None:
     if not folders:
         return
     scheduled = 0
@@ -195,7 +206,7 @@ def _schedule_prefetch(folders: List[dict]) -> None:
             continue
         if scheduled >= _SP_PREFETCH_LIMIT:
             break
-        _prefetch_executor.submit(_prefetch_folder, path)
+        _prefetch_executor.submit(_prefetch_folder, path, site)
         scheduled += 1
 
 
@@ -264,7 +275,253 @@ def sp_set_cookies(req: SPCookiesRequest):
     if req.cookies:
         for k, v in req.cookies.items():
             sp_client.set_cookie(k, v)
+    global _sp_sites_cache, _sp_libraries_cache
+    _sp_sites_cache = None
+    _sp_libraries_cache.clear()
+    with _sp_cache_lock:
+        _sp_list_cache.clear()
     return {"ok": True, "has_cookies": sp_client.has_cookies()}
+
+
+class SPSite(BaseModel):
+    title: Optional[str] = None
+    server_relative_url: Optional[str] = None
+    url: Optional[str] = None
+    id: Optional[str] = None
+
+
+class SPLibrary(BaseModel):
+    title: Optional[str] = None
+    server_relative_url: Optional[str] = None
+    name: Optional[str] = None
+    id: Optional[str] = None
+
+
+class SPLibraryResponse(BaseModel):
+    site_relative_url: Optional[str] = None
+    libraries: List[SPLibrary]
+
+
+class SPSitesResponse(BaseModel):
+    sites: List[SPSite]
+
+
+class SPPathRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    server_relative_url: str
+
+
+class SPCopyMoveRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    source_server_relative_url: str
+    target_server_relative_url: str
+    is_folder: bool
+    overwrite: bool = False
+
+
+class SPDeleteRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    server_relative_url: str
+    is_folder: bool
+    recycle: bool = True
+
+
+class SPCreateFolderRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    parent_server_relative_url: str
+    name: str
+
+
+class SPUploadRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    parent_server_relative_url: str
+    name: str
+    content_base64: str
+    overwrite: bool = True
+
+
+class SPShareLinkResponse(BaseModel):
+    url: str
+
+
+@app.get("/api/sp/sites", response_model=SPSitesResponse)
+def sp_sites():
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        global _sp_sites_cache
+        now = time.time()
+        if _sp_sites_cache and (now - _sp_sites_cache[0]) < _SP_SITES_TTL:
+            sites = _sp_sites_cache[1]
+        else:
+            sites = sp_client.list_sites()
+            _sp_sites_cache = (now, sites)
+        return SPSitesResponse(sites=[SPSite(**s) for s in sites])
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list sites: {e}")
+
+
+@app.get("/api/sp/libraries", response_model=SPLibraryResponse)
+def sp_libraries(site_relative_url: Optional[str] = Query(None, description="e.g., /sites/Contoso")):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        key = site_relative_url or "__default__"
+        now = time.time()
+        cached = _sp_libraries_cache.get(key)
+        if cached and (now - cached[0]) < _SP_LIB_TTL:
+            libs = cached[1]
+        else:
+            libs = sp_client.list_libraries(site_relative_url=site_relative_url)
+            _sp_libraries_cache[key] = (now, libs)
+        return SPLibraryResponse(site_relative_url=site_relative_url, libraries=[SPLibrary(**lib) for lib in libs])
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list libraries: {e}")
+
+
+@app.post("/api/sp/copy", response_model=RenameResponse)
+def sp_copy(req: SPCopyMoveRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        new_path = sp_client.copy_item(
+            req.source_server_relative_url,
+            req.target_server_relative_url,
+            is_folder=req.is_folder,
+            overwrite=req.overwrite,
+            site_relative_url=req.site_relative_url,
+        )
+        parent_dst = req.target_server_relative_url.rsplit('/', 1)[0]
+        with _sp_cache_lock:
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, parent_dst), None)
+        return RenameResponse(newPath=new_path)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
+
+
+@app.post("/api/sp/move", response_model=RenameResponse)
+def sp_move(req: SPCopyMoveRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        new_path = sp_client.move_item(
+            req.source_server_relative_url,
+            req.target_server_relative_url,
+            is_folder=req.is_folder,
+            overwrite=req.overwrite,
+            site_relative_url=req.site_relative_url,
+        )
+        # invalidate caches for source and destination parents
+        parent_src = req.source_server_relative_url.rsplit('/', 1)[0]
+        parent_dst = req.target_server_relative_url.rsplit('/', 1)[0]
+        with _sp_cache_lock:
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, parent_src), None)
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, parent_dst), None)
+        return RenameResponse(newPath=new_path)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Move failed: {e}")
+
+
+@app.post("/api/sp/delete")
+def sp_delete(req: SPDeleteRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        sp_client.delete_item(
+            req.server_relative_url,
+            is_folder=req.is_folder,
+            site_relative_url=req.site_relative_url,
+            recycle=req.recycle,
+        )
+        parent = req.server_relative_url.rsplit('/', 1)[0]
+        with _sp_cache_lock:
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, parent), None)
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, req.server_relative_url), None)
+        return {"ok": True}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+
+@app.post("/api/sp/folder", response_model=RenameResponse)
+def sp_create_folder(req: SPCreateFolderRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        new_path = sp_client.create_folder(
+            req.parent_server_relative_url,
+            req.name,
+            site_relative_url=req.site_relative_url,
+        )
+        parent = req.parent_server_relative_url
+        with _sp_cache_lock:
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, parent), None)
+        return RenameResponse(newPath=new_path)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Create folder failed: {e}")
+
+
+@app.post("/api/sp/upload", response_model=RenameResponse)
+def sp_upload(req: SPUploadRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        content = base64.b64decode(req.content_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 content")
+    try:
+        new_path = sp_client.upload_file(
+            req.parent_server_relative_url,
+            req.name,
+            content,
+            site_relative_url=req.site_relative_url,
+            overwrite=req.overwrite,
+        )
+        with _sp_cache_lock:
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, req.parent_server_relative_url), None)
+        return RenameResponse(newPath=new_path)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+
+@app.get("/api/sp/download")
+def sp_download(site_relative_url: Optional[str] = Query(None), server_relative_url: str = Query(...)):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        content = sp_client.download_file(server_relative_url, site_relative_url=site_relative_url)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {e}")
+    filename = server_relative_url.rsplit('/', 1)[-1] or "download"
+    return StreamingResponse(io.BytesIO(content), media_type="application/octet-stream", headers={
+        "Content-Disposition": f"attachment; filename=\"{filename}\""
+    })
+
+
+@app.post("/api/sp/share-link", response_model=SPShareLinkResponse)
+def sp_share_link(req: SPPathRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        url = sp_client.share_link(req.server_relative_url, site_relative_url=req.site_relative_url)
+        return SPShareLinkResponse(url=url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create share link: {e}")
 
 
 class SPListResponse(BaseModel):
@@ -278,13 +535,13 @@ def sp_list(site_relative_url: str = Query(..., description="e.g., /sites/PeakEn
     if not sp_client:
         raise HTTPException(status_code=400, detail="SharePoint base URL not configured. Set via /api/settings or /api/sp/cookies.")
     try:
-        cached = _cache_get(folder_server_relative_url)
+        cached = _cache_get(site_relative_url, folder_server_relative_url)
         if cached and (time.time() - cached[0]) < _SP_LIST_TTL:
             folders, files = cached[1], cached[2]
         else:
-            folders, files = sp_client.list_children(folder_server_relative_url)
-            _cache_put(folder_server_relative_url, folders, files)
-            _schedule_prefetch(folders)
+            folders, files = sp_client.list_children(folder_server_relative_url, site_relative_url=site_relative_url)
+            _cache_put(site_relative_url, folder_server_relative_url, folders, files)
+            _schedule_prefetch(folders, site_relative_url)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
     except Exception as e:
@@ -333,6 +590,7 @@ class SPRenameRequest(BaseModel):
     server_relative_url: str
     new_name: str
     is_folder: bool
+    site_relative_url: Optional[str] = None
 
 
 @app.post("/api/sp/rename", response_model=RenameResponse)
@@ -343,12 +601,17 @@ def sp_rename(req: SPRenameRequest):
     if not req.new_name or any(ch in ILLEGAL for ch in req.new_name):
         raise HTTPException(status_code=400, detail="Invalid new name")
     try:
-        new_path = sp_client.rename(req.server_relative_url, req.new_name, req.is_folder)
+        new_path = sp_client.rename(
+            req.server_relative_url,
+            req.new_name,
+            req.is_folder,
+            site_relative_url=req.site_relative_url,
+        )
         # Invalidate parent folder cache
         parent = req.server_relative_url.rsplit('/', 1)[0]
         with _sp_cache_lock:
-            _sp_list_cache.pop(parent, None)
-            _sp_list_cache.pop(req.server_relative_url, None)
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, parent), None)
+            _sp_list_cache.pop(_cache_key(req.site_relative_url, req.server_relative_url), None)
         return RenameResponse(newPath=new_path)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")

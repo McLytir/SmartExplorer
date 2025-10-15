@@ -20,6 +20,7 @@ class AppConfig:
     sp_library_root: Optional[str] = None  # server-relative library root (e.g., /sites/Site/Shared Documents)
     backend_url: Optional[str] = None  # e.g., http://127.0.0.1:5001
     last_source: str = "Local"        # "Local" or "SharePoint"
+    workspaces: Optional[list[dict]] = None  # persisted workspace definitions
 
 
 def _config_path() -> str:
