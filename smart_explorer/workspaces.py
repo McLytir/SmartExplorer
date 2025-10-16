@@ -136,6 +136,33 @@ class WorkspaceManager:
             return bool(ws.base_workspace_id and ws.language and ws.base_workspace_id in self._definitions)
         return False
 
+    def reorder_before(self, source_id: str, target_id: Optional[str]) -> None:
+        order = [ws for ws in self._definitions.values()]
+        ids = [ws.id for ws in order]
+        if source_id not in ids:
+            return
+        if target_id == source_id:
+            return
+        source_ws = self._definitions[source_id]
+        order = [ws for ws in order if ws.id != source_id]
+        if target_id and target_id in [ws.id for ws in order]:
+            index = next(i for i, ws in enumerate(order) if ws.id == target_id)
+            order.insert(index, source_ws)
+        else:
+            order.append(source_ws)
+        self._definitions = {ws.id: ws for ws in order}
+
+    def move_by_offset(self, workspace_id: str, offset: int) -> None:
+        order = [ws for ws in self._definitions.values()]
+        ids = [ws.id for ws in order]
+        if workspace_id not in ids or offset == 0:
+            return
+        index = ids.index(workspace_id)
+        new_index = max(0, min(len(order) - 1, index + offset))
+        ws = order.pop(index)
+        order.insert(new_index, ws)
+        self._definitions = {item.id: item for item in order}
+
 
 def ensure_workspaces(cfg: AppConfig) -> WorkspaceManager:
     mgr = WorkspaceManager(cfg)

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData
+from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData, QItemSelectionModel
 from PySide6.QtGui import QDrag
-from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QSizePolicy, QTreeView, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit, QSizePolicy, QTreeView, QVBoxLayout
 
 from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE, PATH_ROLE
 from ..models.translated_fs_model import TranslatedProxyModel
@@ -16,6 +16,7 @@ from ..workspaces import WorkspaceDefinition
 
 
 DRAG_MIME_TYPE = "application/x-smartexplorer-items"
+PANE_DRAG_MIME = "application/x-smartexplorer-pane"
 
 
 class WorkspaceTreeView(QTreeView):
@@ -50,6 +51,74 @@ class WorkspaceTreeView(QTreeView):
             event.ignore()
 
 
+class WorkspaceHeader(QLabel):
+    reorder_requested = Signal(str, str)  # source_id, target_id
+    context_menu_requested = Signal(str, object)
+
+    def __init__(self, pane: "WorkspacePane") -> None:
+        super().__init__(pane)
+        self._pane = pane
+        self._workspace_id = pane.definition.id
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setMargin(4)
+        self.setAlignment(Qt.AlignCenter)
+        self._drag_start_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton and self._drag_start_pos is not None:
+            if (event.pos() - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                self._start_drag()
+                self._drag_start_pos = None
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setCursor(Qt.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self) -> None:
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(PANE_DRAG_MIME, self._workspace_id.encode("utf-8"))
+        drag.setMimeData(mime)
+        self.setCursor(Qt.ClosedHandCursor)
+        drag.exec(Qt.MoveAction)
+        self.setCursor(Qt.OpenHandCursor)
+
+    def dragEnterEvent(self, event):  # type: ignore[override]
+        if event.mimeData().hasFormat(PANE_DRAG_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # type: ignore[override]
+        if event.mimeData().hasFormat(PANE_DRAG_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # type: ignore[override]
+        mime = event.mimeData()
+        if not mime.hasFormat(PANE_DRAG_MIME):
+            event.ignore()
+            return
+        source_id = bytes(mime.data(PANE_DRAG_MIME)).decode("utf-8")
+        if source_id == self._workspace_id:
+            event.ignore()
+            return
+        self.reorder_requested.emit(source_id, self._workspace_id)
+        event.acceptProposedAction()
+
+    def contextMenuEvent(self, event):  # type: ignore[override]
+        self.context_menu_requested.emit(self._workspace_id, event.globalPos())
+
 class WorkspacePane(QFrame):
     """
     Encapsulates a single workspace tree view. Handles local filesystem,
@@ -58,7 +127,9 @@ class WorkspacePane(QFrame):
 
     selection_changed = Signal(str)  # workspace_id
     activated = Signal(str, str)     # workspace_id, path
-    drop_request = Signal(str, dict, str, bool, Optional[str])  # target_workspace, payload, target_path, move, site
+    expanded_path = Signal(str, str)
+    collapsed_path = Signal(str, str)
+    drop_request = Signal(str, dict, str, bool, object)  # target_workspace, payload, target_path, move, site
 
     def __init__(
         self,
@@ -83,9 +154,8 @@ class WorkspacePane(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumSize(220, 220)
 
-        self._title = QLabel(definition.name, self)
-        self._title.setAlignment(Qt.AlignCenter)
-        self._title.setObjectName("workspaceTitle")
+        self.header = WorkspaceHeader(self)
+        self.header.setText(definition.name)
 
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search…")
@@ -98,10 +168,12 @@ class WorkspacePane(QFrame):
         self._view.expanded.connect(lambda _: self._view.resizeColumnToContents(0))
         self._view.doubleClicked.connect(self._on_activated)
         self._view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._view.expanded.connect(self._on_expanded)
+        self._view.collapsed.connect(self._on_collapsed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._title)
+        layout.addWidget(self.header)
         layout.addWidget(self._search)
         layout.addWidget(self._view, 1)
 
@@ -109,6 +181,9 @@ class WorkspacePane(QFrame):
         self._filter_model: Optional[QSortFilterProxyModel] = None
         self._translated_model: Optional[TranslatedProxyModel] = None
         self._root_source_index: Optional[QModelIndex] = None
+        self._root_view_index: Optional[QModelIndex] = None
+        self._suppress_selection_signal = False
+        self._suppress_expand_signal = False
 
         self._build_models()
         self._search.textChanged.connect(self._on_search_text_changed)
@@ -131,20 +206,29 @@ class WorkspacePane(QFrame):
     def root_source_index(self) -> Optional[QModelIndex]:
         return self._root_source_index
 
+    def view_root_index(self) -> QModelIndex:
+        if isinstance(self._root_view_index, QModelIndex) and self._root_view_index.isValid():
+            return self._root_view_index
+        return self._view.rootIndex()
+
     def set_title(self, name: str) -> None:
-        self._title.setText(name)
+        self.header.setText(name)
 
     def set_active(self, active: bool) -> None:
         if active:
             self.setStyleSheet(
-                "#workspaceTitle { font-weight: bold; color: #1a5fb4; }\n"
                 "WorkspacePane { border: 2px solid #1a5fb4; border-radius: 6px; }"
             )
         else:
             self.setStyleSheet(
-                "#workspaceTitle { font-weight: normal; color: palette(text); }\n"
                 "WorkspacePane { border: 1px solid palette(mid); border-radius: 6px; }"
             )
+        self.header.setStyleSheet(
+            "font-weight: bold; color: #1a5fb4;" if active else "font-weight: normal; color: palette(text);"
+        )
+
+    def map_view_to_source(self, index: QModelIndex) -> Optional[QModelIndex]:
+        return self._map_to_source(index)
 
     # --- model setup --------------------------------------------------------
     def _build_models(self) -> None:
@@ -172,8 +256,8 @@ class WorkspacePane(QFrame):
         self._filter_model = proxy
         self._view.setModel(proxy)
         idx = fs_model.index(root) if root else fs_model.index("/")
-        self._root_source_index = idx
-        self._view.setRootIndex(proxy.mapFromSource(idx))
+        view_idx = proxy.mapFromSource(idx)
+        self._set_root_indexes(idx, view_idx)
         for column in range(1, fs_model.columnCount()):
             self._view.setColumnHidden(column, True)
         self._connect_selection()
@@ -194,8 +278,7 @@ class WorkspacePane(QFrame):
         proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self._filter_model = proxy
         self._view.setModel(proxy)
-        self._root_source_index = None
-        self._view.setRootIndex(QModelIndex())
+        self._set_root_indexes(None, QModelIndex())
         self._connect_selection()
 
     def _build_translation_model(self) -> None:
@@ -225,14 +308,16 @@ class WorkspacePane(QFrame):
         self._filter_model = proxy
         self._view.setModel(proxy)
         self._source_model = source
-        base_root = base.root_source_index() if hasattr(base, "root_source_index") else None
-        if isinstance(base_root, QModelIndex) and base_root.isValid():
-            translated_root = translated.mapFromSource(base_root)
+        base_root_source = base.root_source_index() if hasattr(base, "root_source_index") else None
+        base_view_root = base.view_root_index() if hasattr(base, "view_root_index") else QModelIndex()
+        if (not base_root_source or not base_root_source.isValid()) and isinstance(base_view_root, QModelIndex) and base_view_root.isValid():
+            base_root_source = base.map_view_to_source(base_view_root)
+        if isinstance(base_root_source, QModelIndex) and base_root_source.isValid():
+            translated_root = translated.mapFromSource(base_root_source)
+            view_root = proxy.mapFromSource(translated_root)
+            self._set_root_indexes(base_root_source, view_root)
         else:
-            translated_root = translated.index(0, 0)
-        self._root_source_index = base_root
-        view_root = proxy.mapFromSource(translated_root) if translated_root.isValid() else proxy.index(0, 0)
-        self._view.setRootIndex(view_root)
+            self._set_root_indexes(None, QModelIndex())
         self._connect_selection()
 
     # --- interactions -------------------------------------------------------
@@ -310,7 +395,28 @@ class WorkspacePane(QFrame):
     def _connect_selection(self) -> None:
         sel_model = self._view.selectionModel()
         if sel_model:
-            sel_model.selectionChanged.connect(lambda *_: self.selection_changed.emit(self.definition.id))
+            sel_model.selectionChanged.connect(self._on_selection_changed)
+
+    def _on_selection_changed(self, *_args) -> None:
+        if self._suppress_selection_signal:
+            return
+        self.selection_changed.emit(self.definition.id)
+
+    def _on_expanded(self, index: QModelIndex) -> None:
+        if self._suppress_expand_signal:
+            return
+        src_idx = self._map_to_source(index)
+        path = self._path_for_source_index(src_idx)
+        if path:
+            self.expanded_path.emit(self.definition.id, path)
+
+    def _on_collapsed(self, index: QModelIndex) -> None:
+        if self._suppress_expand_signal:
+            return
+        src_idx = self._map_to_source(index)
+        path = self._path_for_source_index(src_idx)
+        if path:
+            self.collapsed_path.emit(self.definition.id, path)
 
     def _on_activated(self, index: QModelIndex) -> None:
         path = None
@@ -332,6 +438,143 @@ class WorkspacePane(QFrame):
         if self._translated_model and idx.model() is self._translated_model:
             idx = self._translated_model.mapToSource(idx)
         return idx
+
+    def _map_source_to_view(self, source_idx: Optional[QModelIndex]) -> QModelIndex:
+        if not isinstance(source_idx, QModelIndex) or not source_idx.isValid():
+            return QModelIndex()
+        idx = source_idx
+        if self._translated_model:
+            idx = self._translated_model.mapFromSource(idx)
+        if self._filter_model:
+            idx = self._filter_model.mapFromSource(idx)
+        return idx
+
+    def current_source_indexes(self) -> List[QModelIndex]:
+        indexes: List[QModelIndex] = []
+        sel_model = self._view.selectionModel()
+        if not sel_model:
+            return indexes
+        for idx in sel_model.selectedIndexes():
+            if idx.column() != 0:
+                continue
+            src_idx = self._map_to_source(idx)
+            if src_idx and src_idx.isValid():
+                indexes.append(src_idx)
+        return indexes
+
+    def path_for_source_index(self, source_idx: Optional[QModelIndex]) -> str:
+        return self._path_for_source_index(source_idx)
+
+    def select_paths(self, paths: List[str]) -> None:
+        source_indexes = [self.source_index_for_path(p) for p in paths if p]
+        source_indexes = [idx for idx in source_indexes if idx and idx.isValid()]
+        self.select_source_indexes(source_indexes)
+
+    def select_source_indexes(self, source_indexes: List[QModelIndex]) -> None:
+        sel_model = self._view.selectionModel()
+        if not sel_model:
+            return
+        self._suppress_selection_signal = True
+        try:
+            sel_model.clearSelection()
+            last_view = QModelIndex()
+            for src in source_indexes:
+                view_idx = self._map_source_to_view(src)
+                if view_idx and view_idx.isValid():
+                    sel_model.select(view_idx, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+                    last_view = view_idx
+            if last_view and last_view.isValid():
+                self._view.scrollTo(last_view)
+        finally:
+            self._suppress_selection_signal = False
+
+    def expand_path(self, path: str) -> None:
+        src_idx = self.source_index_for_path(path)
+        view_idx = self._map_source_to_view(src_idx)
+        if view_idx and view_idx.isValid():
+            self._suppress_expand_signal = True
+            self._view.expand(view_idx)
+            self._suppress_expand_signal = False
+
+    def collapse_path(self, path: str) -> None:
+        src_idx = self.source_index_for_path(path)
+        view_idx = self._map_source_to_view(src_idx)
+        if view_idx and view_idx.isValid():
+            self._suppress_expand_signal = True
+            self._view.collapse(view_idx)
+            self._suppress_expand_signal = False
+
+    def set_root_to_path(self, path: str) -> None:
+        src_idx = self.source_index_for_path(path)
+        view_idx = self._map_source_to_view(src_idx)
+        self._set_root_indexes(src_idx if src_idx and src_idx.isValid() else None, view_idx)
+
+    def source_index_for_path(self, path: str) -> Optional[QModelIndex]:
+        if not path:
+            return None
+        if hasattr(self._source_model, "filePath"):
+            try:
+                return self._source_model.index(path)  # type: ignore[attr-defined]
+            except Exception:
+                return None
+        if isinstance(self._source_model, SharePointTreeModel):
+            return self._source_model.index_for_path(path)
+        if self._translated_model and self.definition.base_workspace_id:
+            base = self._base_panes.get(self.definition.base_workspace_id)
+            if base:
+                return base.source_index_for_path(path)
+        return None
+
+    def _path_for_source_index(self, source_idx: Optional[QModelIndex]) -> str:
+        if isinstance(source_idx, QModelIndex) and source_idx.isValid():
+            model = source_idx.model()
+            if hasattr(model, "filePath"):
+                try:
+                    return model.filePath(source_idx)  # type: ignore[attr-defined]
+                except Exception:
+                    return ""
+            value = model.data(source_idx, PATH_ROLE)
+            return value or ""
+        if self.definition.kind == "local":
+            return self.definition.root_path or ""
+        if self.definition.kind == "sharepoint":
+            return self.definition.server_relative_url or ""
+        if self.definition.kind == "translation" and self.definition.base_workspace_id:
+            base = self._base_panes.get(self.definition.base_workspace_id)
+            if base:
+                return base._path_for_source_index(base.root_source_index())
+        return ""
+
+    def snapshot_state(self) -> dict:
+        state: dict = {}
+        root_idx = self.root_source_index()
+        root_path = self._path_for_source_index(root_idx)
+        if root_path:
+            state["root_path"] = root_path
+        selection = [self._path_for_source_index(idx) for idx in self.current_source_indexes()]
+        selection = [p for p in selection if p]
+        if selection:
+            state["selection"] = selection
+        return state
+
+    def restore_state(self, state: dict) -> None:
+        if not state:
+            return
+        root_path = state.get("root_path")
+        if root_path:
+            self.set_root_to_path(root_path)
+        selection = state.get("selection") or []
+        if selection:
+            self.select_paths(selection)
+
+    def _set_root_indexes(self, source_idx: Optional[QModelIndex], view_idx: QModelIndex) -> None:
+        if isinstance(source_idx, QModelIndex) and not source_idx.isValid():
+            source_idx = None
+        self._root_source_index = source_idx
+        if not isinstance(view_idx, QModelIndex) or not view_idx.isValid():
+            view_idx = QModelIndex()
+        self._root_view_index = view_idx
+        self._view.setRootIndex(view_idx)
 
     # --- drag/drop ----------------------------------------------------------
     def _start_drag(self, supported_actions: Qt.DropAction) -> None:

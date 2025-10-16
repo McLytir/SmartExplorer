@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Optional
+from urllib.parse import unquote
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
@@ -113,3 +114,36 @@ class SharePointTreeModel(QAbstractItemModel):
         except Exception:
             item.children = []
             item.loaded = True
+
+    def index_for_path(self, server_relative_url: str) -> Optional[QModelIndex]:
+        path = (server_relative_url or "").strip()
+        if not path:
+            return QModelIndex()
+        if not path.startswith("/"):
+            path = "/" + path
+        target = path.rstrip("/")
+        root_path = (self.root.path or "").rstrip("/")
+        if target == root_path:
+            return QModelIndex()
+        if not target.startswith(root_path):
+            return None
+        rel = target[len(root_path):].lstrip("/")
+        if not rel:
+            return QModelIndex()
+        segments = rel.split("/")
+        parent_item = self.root
+        parent_index = QModelIndex()
+        for seg in segments:
+            self._load_children(parent_item)
+            match = None
+            for child in parent_item.children:
+                child_name = child.path.rstrip("/").split("/")[-1]
+                if child_name == seg or unquote(child_name) == seg:
+                    match = child
+                    break
+            if not match:
+                return None
+            row = parent_item.children.index(match)
+            parent_index = self.createIndex(row, 0, match)
+            parent_item = match
+        return parent_index

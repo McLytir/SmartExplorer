@@ -6,13 +6,14 @@ import sys
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QInputDialog,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QSplitter,
     QToolBar,
     QWidget,
@@ -51,6 +52,8 @@ class MainWindow(QMainWindow):
         self._workspace_panes: Dict[str, WorkspacePane] = {}
         self._active_workspace_id: Optional[str] = None
         self._clipboard: Dict[str, dict] = {}  # workspace_id -> clipboard payload
+        self._selection_sync_block: set[str] = set()
+        self._shortcuts: List[QShortcut] = []
 
         self._container = QWidget(self)
         self._container_layout = QVBoxLayout(self._container)
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
 
         self._rebuild_workspace_area()
         self.statusBar().showMessage("Ready")
+        self._setup_shortcuts()
 
     # ------------------------------------------------------------------ UI --
     def _build_toolbar(self) -> QToolBar:
@@ -142,7 +146,19 @@ class MainWindow(QMainWindow):
         return tb
 
     # ------------------------------------------------------------- workspaces
+    def _setup_shortcuts(self) -> None:
+        for seq, offset in (("Ctrl+Shift+Left", -1), ("Ctrl+Shift+Right", 1), ("Ctrl+Shift+Up", -1), ("Ctrl+Shift+Down", 1)):
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.activated.connect(lambda checked=False, o=offset: self._move_active_workspace(o))
+            self._shortcuts.append(shortcut)
+
     def _rebuild_workspace_area(self, focus_workspace_id: Optional[str] = None) -> None:
+        # Capture state before rebuilding
+        prev_states: Dict[str, dict] = {
+            wid: pane.snapshot_state()
+            for wid, pane in self._workspace_panes.items()
+        }
+
         # Remove existing widgets
         for pane in self._workspace_panes.values():
             pane.setParent(None)
@@ -195,6 +211,10 @@ class MainWindow(QMainWindow):
         target_focus = focus_workspace_id or self._active_workspace_id or (panes_in_order[0].id if panes_in_order else None)
         self._focus_workspace(target_focus)
 
+        # Restore state where possible
+        for wid, pane in self._workspace_panes.items():
+            pane.restore_state(prev_states.get(wid, {}))
+
     def _build_splitter_layout(self, panes: List[WorkspacePane]) -> QSplitter:
         count = len(panes)
         if count <= 1:
@@ -243,6 +263,94 @@ class MainWindow(QMainWindow):
         else:
             self._active_workspace_id = None
 
+    def _translation_dependents(self, base_workspace_id: str) -> List[WorkspacePane]:
+        return [
+            pane
+            for pane in self._workspace_panes.values()
+            if pane.definition.kind == "translation" and pane.definition.base_workspace_id == base_workspace_id
+        ]
+
+    def _move_active_workspace(self, offset: int) -> None:
+        if not self._active_workspace_id or offset == 0:
+            return
+        self._workspace_manager.move_by_offset(self._active_workspace_id, offset)
+        self._persist_workspaces()
+        self._rebuild_workspace_area(focus_workspace_id=self._active_workspace_id)
+
+    def _convert_workspace_to_local(self, definition: WorkspaceDefinition) -> None:
+        dependents = self._translation_dependents(definition.id)
+        if definition.kind == "translation" and dependents:
+            QMessageBox.warning(self, "Workspace", "Cannot convert a translation workspace that has dependents.")
+            return
+        path = QFileDialog.getExistingDirectory(self, "Choose local folder", definition.root_path or os.path.expanduser("~"))
+        if not path:
+            return
+        definition.kind = "local"
+        definition.root_path = path
+        definition.site_relative_url = None
+        definition.server_relative_url = None
+        definition.base_workspace_id = None
+        definition.language = None
+        definition.name = os.path.basename(path) or "Local"
+        self._workspace_manager.update(definition)
+        self._persist_workspaces()
+        self._rebuild_workspace_area(focus_workspace_id=definition.id)
+
+    def _convert_workspace_to_sharepoint(self, definition: WorkspaceDefinition) -> None:
+        dependents = self._translation_dependents(definition.id)
+        if definition.kind == "translation" and dependents:
+            QMessageBox.warning(self, "Workspace", "Cannot convert a translation workspace that has dependents.")
+            return
+        dlg = SharePointSelectorDialog(self._backend, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selection = dlg.selected()
+        if not selection:
+            QMessageBox.warning(self, "SharePoint", "Please choose a library with a valid server path.")
+            return
+        definition.kind = "sharepoint"
+        definition.root_path = None
+        definition.site_relative_url = selection.get("site_relative_url")
+        definition.server_relative_url = selection.get("server_relative_url")
+        definition.base_workspace_id = None
+        definition.language = None
+        definition.name = f"{selection.get('site_title', 'SharePoint')} - {selection.get('library_title', 'Library')}"
+        self._workspace_manager.update(definition)
+        self._persist_workspaces()
+        self._rebuild_workspace_area(focus_workspace_id=definition.id)
+
+    def _convert_workspace_to_translation(self, definition: WorkspaceDefinition) -> None:
+        if definition.kind != "translation" and self._translation_dependents(definition.id):
+            QMessageBox.warning(self, "Workspace", "Cannot convert a workspace that other translations depend on.")
+            return
+        base_options = [
+            (ws.id, ws.name)
+            for ws in self._workspace_manager.definitions()
+            if ws.id != definition.id and ws.kind in ("local", "sharepoint")
+        ]
+        if not base_options:
+            QMessageBox.information(self, "Translation", "Create a local or SharePoint workspace first.")
+            return
+        dlg = TranslationWorkspaceDialog(base_options, self._cfg.target_language or "English", self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        base_id = dlg.base_workspace_id
+        language = dlg.language
+        if base_id == definition.id:
+            QMessageBox.warning(self, "Translation", "A workspace cannot translate itself.")
+            return
+        definition.kind = "translation"
+        definition.base_workspace_id = base_id
+        definition.language = language
+        definition.root_path = None
+        definition.site_relative_url = None
+        definition.server_relative_url = None
+        base_name = dict(base_options).get(base_id, "Workspace")
+        definition.name = f"{base_name} ({language})"
+        self._workspace_manager.update(definition)
+        self._persist_workspaces()
+        self._rebuild_workspace_area(focus_workspace_id=definition.id)
+
     def _create_workspace_pane(self, definition: WorkspaceDefinition, base_panes: Dict[str, WorkspacePane]) -> WorkspacePane:
         pane = WorkspacePane(
             definition,
@@ -252,11 +360,49 @@ class MainWindow(QMainWindow):
             ignore_patterns=self._ignore_patterns,
             base_panes=base_panes,
         )
-        pane.selection_changed.connect(self._on_workspace_selection_changed)
         pane.activated.connect(self._on_workspace_item_activated)
         pane.drop_request.connect(self._on_workspace_drop_request)
+        self._register_workspace_signals(pane)
         self._attach_context_menu(pane)
         return pane
+
+    def _register_workspace_signals(self, pane: WorkspacePane) -> None:
+        pane.selection_changed.connect(self._on_workspace_selection_changed)
+        pane.expanded_path.connect(self._on_workspace_expanded)
+        pane.collapsed_path.connect(self._on_workspace_collapsed)
+        if hasattr(pane, "header"):
+            pane.header.reorder_requested.connect(self._on_header_reorder)
+            pane.header.context_menu_requested.connect(self._on_header_context_menu)
+
+    def _mirror_selection(self, workspace_id: str) -> None:
+        base_pane = self._workspace_panes.get(workspace_id)
+        if not base_pane or base_pane.definition.kind == "translation":
+            return
+        dependents = self._translation_dependents(workspace_id)
+        if not dependents:
+            return
+        if workspace_id in self._selection_sync_block:
+            return
+        self._selection_sync_block.add(workspace_id)
+        try:
+            source_indexes = base_pane.current_source_indexes()
+            paths: List[str] = []
+            for idx in source_indexes:
+                path = base_pane.path_for_source_index(idx)
+                if path:
+                    paths.append(path)
+            for pane in dependents:
+                pane.select_paths(paths)
+        finally:
+            self._selection_sync_block.discard(workspace_id)
+
+    def _on_workspace_expanded(self, workspace_id: str, path: str) -> None:
+        for pane in self._translation_dependents(workspace_id):
+            pane.expand_path(path)
+
+    def _on_workspace_collapsed(self, workspace_id: str, path: str) -> None:
+        for pane in self._translation_dependents(workspace_id):
+            pane.collapse_path(path)
 
     def _attach_context_menu(self, pane: WorkspacePane) -> None:
         menu_actions = {
@@ -291,6 +437,42 @@ class MainWindow(QMainWindow):
             # translation panes do not accept drops; ignore
             return
 
+    def _on_header_reorder(self, source_id: str, target_id: Optional[str]) -> None:
+        if source_id == target_id:
+            return
+        self._workspace_manager.reorder_before(source_id, target_id or None)
+        self._persist_workspaces()
+        self._rebuild_workspace_area(focus_workspace_id=source_id)
+
+    def _on_header_context_menu(self, workspace_id: str, global_pos) -> None:
+        pane = self._workspace_panes.get(workspace_id)
+        definition = self._workspace_manager.get(workspace_id)
+        if not pane or not definition:
+            return
+        menu = QMenu(self)
+        local_action = menu.addAction("Switch to Local…")
+        sharepoint_action = menu.addAction("Switch to SharePoint…")
+        translation_label = "Configure Translation…" if definition.kind == "translation" else "Switch to Translation…"
+        translation_action = menu.addAction(translation_label)
+        if definition.kind == "local":
+            local_action.setEnabled(False)
+        if definition.kind == "sharepoint":
+            sharepoint_action.setEnabled(False)
+        if definition.kind != "translation" and not any(ws.kind in ("local", "sharepoint") and ws.id != workspace_id for ws in self._workspace_manager.definitions()):
+            translation_action.setEnabled(False)
+        if definition.kind != "translation" and self._translation_dependents(definition.id):
+            translation_action.setEnabled(False)
+
+        action = menu.exec(global_pos)
+        if not action:
+            return
+        if action is local_action:
+            self._convert_workspace_to_local(definition)
+        elif action is sharepoint_action:
+            self._convert_workspace_to_sharepoint(definition)
+        elif action is translation_action:
+            self._convert_workspace_to_translation(definition)
+
     # ------------------------------------------------------------- workspace ops
     def _on_workspace_selection_changed(self, workspace_id: str) -> None:
         self._focus_workspace(workspace_id)
@@ -299,6 +481,7 @@ class MainWindow(QMainWindow):
             return
         selected = pane.current_items()
         self.statusBar().showMessage(f"{pane.definition.name}: {len(selected)} selected")
+        self._mirror_selection(workspace_id)
 
     def _on_workspace_item_activated(self, workspace_id: str, path: str) -> None:
         self.statusBar().showMessage(f"Opened: {path}", 4000)

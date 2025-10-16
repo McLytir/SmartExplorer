@@ -23,18 +23,10 @@
       "auto_sync": true
     },
     {
-      "id": "ws-sp",
-      "kind": "sharepoint",
-      "name": "Peak Energy - All - Documents",
-      "site_relative_url": "/sites/PeakEnergy-All",
-      "server_relative_url": "/sites/PeakEnergy-All/Shared Documents",
-      "auto_sync": true
-    },
-    {
-      "id": "ws-tr",
+      "id": "ws-tr-3",
       "kind": "translation",
-      "name": "Peak Energy - All - Documents (English)",
-      "base_workspace_id": "ws-sp",
+      "name": "Local (English)",
+      "base_workspace_id": "ws-local",
       "language": "English",
       "auto_sync": true
     }
