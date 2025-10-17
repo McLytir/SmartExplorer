@@ -115,6 +115,19 @@ class SharePointTreeModel(QAbstractItemModel):
             item.children = []
             item.loaded = True
 
+    def set_root_path(self, server_relative_url: str) -> None:
+        path = (server_relative_url or self.root.path or "/").strip()
+        if not path.startswith("/"):
+            path = "/" + path
+        self.beginResetModel()
+        self.root = SPItem(
+            name=path.rstrip("/").rsplit('/', 1)[-1] or path,
+            path=path,
+            is_dir=True,
+        )
+        self.root.loaded = False
+        self.endResetModel()
+
     def index_for_path(self, server_relative_url: str) -> Optional[QModelIndex]:
         path = (server_relative_url or "").strip()
         if not path:

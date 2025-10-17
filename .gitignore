@@ -32,3 +32,8 @@ pids/
 .env
 .env.local
 .venv
+
+#cache
+__pycache__
+
+

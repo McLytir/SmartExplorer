@@ -2,6 +2,7 @@
   "api_key": "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",
   "model": "gpt-4o-mini",
   "target_language": "English",
+  "theme": "dark",
   "root_path": "/home/shalulu",
   "ignore_patterns": [
     ".git",
@@ -18,8 +19,8 @@
     {
       "id": "ws-local",
       "kind": "local",
-      "name": "Local",
-      "root_path": "/home/shalulu",
+      "name": "resources",
+      "root_path": "/home/shalulu/PotreeConverter/build/resources",
       "auto_sync": true
     },
     {
@@ -29,6 +30,47 @@
       "base_workspace_id": "ws-local",
       "language": "English",
       "auto_sync": true
+    },
+    {
+      "id": "ws-tr",
+      "kind": "translation",
+      "name": "shalulu (English)",
+      "base_workspace_id": "ws",
+      "language": "English",
+      "auto_sync": true
+    },
+    {
+      "id": "ws",
+      "kind": "local",
+      "name": "shalulu",
+      "root_path": "/home/shalulu",
+      "auto_sync": true
     }
-  ]
+  ],
+  "favorites": [],
+  "saved_layouts": [
+    {
+      "id": "layout-bc41c1",
+      "name": "Layout 1",
+      "workspaces": [
+        {
+          "id": "ws-local",
+          "kind": "local",
+          "name": "resources",
+          "root_path": "/home/shalulu/PotreeConverter/build/resources",
+          "auto_sync": true
+        },
+        {
+          "id": "ws-tr-3",
+          "kind": "translation",
+          "name": "Local (English)",
+          "base_workspace_id": "ws-local",
+          "language": "English",
+          "auto_sync": true
+        }
+      ]
+    }
+  ],
+  "favorites_bar_position": "left",
+  "favorites_bar_size": 140
 }

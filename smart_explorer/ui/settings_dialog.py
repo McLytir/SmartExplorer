@@ -4,7 +4,7 @@ import webbrowser
 from urllib.parse import urlparse
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget, QMessageBox
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget, QMessageBox, QComboBox
 )
 
 from ..api.backend_client import BackendClient
@@ -50,6 +50,21 @@ class SettingsDialog(QDialog):
         lgx.addWidget(QLabel("Target Language:"))
         lgx.addWidget(self.lang)
         root.addLayout(lgx)
+
+        # Theme selection
+        self.theme_combo = QComboBox(self)
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Solarized Light", "solarized_light")
+        self.theme_combo.addItem("Solarized Dark", "solarized_dark")
+        current_theme = getattr(self.cfg, "theme", "light")
+        index = self.theme_combo.findData(current_theme)
+        if index >= 0:
+            self.theme_combo.setCurrentIndex(index)
+        thx = QHBoxLayout()
+        thx.addWidget(QLabel("Theme:"))
+        thx.addWidget(self.theme_combo)
+        root.addLayout(thx)
 
         # SharePoint base URL
         self.sp_base = QLineEdit(self)
@@ -106,6 +121,7 @@ class SettingsDialog(QDialog):
     def _on_save(self):
         self.cfg.api_key = self.api_key.text().strip() or None
         self.cfg.target_language = self.lang.text().strip() or "English"
+        self.cfg.theme = self.theme_combo.currentData() or "light"
         # Persist backend URL
         try:
             setattr(self.cfg, "backend_url", self.backend_url.text().strip() or None)

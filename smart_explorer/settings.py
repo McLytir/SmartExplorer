@@ -12,6 +12,7 @@ class AppConfig:
     api_key: Optional[str] = None
     model: str = "gpt-4o-mini"
     target_language: str = "English"
+    theme: str = "light"  # "light", "dark", "solarized_light", "solarized_dark"
     root_path: str = os.path.expanduser("~")
     ignore_patterns: list[str] = None  # glob patterns to skip translating
     sp_base_url: Optional[str] = None  # e.g., https://tenant.sharepoint.com/sites/SiteName
@@ -21,6 +22,10 @@ class AppConfig:
     backend_url: Optional[str] = None  # e.g., http://127.0.0.1:5001
     last_source: str = "Local"        # "Local" or "SharePoint"
     workspaces: Optional[list[dict]] = None  # persisted workspace definitions
+    favorites: Optional[list[dict]] = None  # favorite locations
+    saved_layouts: Optional[list[dict]] = None  # saved workspace configurations
+    favorites_bar_position: str = "left"  # left, right, top, bottom
+    favorites_bar_size: int = 200  # pixels
 
 
 def _config_path() -> str:
@@ -46,6 +51,21 @@ def load_config() -> AppConfig:
             ".venv",
             "*.tmp",
         ]
+    if cfg.favorites is None:
+        cfg.favorites = []
+    if cfg.saved_layouts is None:
+        cfg.saved_layouts = []
+    if getattr(cfg, "theme", None) not in {"light", "dark", "solarized_light", "solarized_dark"}:
+        cfg.theme = "light"
+    if cfg.favorites_bar_position not in {"left", "right", "top", "bottom"}:
+        cfg.favorites_bar_position = "left"
+    try:
+        cfg.favorites_bar_size = int(cfg.favorites_bar_size)
+    except Exception:
+        cfg.favorites_bar_size = 200
+    cfg.favorites_bar_size = max(120, min(600, cfg.favorites_bar_size))
+    if cfg.favorites_bar_size == 240:
+        cfg.favorites_bar_size = 200
     # Keep sp_base_url as-is (may be None)
     # Allow env var override for API key
     env_key = os.getenv("OPENAI_API_KEY")

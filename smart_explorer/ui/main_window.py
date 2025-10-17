@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import base64
+import colorsys
 import os
 import sys
-from typing import Dict, List, Optional
+import uuid
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QInputDialog,
     QMainWindow,
+    QLineEdit,
     QMessageBox,
     QMenu,
     QSplitter,
@@ -28,7 +31,18 @@ from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
 from ..translators.base import IdentityTranslator, Translator
 from ..translators.openai_translator import OpenAITranslator
-from ..workspaces import WorkspaceDefinition, WorkspaceManager, ensure_workspaces
+from ..workspaces import (
+    FavoriteLocation,
+    FavoritesManager,
+    LayoutDefinition,
+    LayoutManager,
+    WorkspaceDefinition,
+    WorkspaceManager,
+    ensure_favorites,
+    ensure_layouts,
+    ensure_workspaces,
+)
+from .favorites_panel import FavoritesPanel
 from .settings_dialog import SettingsDialog
 from .sharepoint_selector import SharePointSelectorDialog
 from .translation_dialog import TranslationWorkspaceDialog
@@ -44,6 +58,8 @@ class MainWindow(QMainWindow):
         self._cfg: AppConfig = load_config()
         self._backend = BackendClient(getattr(self._cfg, "backend_url", None) or "http://127.0.0.1:5001")
         self._workspace_manager: WorkspaceManager = ensure_workspaces(self._cfg)
+        self._favorites_manager: FavoritesManager = ensure_favorites(self._cfg)
+        self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
 
         self._translator: Translator = self._create_translator()
         self._translation_cache = TranslationCache()
@@ -51,27 +67,50 @@ class MainWindow(QMainWindow):
 
         self._workspace_panes: Dict[str, WorkspacePane] = {}
         self._active_workspace_id: Optional[str] = None
-        self._clipboard: Dict[str, dict] = {}  # workspace_id -> clipboard payload
+        self._clipboard: Dict[str, dict] = {}
         self._selection_sync_block: set[str] = set()
         self._shortcuts: List[QShortcut] = []
+        self._address_bar: Optional[QLineEdit] = None
+        self._theme_specs = self._build_theme_specs()
+        self._workspace_color_map: Dict[str, str] = {}
+        self._base_color_palette: List[str] = self._theme_base_palette()
 
         self._container = QWidget(self)
         self._container_layout = QVBoxLayout(self._container)
         self._container_layout.setContentsMargins(0, 0, 0, 0)
         self._container_layout.setSpacing(0)
 
-        self._splitter: Optional[QSplitter] = None
         self._toolbar = self._build_toolbar()
         self.addToolBar(Qt.TopToolBarArea, self._toolbar)
 
-        self._workspace_holder = QWidget(self._container)
+        self._workspace_holder = QWidget()
         self._workspace_layout = QVBoxLayout(self._workspace_holder)
         self._workspace_layout.setContentsMargins(0, 0, 0, 0)
         self._workspace_layout.setSpacing(0)
-        self._container_layout.addWidget(self._workspace_holder, 1)
+        self._pane_splitter: Optional[QSplitter] = None
+
+        self._favorites_panel = FavoritesPanel(self)
+        self._favorites_panel.set_position(self._cfg.favorites_bar_position)
+        self._favorites_panel.favorite_selected.connect(self._on_favorite_selected)
+        self._favorites_panel.favorite_add_requested.connect(self._on_add_favorite)
+        self._favorites_panel.favorite_remove_requested.connect(self._on_remove_favorite)
+        self._favorites_panel.favorite_rename_requested.connect(self._on_rename_favorite)
+        self._favorites_panel.favorite_move_requested.connect(self._on_move_favorite)
+        self._favorites_panel.layout_save_requested.connect(self._on_save_layout)
+        self._favorites_panel.layout_apply_requested.connect(self._on_apply_layout)
+        self._favorites_panel.layout_remove_requested.connect(self._on_remove_layout)
+        self._favorites_panel.layout_rename_requested.connect(self._on_rename_layout)
+        self._favorites_panel.layout_move_requested.connect(self._on_move_layout)
+        self._favorites_panel.position_changed.connect(self._change_favorites_position)
+
+        self._main_splitter: Optional[QSplitter] = None
+        self._favorites_index = 0
+        self._updating_splitter = False
+        self._apply_theme()
+        self._arrange_favorites_panel()
 
         self.setCentralWidget(self._container)
-
+        self._refresh_favorites_panel()
         self._rebuild_workspace_area()
         self.statusBar().showMessage("Ready")
         self._setup_shortcuts()
@@ -143,6 +182,15 @@ class MainWindow(QMainWindow):
         settings.triggered.connect(self._open_settings)
         tb.addAction(settings)
 
+        tb.addSeparator()
+
+        self._address_bar = QLineEdit(self)
+        self._address_bar.setPlaceholderText("Path")
+        self._address_bar.setClearButtonEnabled(True)
+        self._address_bar.setMinimumWidth(320)
+        self._address_bar.returnPressed.connect(self._on_address_bar_return)
+        tb.addWidget(self._address_bar)
+
         return tb
 
     # ------------------------------------------------------------- workspaces
@@ -151,6 +199,350 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.activated.connect(lambda checked=False, o=offset: self._move_active_workspace(o))
             self._shortcuts.append(shortcut)
+        for seq, action in (
+            ("Alt+Left", "back"),
+            ("Alt+Right", "forward"),
+            ("Alt+Up", "up"),
+        ):
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.activated.connect(lambda checked=False, a=action: self._navigate_active_pane(a))
+            self._shortcuts.append(shortcut)
+        self._sync_address_bar()
+
+    def _navigate_active_pane(self, action: str) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        if action == "back":
+            pane.navigate_back()
+        elif action == "forward":
+            pane.navigate_forward()
+        elif action == "up":
+            pane.navigate_up()
+
+    def _on_address_bar_return(self) -> None:
+        if not self._address_bar:
+            return
+        pane = self._active_pane()
+        if not pane:
+            return
+        target = self._address_bar.text().strip()
+        if not target:
+            return
+        if not pane.go_to_path(target):
+            QMessageBox.warning(self, "Navigate", f"Unable to open '{target}'.")
+            self._sync_address_bar()
+
+    def _sync_address_bar(self) -> None:
+        if not self._address_bar:
+            return
+        pane = self._active_pane()
+        text = pane.current_path() if pane else ""
+        self._update_address_bar_text(text)
+
+    def _update_address_bar_text(self, text: str) -> None:
+        if not self._address_bar:
+            return
+        blocker = self._address_bar.blockSignals(True)
+        self._address_bar.setText(text)
+        self._address_bar.blockSignals(blocker)
+
+    def _on_workspace_path_changed(self, workspace_id: str, path: str) -> None:
+        if workspace_id == self._active_workspace_id:
+            self._update_address_bar_text(path)
+
+    def _build_theme_specs(self) -> Dict[str, dict]:
+        return {
+            "light": {
+                "palette": {
+                    "Window": "#f5f6fa",
+                    "WindowText": "#1f2b3a",
+                    "Base": "#ffffff",
+                    "AlternateBase": "#f0f3f9",
+                    "ToolTipBase": "#ffffe0",
+                    "ToolTipText": "#1f2b3a",
+                    "Text": "#1f2b3a",
+                    "Button": "#eef1f7",
+                    "ButtonText": "#1f2b3a",
+                    "BrightText": "#ff4c3b",
+                    "Highlight": "#3d6dcc",
+                    "HighlightedText": "#ffffff",
+                    "Link": "#1d5fc1",
+                    "LinkVisited": "#7b4bb7",
+                    "PlaceholderText": "#8b97ab",
+                    "Mid": "#c7d0de",
+                    "Midlight": "#dde4f0",
+                    "Shadow": "#a5afc3",
+                    "Dark": "#b4bed0",
+                    "DisabledText": "#aeb8c6",
+                },
+                "stylesheet": """
+QToolBar { background-color: #edf1fb; border: none; spacing: 6px; }
+QLineEdit, QTextEdit, QListWidget, QComboBox, QTreeView {
+    background-color: #ffffff;
+    color: #1f2b3a;
+    border: 1px solid #cbd5e3;
+    selection-background-color: #3d6dcc;
+    selection-color: #ffffff;
+}
+QTreeView {
+    alternate-background-color: #f0f3f9;
+}
+QLabel { color: #1f2b3a; }
+""",
+                "base_colors": [
+                    "#dde7ff",
+                    "#ffe4c1",
+                    "#dff2e3",
+                    "#e6dbff",
+                    "#ffd9e8",
+                    "#d9f1f7",
+                ],
+                "translation_adjust": {"dh": 0.04, "dl": -0.05, "ds": 0.0},
+                "active_adjust": {"dl": -0.07, "ds": 0.0},
+            },
+            "dark": {
+                "palette": {
+                    "Window": "#25292e",
+                    "WindowText": "#e8e8e8",
+                    "Base": "#1e2226",
+                    "AlternateBase": "#2a3036",
+                    "ToolTipBase": "#363c44",
+                    "ToolTipText": "#f0f0f0",
+                    "Text": "#e8e8e8",
+                    "Button": "#2d3239",
+                    "ButtonText": "#e8e8e8",
+                    "BrightText": "#ff735c",
+                    "Highlight": "#4669aa",
+                    "HighlightedText": "#ffffff",
+                    "Link": "#7aa7ff",
+                    "LinkVisited": "#98b7ff",
+                    "PlaceholderText": "#9aa4b0",
+                    "Mid": "#3b4149",
+                    "Midlight": "#434a52",
+                    "Shadow": "#16181c",
+                    "Dark": "#1a1c1f",
+                    "DisabledText": "#6f7985",
+                },
+                "stylesheet": """
+QToolBar { background-color: #2d3239; border: none; spacing: 6px; }
+QLineEdit, QTextEdit, QListWidget, QComboBox, QTreeView {
+    background-color: #1e2226;
+    color: #e8e8e8;
+    border: 1px solid #474f5a;
+    selection-background-color: #4669aa;
+    selection-color: #ffffff;
+}
+QTreeView {
+    alternate-background-color: #2a3036;
+}
+QLabel { color: #e8e8e8; }
+""",
+                "base_colors": [
+                    "#425472",
+                    "#6c4c7d",
+                    "#4a6f59",
+                    "#7a5a4a",
+                    "#586b7f",
+                    "#5a627d",
+                ],
+                "translation_adjust": {"dh": 0.05, "dl": 0.06, "ds": 0.02},
+                "active_adjust": {"dl": 0.08, "ds": 0.0},
+            },
+            "solarized_light": {
+                "palette": {
+                    "Window": "#fdf6e3",
+                    "WindowText": "#586e75",
+                    "Base": "#fffdf5",
+                    "AlternateBase": "#f3e6c6",
+                    "ToolTipBase": "#fef9dd",
+                    "ToolTipText": "#586e75",
+                    "Text": "#586e75",
+                    "Button": "#f2e6c5",
+                    "ButtonText": "#586e75",
+                    "BrightText": "#d33682",
+                    "Highlight": "#268bd2",
+                    "HighlightedText": "#fdf6e3",
+                    "Link": "#2aa198",
+                    "LinkVisited": "#6c71c4",
+                    "PlaceholderText": "#8a9aa2",
+                    "Mid": "#c7b99b",
+                    "Midlight": "#e6d7b4",
+                    "Shadow": "#b6a67d",
+                    "Dark": "#b3a373",
+                    "DisabledText": "#a8afaa",
+                },
+                "stylesheet": """
+QToolBar { background-color: #f2e7c7; border: none; spacing: 6px; }
+QLineEdit, QTextEdit, QListWidget, QComboBox, QTreeView {
+    background-color: #fffdf5;
+    color: #586e75;
+    border: 1px solid #d3c7a0;
+    selection-background-color: #268bd2;
+    selection-color: #fdf6e3;
+}
+QTreeView {
+    alternate-background-color: #f6edd0;
+}
+QLabel { color: #586e75; }
+""",
+                "base_colors": [
+                    "#d7e8f2",
+                    "#f0ddb2",
+                    "#dcefe3",
+                    "#ede1f4",
+                    "#f8d9c6",
+                    "#e3ecda",
+                ],
+                "translation_adjust": {"dh": 0.03, "dl": -0.04, "ds": 0.0},
+                "active_adjust": {"dl": -0.06, "ds": 0.0},
+            },
+            "solarized_dark": {
+                "palette": {
+                    "Window": "#002b36",
+                    "WindowText": "#eee8d5",
+                    "Base": "#073642",
+                    "AlternateBase": "#0c3a46",
+                    "ToolTipBase": "#004051",
+                    "ToolTipText": "#eee8d5",
+                    "Text": "#eee8d5",
+                    "Button": "#0c3a46",
+                    "ButtonText": "#eee8d5",
+                    "BrightText": "#cb4b16",
+                    "Highlight": "#268bd2",
+                    "HighlightedText": "#fdf6e3",
+                    "Link": "#2aa198",
+                    "LinkVisited": "#6c71c4",
+                    "PlaceholderText": "#93a1a1",
+                    "Mid": "#0f4a54",
+                    "Midlight": "#165660",
+                    "Shadow": "#001f27",
+                    "Dark": "#00242d",
+                    "DisabledText": "#68767a",
+                },
+                "stylesheet": """
+QToolBar { background-color: #073642; border: none; spacing: 6px; }
+QLineEdit, QTextEdit, QListWidget, QComboBox, QTreeView {
+    background-color: #002b36;
+    color: #eee8d5;
+    border: 1px solid #586e75;
+    selection-background-color: #268bd2;
+    selection-color: #fdf6e3;
+}
+QTreeView {
+    alternate-background-color: #073642;
+}
+QLabel { color: #eee8d5; }
+""",
+                "base_colors": [
+                    "#2f4550",
+                    "#5c3f3f",
+                    "#2d5047",
+                    "#403d63",
+                    "#5b4c2f",
+                    "#2f5761",
+                ],
+                "translation_adjust": {"dh": 0.03, "dl": 0.06, "ds": 0.02},
+                "active_adjust": {"dl": 0.08, "ds": 0.0},
+            },
+        }
+
+    def _apply_palette_colors(self, palette: QPalette, colors: Dict[str, str]) -> None:
+        role_map = {
+            "Window": QPalette.Window,
+            "WindowText": QPalette.WindowText,
+            "Base": QPalette.Base,
+            "AlternateBase": QPalette.AlternateBase,
+            "ToolTipBase": QPalette.ToolTipBase,
+            "ToolTipText": QPalette.ToolTipText,
+            "Text": QPalette.Text,
+            "Button": QPalette.Button,
+            "ButtonText": QPalette.ButtonText,
+            "BrightText": QPalette.BrightText,
+            "Highlight": QPalette.Highlight,
+            "HighlightedText": QPalette.HighlightedText,
+            "Link": QPalette.Link,
+            "LinkVisited": QPalette.LinkVisited,
+            "PlaceholderText": QPalette.PlaceholderText,
+            "Mid": QPalette.Mid,
+            "Midlight": QPalette.Midlight,
+            "Shadow": QPalette.Shadow,
+            "Dark": QPalette.Dark,
+        }
+
+        for name, value in colors.items():
+            if name == "DisabledText":
+                qcolor = QColor(value)
+                palette.setColor(QPalette.Disabled, QPalette.Text, qcolor)
+                palette.setColor(QPalette.Disabled, QPalette.ButtonText, qcolor)
+                palette.setColor(QPalette.Disabled, QPalette.WindowText, qcolor)
+                palette.setColor(QPalette.Disabled, QPalette.PlaceholderText, qcolor)
+                continue
+
+            role = role_map.get(name)
+            if role is None:
+                continue
+            qcolor = QColor(value)
+
+            if role == QPalette.PlaceholderText:
+                for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+                    palette.setColor(group, role, qcolor)
+                continue
+
+            for group in (QPalette.Active, QPalette.Inactive):
+                palette.setColor(group, role, qcolor)
+
+            if role in (QPalette.Text, QPalette.ButtonText, QPalette.WindowText):
+                palette.setColor(QPalette.Disabled, role, QColor(value).lighter(150))
+            elif role == QPalette.Highlight:
+                palette.setColor(QPalette.Disabled, role, QColor(value).darker(170))
+            elif role == QPalette.HighlightedText:
+                palette.setColor(QPalette.Disabled, role, QColor(value).lighter(140))
+            elif role == QPalette.Base:
+                palette.setColor(QPalette.Disabled, role, QColor(value).darker(120))
+            else:
+                palette.setColor(QPalette.Disabled, role, qcolor)
+
+    def _theme_spec(self, theme: Optional[str] = None) -> Dict[str, dict]:
+        key = theme or getattr(self._cfg, "theme", "light")
+        return self._theme_specs.get(key, self._theme_specs["light"])
+
+    def _apply_theme(self) -> None:
+        app = QApplication.instance()
+        if not app:
+            return
+        spec = self._theme_spec()
+        palette = QPalette()
+        self._apply_palette_colors(palette, spec.get("palette", {}))
+        app.setPalette(palette)
+        stylesheet = spec.get("stylesheet")
+        if stylesheet:
+            app.setStyleSheet(stylesheet)
+        else:
+            app.setStyleSheet("")
+
+        self._base_color_palette = list(spec.get("base_colors", []))
+        self._workspace_color_map = {}
+
+        if hasattr(self, "_container") and self._container is not None:
+            self._container.setStyleSheet("background-color: palette(Window);")
+        if hasattr(self, "_workspace_holder") and self._workspace_holder is not None:
+            self._workspace_holder.setStyleSheet("background-color: palette(Window);")
+        if hasattr(self, "_favorites_panel") and self._favorites_panel is not None:
+            self._favorites_panel.setStyleSheet("background-color: palette(Base);")
+
+        if hasattr(self, "_workspace_manager"):
+            for definition in self._workspace_manager.definitions():
+                header_color, active_color = self._header_colors_for(definition)
+                pane = self._workspace_panes.get(definition.id)
+                if not pane:
+                    continue
+                pane.update_header_palette(header_color, active_color)
+                pane.set_active(definition.id == self._active_workspace_id)
+
+    def _theme_base_palette(self) -> List[str]:
+        spec = self._theme_spec()
+        return list(spec.get("base_colors", []))
 
     def _rebuild_workspace_area(self, focus_workspace_id: Optional[str] = None) -> None:
         # Capture state before rebuilding
@@ -201,19 +593,20 @@ class MainWindow(QMainWindow):
             self._rebuild_workspace_area(focus_workspace_id=default_ws.id)
             return
 
-        if self._splitter:
-            self._workspace_layout.removeWidget(self._splitter)
-            self._splitter.deleteLater()
+        if self._pane_splitter:
+            self._workspace_layout.removeWidget(self._pane_splitter)
+            self._pane_splitter.deleteLater()
 
-        self._splitter = self._build_splitter_layout(panes_in_order)
-        self._normalize_splitter(self._splitter)
-        self._workspace_layout.addWidget(self._splitter, 1)
+        self._pane_splitter = self._build_splitter_layout(panes_in_order)
+        self._normalize_splitter(self._pane_splitter)
+        self._workspace_layout.addWidget(self._pane_splitter, 1)
         target_focus = focus_workspace_id or self._active_workspace_id or (panes_in_order[0].id if panes_in_order else None)
         self._focus_workspace(target_focus)
 
         # Restore state where possible
         for wid, pane in self._workspace_panes.items():
             pane.restore_state(prev_states.get(wid, {}))
+        self._sync_address_bar()
 
     def _build_splitter_layout(self, panes: List[WorkspacePane]) -> QSplitter:
         count = len(panes)
@@ -262,6 +655,7 @@ class MainWindow(QMainWindow):
             self._active_workspace_id = workspace_id
         else:
             self._active_workspace_id = None
+        self._sync_address_bar()
 
     def _translation_dependents(self, base_workspace_id: str) -> List[WorkspacePane]:
         return [
@@ -270,11 +664,265 @@ class MainWindow(QMainWindow):
             if pane.definition.kind == "translation" and pane.definition.base_workspace_id == base_workspace_id
         ]
 
+    def _arrange_favorites_panel(self) -> None:
+        if self._main_splitter is not None:
+            try:
+                self._main_splitter.splitterMoved.disconnect(self._on_favorites_splitter_moved)
+            except Exception:
+                pass
+            self._main_splitter.setParent(None)
+            self._main_splitter.deleteLater()
+        position = getattr(self._cfg, "favorites_bar_position", "left") or "left"
+        self._favorites_panel.set_position(position)
+        orientation = Qt.Horizontal if position in {"left", "right"} else Qt.Vertical
+        splitter = QSplitter(orientation, self)
+        self._main_splitter = splitter
+        if position in {"left", "top"}:
+            splitter.addWidget(self._favorites_panel)
+            splitter.addWidget(self._workspace_holder)
+            self._favorites_index = 0
+        else:
+            splitter.addWidget(self._workspace_holder)
+            splitter.addWidget(self._favorites_panel)
+            self._favorites_index = 1
+        splitter.splitterMoved.connect(self._on_favorites_splitter_moved)
+
+        # Replace existing widgets in container layout
+        while self._container_layout.count():
+            item = self._container_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self._container_layout.addWidget(splitter, 1)
+        self._update_splitter_sizes()
+
+    def _update_splitter_sizes(self) -> None:
+        if not self._main_splitter:
+            return
+        if self._updating_splitter:
+            return
+        orientation = self._main_splitter.orientation()
+        fav_size = getattr(self._cfg, "favorites_bar_size", 240)
+        fav_size = max(120, min(600, fav_size))
+        self._updating_splitter = True
+        try:
+            if orientation == Qt.Horizontal:
+                other = max(200, self.width() - fav_size)
+            else:
+                other = max(200, self.height() - fav_size)
+            if self._favorites_index == 0:
+                sizes = [fav_size, other]
+            else:
+                sizes = [other, fav_size]
+            self._main_splitter.setSizes(sizes)
+        finally:
+            self._updating_splitter = False
+
+    def _on_favorites_splitter_moved(self, pos: int, index: int) -> None:
+        if self._updating_splitter:
+            return
+        if not self._main_splitter:
+            return
+        sizes = self._main_splitter.sizes()
+        if not sizes:
+            return
+        fav_size = sizes[self._favorites_index if self._favorites_index < len(sizes) else 0]
+        self._cfg.favorites_bar_size = fav_size
+        self._persist_state(save_workspaces=False)
+
+    def _change_favorites_position(self, position: str) -> None:
+        if position not in {"left", "right", "top", "bottom"}:
+            return
+        if position == self._cfg.favorites_bar_position:
+            return
+        self._cfg.favorites_bar_position = position
+        self._favorites_panel.set_position(position)
+        self._arrange_favorites_panel()
+        self._persist_state(save_workspaces=False)
+
+    def _refresh_favorites_panel(self) -> None:
+        self._favorites_panel.set_favorites([fav.to_config() for fav in self._favorites_manager.all()])
+        self._favorites_panel.set_layouts([layout.to_config() for layout in self._layouts_manager.all()])
+
+    # ------------------------------------------------------------- favorites/layouts
+    def _on_favorite_selected(self, favorite_id: str) -> None:
+        favorite = self._favorites_manager.get(favorite_id)
+        if not favorite:
+            return
+        self._open_favorite(favorite)
+
+    def _on_add_favorite(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            QMessageBox.information(self, "Favorites", "Select a pane to add as a favorite.")
+            return
+        favorite = self._favorite_from_pane(pane)
+        if not favorite:
+            QMessageBox.warning(self, "Favorites", "Unable to determine location for this pane.")
+            return
+        favorite = self._favorites_manager.add(favorite)
+        self._refresh_favorites_panel()
+        self._favorites_panel.select_favorite(favorite.id)
+        self._persist_state(save_workspaces=False)
+
+    def _on_remove_favorite(self, favorite_id: str) -> None:
+        favorite = self._favorites_manager.get(favorite_id)
+        if not favorite:
+            return
+        if QMessageBox.question(self, "Favorites", f"Remove favorite '{favorite.name}'?") != QMessageBox.Yes:
+            return
+        self._favorites_manager.remove(favorite_id)
+        self._refresh_favorites_panel()
+        self._persist_state(save_workspaces=False)
+
+    def _on_rename_favorite(self, favorite_id: str) -> None:
+        favorite = self._favorites_manager.get(favorite_id)
+        if not favorite:
+            return
+        name, ok = QInputDialog.getText(self, "Rename Favorite", "Name:", text=favorite.name)
+        if not ok or not name.strip():
+            return
+        favorite.name = name.strip()
+        self._favorites_manager.update(favorite)
+        self._refresh_favorites_panel()
+        self._favorites_panel.select_favorite(favorite.id)
+        self._persist_state(save_workspaces=False)
+
+    def _on_move_favorite(self, favorite_id: str, offset: int) -> None:
+        self._favorites_manager.move_by_offset(favorite_id, offset)
+        self._refresh_favorites_panel()
+        self._favorites_panel.select_favorite(favorite_id)
+        self._persist_state(save_workspaces=False)
+
+    def _favorite_from_pane(self, pane: WorkspacePane) -> Optional[FavoriteLocation]:
+        items = pane.current_items()
+        path = items[0]["path"] if items else None
+        if pane.definition.kind == "local":
+            base_path = path or pane.definition.root_path
+            if not base_path:
+                return None
+            base_path = os.path.abspath(base_path)
+            name = os.path.basename(base_path.rstrip(os.sep)) or base_path
+            return FavoriteLocation(
+                id=f"fav-{uuid.uuid4().hex[:6]}",
+                kind="local",
+                name=name,
+                root_path=base_path,
+            )
+        if pane.definition.kind == "sharepoint":
+            base_path = path or pane.definition.server_relative_url
+            if not base_path:
+                return None
+            if not base_path.startswith("/"):
+                base_path = "/" + base_path
+            site_rel = pane.definition.site_relative_url
+            name = os.path.basename(base_path.rstrip("/")) or pane.definition.name or "SharePoint"
+            return FavoriteLocation(
+                id=f"fav-{uuid.uuid4().hex[:6]}",
+                kind="sharepoint",
+                name=name,
+                site_relative_url=site_rel,
+                server_relative_url=base_path,
+            )
+        return None
+
+    def _open_favorite(self, favorite: FavoriteLocation) -> None:
+        pane = self._active_pane()
+        if pane and pane.definition.kind != "translation" and pane.definition.kind == favorite.kind:
+            definition = pane.definition
+        else:
+            definition = WorkspaceDefinition(
+                id=self._workspace_manager.ensure_unique_id("ws"),
+                kind="local",
+                name=favorite.name,
+            )
+            pane = None
+        if favorite.kind == "local":
+            definition.kind = "local"
+            definition.name = favorite.name
+            definition.root_path = favorite.root_path
+            definition.site_relative_url = None
+            definition.server_relative_url = None
+            definition.base_workspace_id = None
+            definition.language = None
+        elif favorite.kind == "sharepoint":
+            definition.kind = "sharepoint"
+            definition.name = favorite.name
+            definition.site_relative_url = favorite.site_relative_url
+            definition.server_relative_url = favorite.server_relative_url
+            definition.root_path = None
+            definition.base_workspace_id = None
+            definition.language = None
+        if definition.id in [ws.id for ws in self._workspace_manager.definitions()]:
+            self._workspace_manager.update(definition)
+        else:
+            self._workspace_manager.add(definition)
+        self._persist_state()
+        self._rebuild_workspace_area(focus_workspace_id=definition.id)
+        if favorite.kind == "sharepoint" and favorite.server_relative_url:
+            pane = self._workspace_panes.get(definition.id)
+            if pane:
+                pane.set_root_to_path(favorite.server_relative_url)
+
+    def _on_save_layout(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save Layout", "Layout name:", text=f"Layout {len(self._layouts_manager.all()) + 1}")
+        if not ok or not name.strip():
+            return
+        layout = LayoutDefinition(
+            id=f"layout-{uuid.uuid4().hex[:6]}",
+            name=name.strip(),
+            workspaces=self._workspace_manager.to_config(),
+        )
+        self._layouts_manager.add(layout)
+        self._refresh_favorites_panel()
+        self._favorites_panel.select_layout(layout.id)
+        self._persist_state(save_workspaces=False)
+
+    def _on_apply_layout(self, layout_id: str) -> None:
+        layout = self._layouts_manager.get(layout_id)
+        if not layout:
+            return
+        if QMessageBox.question(self, "Layouts", f"Apply layout '{layout.name}'? This will replace current panes.") != QMessageBox.Yes:
+            return
+        self._cfg.workspaces = list(layout.workspaces)
+        self._workspace_manager = ensure_workspaces(self._cfg)
+        self._persist_state()
+        self._rebuild_workspace_area()
+
+    def _on_remove_layout(self, layout_id: str) -> None:
+        layout = self._layouts_manager.get(layout_id)
+        if not layout:
+            return
+        if QMessageBox.question(self, "Layouts", f"Remove layout '{layout.name}'?") != QMessageBox.Yes:
+            return
+        self._layouts_manager.remove(layout_id)
+        self._refresh_favorites_panel()
+        self._persist_state(save_workspaces=False)
+
+    def _on_rename_layout(self, layout_id: str) -> None:
+        layout = self._layouts_manager.get(layout_id)
+        if not layout:
+            return
+        name, ok = QInputDialog.getText(self, "Rename Layout", "Name:", text=layout.name)
+        if not ok or not name.strip():
+            return
+        layout.name = name.strip()
+        self._layouts_manager.update(layout)
+        self._refresh_favorites_panel()
+        self._favorites_panel.select_layout(layout.id)
+        self._persist_state(save_workspaces=False)
+
+    def _on_move_layout(self, layout_id: str, offset: int) -> None:
+        self._layouts_manager.move_by_offset(layout_id, offset)
+        self._refresh_favorites_panel()
+        self._favorites_panel.select_layout(layout_id)
+        self._persist_state(save_workspaces=False)
+
     def _move_active_workspace(self, offset: int) -> None:
         if not self._active_workspace_id or offset == 0:
             return
         self._workspace_manager.move_by_offset(self._active_workspace_id, offset)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=self._active_workspace_id)
 
     def _convert_workspace_to_local(self, definition: WorkspaceDefinition) -> None:
@@ -293,7 +941,7 @@ class MainWindow(QMainWindow):
         definition.language = None
         definition.name = os.path.basename(path) or "Local"
         self._workspace_manager.update(definition)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _convert_workspace_to_sharepoint(self, definition: WorkspaceDefinition) -> None:
@@ -316,7 +964,7 @@ class MainWindow(QMainWindow):
         definition.language = None
         definition.name = f"{selection.get('site_title', 'SharePoint')} - {selection.get('library_title', 'Library')}"
         self._workspace_manager.update(definition)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _convert_workspace_to_translation(self, definition: WorkspaceDefinition) -> None:
@@ -348,10 +996,72 @@ class MainWindow(QMainWindow):
         base_name = dict(base_options).get(base_id, "Workspace")
         definition.name = f"{base_name} ({language})"
         self._workspace_manager.update(definition)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
+    def _header_colors_for(self, definition: WorkspaceDefinition) -> Tuple[str, str]:
+        base_key = definition.id if definition.kind != "translation" else (definition.base_workspace_id or definition.id)
+        base_color = self._workspace_color_map.get(base_key)
+        if not base_color:
+            base_color = self._generate_base_color(len(self._workspace_color_map))
+            self._workspace_color_map[base_key] = base_color
+        spec = self._theme_spec()
+        trans_adjust = spec.get("translation_adjust", {})
+        active_adjust = spec.get("active_adjust", {})
+        if definition.kind == "translation":
+            header_color = self._adjust_color(
+                base_color,
+                dh=trans_adjust.get("dh", 0.0),
+                dl=trans_adjust.get("dl", 0.0),
+                ds=trans_adjust.get("ds", 0.0),
+            )
+        else:
+            header_color = base_color
+        active_color = self._adjust_color(
+            header_color,
+            dh=active_adjust.get("dh", 0.0),
+            dl=active_adjust.get("dl", 0.0),
+            ds=active_adjust.get("ds", 0.0),
+        )
+        return header_color, active_color
+
+    def _generate_base_color(self, index: int) -> str:
+        if self._base_color_palette:
+            seed = self._base_color_palette[index % len(self._base_color_palette)]
+            rotation = index // len(self._base_color_palette)
+            if rotation:
+                return self._adjust_color(seed, dh=0.08 * rotation, dl=0.02 * ((rotation % 2) * 2 - 1) * 0.5)
+            return seed
+        # fallback
+        hue = (index * 0.61803398875) % 1.0
+        return self._hls_to_hex(hue, 0.82, 0.4)
+
+    @staticmethod
+    def _adjust_color(color: str, dh: float = 0.0, dl: float = 0.0, ds: float = 0.0) -> str:
+        h, l, s = MainWindow._hex_to_hls(color)
+        h = (h + dh) % 1.0
+        l = max(0.0, min(1.0, l + dl))
+        s = max(0.0, min(1.0, s + ds))
+        return MainWindow._hls_to_hex(h, l, s)
+
+    @staticmethod
+    def _hex_to_hls(color: str) -> Tuple[float, float, float]:
+        color = color.lstrip("#")
+        if len(color) != 6:
+            color = "cccccc"
+        r = int(color[0:2], 16) / 255.0
+        g = int(color[2:4], 16) / 255.0
+        b = int(color[4:6], 16) / 255.0
+        h, l, s = colorsys.rgb_to_hls(r, g, b)
+        return h, l, s
+
+    @staticmethod
+    def _hls_to_hex(h: float, l: float, s: float) -> str:
+        r, g, b = colorsys.hls_to_rgb(h, l, s)
+        return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+
     def _create_workspace_pane(self, definition: WorkspaceDefinition, base_panes: Dict[str, WorkspacePane]) -> WorkspacePane:
+        header_color, header_active_color = self._header_colors_for(definition)
         pane = WorkspacePane(
             definition,
             backend_client=self._backend,
@@ -359,9 +1069,12 @@ class MainWindow(QMainWindow):
             translation_cache=self._translation_cache,
             ignore_patterns=self._ignore_patterns,
             base_panes=base_panes,
+            header_color=header_color,
+            header_active_color=header_active_color,
         )
         pane.activated.connect(self._on_workspace_item_activated)
         pane.drop_request.connect(self._on_workspace_drop_request)
+        pane.path_changed.connect(self._on_workspace_path_changed)
         self._register_workspace_signals(pane)
         self._attach_context_menu(pane)
         return pane
@@ -370,6 +1083,7 @@ class MainWindow(QMainWindow):
         pane.selection_changed.connect(self._on_workspace_selection_changed)
         pane.expanded_path.connect(self._on_workspace_expanded)
         pane.collapsed_path.connect(self._on_workspace_collapsed)
+        pane.pane_clicked.connect(self._on_pane_clicked)
         if hasattr(pane, "header"):
             pane.header.reorder_requested.connect(self._on_header_reorder)
             pane.header.context_menu_requested.connect(self._on_header_context_menu)
@@ -441,7 +1155,7 @@ class MainWindow(QMainWindow):
         if source_id == target_id:
             return
         self._workspace_manager.reorder_before(source_id, target_id or None)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=source_id)
 
     def _on_header_context_menu(self, workspace_id: str, global_pos) -> None:
@@ -483,6 +1197,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{pane.definition.name}: {len(selected)} selected")
         self._mirror_selection(workspace_id)
 
+    def _on_pane_clicked(self, workspace_id: str) -> None:
+        self._focus_workspace(workspace_id)
+
     def _on_workspace_item_activated(self, workspace_id: str, path: str) -> None:
         self.statusBar().showMessage(f"Opened: {path}", 4000)
 
@@ -501,7 +1218,7 @@ class MainWindow(QMainWindow):
             root_path=directory,
         )
         self._workspace_manager.add(definition)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _add_sharepoint_workspace(self) -> None:
@@ -524,7 +1241,7 @@ class MainWindow(QMainWindow):
             server_relative_url=selection.get("server_relative_url"),
         )
         self._workspace_manager.add(definition)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _add_translation_workspace(self) -> None:
@@ -553,7 +1270,7 @@ class MainWindow(QMainWindow):
             language=language,
         )
         self._workspace_manager.add(definition)
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _remove_active_workspace(self) -> None:
@@ -576,11 +1293,19 @@ class MainWindow(QMainWindow):
         self._workspace_manager.remove(workspace_id)
         if self._active_workspace_id == workspace_id:
             self._active_workspace_id = None
-        self._persist_workspaces()
+        self._persist_state()
         self._rebuild_workspace_area()
 
-    def _persist_workspaces(self) -> None:
-        self._cfg.workspaces = self._workspace_manager.to_config()
+    def _persist_state(self, save_workspaces: bool = True) -> None:
+        if save_workspaces:
+            self._cfg.workspaces = self._workspace_manager.to_config()
+        self._cfg.favorites = self._favorites_manager.to_config()
+        self._cfg.saved_layouts = self._layouts_manager.to_config()
+        self._cfg.favorites_bar_position = getattr(self._cfg, "favorites_bar_position", "left")
+        try:
+            self._cfg.favorites_bar_size = int(getattr(self._cfg, "favorites_bar_size", 240))
+        except Exception:
+            self._cfg.favorites_bar_size = 240
         save_config(self._cfg)
 
     # ----------------------------------------------------- file operations --
@@ -946,10 +1671,12 @@ class MainWindow(QMainWindow):
         self._cfg = load_config()
         self._backend = BackendClient(getattr(self._cfg, "backend_url", None) or "http://127.0.0.1:5001")
         self._translator = self._create_translator()
+        self._ignore_patterns = self._cfg.ignore_patterns or []
+        self._apply_theme()
         for pane in self._workspace_panes.values():
             pane.set_translator(self._translator)
 
     # ---------------------------------------------------------------- misc ---
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._persist_workspaces()
+        self._persist_state()
         super().closeEvent(event)

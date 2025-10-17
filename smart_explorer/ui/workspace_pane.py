@@ -4,9 +4,22 @@ import json
 import os
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData, QItemSelectionModel
-from PySide6.QtGui import QDrag
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit, QSizePolicy, QTreeView, QVBoxLayout
+from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData, QItemSelectionModel, QEvent, QSize
+from PySide6.QtGui import QDrag, QMouseEvent, QPalette
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QSizePolicy,
+    QStackedLayout,
+    QToolButton,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE, PATH_ROLE
 from ..models.translated_fs_model import TranslatedProxyModel
@@ -61,7 +74,7 @@ class WorkspaceHeader(QLabel):
         self._workspace_id = pane.definition.id
         self.setAcceptDrops(True)
         self.setCursor(Qt.OpenHandCursor)
-        self.setMargin(4)
+        self.setMargin(0)
         self.setAlignment(Qt.AlignCenter)
         self._drag_start_pos = None
 
@@ -130,6 +143,8 @@ class WorkspacePane(QFrame):
     expanded_path = Signal(str, str)
     collapsed_path = Signal(str, str)
     drop_request = Signal(str, dict, str, bool, object)  # target_workspace, payload, target_path, move, site
+    path_changed = Signal(str, str)  # workspace_id, path
+    pane_clicked = Signal(str)       # workspace_id
 
     def __init__(
         self,
@@ -140,6 +155,8 @@ class WorkspacePane(QFrame):
         translation_cache: TranslationCache,
         ignore_patterns: List[str],
         base_panes: Dict[str, "WorkspacePane"],
+        header_color: str,
+        header_active_color: str,
     ) -> None:
         super().__init__()
         self.definition = definition
@@ -148,6 +165,18 @@ class WorkspacePane(QFrame):
         self._translation_cache = translation_cache
         self._ignore_patterns = ignore_patterns
         self._base_panes = base_panes
+        self._header_color = header_color
+        self._header_active_color = header_active_color
+        self._history: List[str] = []
+        self._history_index: int = -1
+        self._suspend_history = False
+        self._base_root_path: str = ""
+        self._sharepoint_mode = definition.kind == "sharepoint"
+        if definition.kind == "translation" and definition.base_workspace_id:
+            base = base_panes.get(definition.base_workspace_id)
+            if base is not None:
+                self._sharepoint_mode = base.definition.kind == "sharepoint"
+        self._is_active = False
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setObjectName(f"WorkspacePane::{definition.id}")
@@ -171,11 +200,39 @@ class WorkspacePane(QFrame):
         self._view.expanded.connect(self._on_expanded)
         self._view.collapsed.connect(self._on_collapsed)
 
+        self._icon_view = QListView(self)
+        self._icon_view.setViewMode(QListView.IconMode)
+        self._icon_view.setIconSize(QSize(48, 48))
+        self._icon_view.setResizeMode(QListView.Adjust)
+        self._icon_view.setWordWrap(True)
+        self._icon_view.setUniformItemSizes(False)
+        self._icon_view.setSelectionMode(QListView.ExtendedSelection)
+        self._icon_view.setSpacing(12)
+        self._icon_view.setWrapping(True)
+        self._icon_view.setContextMenuPolicy(Qt.ActionsContextMenu)
+        self._icon_view.doubleClicked.connect(self._on_activated)
+
+        self._supports_icon_mode = not self._sharepoint_mode
+        self._icon_mode = False
+
+        self._view_container = QWidget(self)
+        self._view_stack = QStackedLayout(self._view_container)
+        self._view_stack.setContentsMargins(0, 0, 0, 0)
+        self._view_stack.addWidget(self._view)
+        self._view_stack.addWidget(self._icon_view)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.header)
+        layout.addLayout(self._build_nav_bar())
         layout.addWidget(self._search)
-        layout.addWidget(self._view, 1)
+        layout.addWidget(self._view_container, 1)
+
+        self.installEventFilter(self)
+        self.header.installEventFilter(self)
+        self._view.viewport().installEventFilter(self)
+        self._icon_view.viewport().installEventFilter(self)
+        self._search.installEventFilter(self)
 
         self._source_model = None
         self._filter_model: Optional[QSortFilterProxyModel] = None
@@ -186,8 +243,10 @@ class WorkspacePane(QFrame):
         self._suppress_expand_signal = False
 
         self._build_models()
+        self._base_root_path = self._determine_base_root()
+        self._initialize_history()
         self._search.textChanged.connect(self._on_search_text_changed)
-        self.set_active(False)
+        self._update_style(False)
 
     # --- properties ---------------------------------------------------------
     @property
@@ -215,17 +274,8 @@ class WorkspacePane(QFrame):
         self.header.setText(name)
 
     def set_active(self, active: bool) -> None:
-        if active:
-            self.setStyleSheet(
-                "WorkspacePane { border: 2px solid #1a5fb4; border-radius: 6px; }"
-            )
-        else:
-            self.setStyleSheet(
-                "WorkspacePane { border: 1px solid palette(mid); border-radius: 6px; }"
-            )
-        self.header.setStyleSheet(
-            "font-weight: bold; color: #1a5fb4;" if active else "font-weight: normal; color: palette(text);"
-        )
+        self._is_active = active
+        self._update_style(active)
 
     def map_view_to_source(self, index: QModelIndex) -> Optional[QModelIndex]:
         return self._map_to_source(index)
@@ -261,6 +311,7 @@ class WorkspacePane(QFrame):
         for column in range(1, fs_model.columnCount()):
             self._view.setColumnHidden(column, True)
         self._connect_selection()
+        self._sync_icon_model()
 
     def _build_sharepoint_model(self) -> None:
         if not (self.definition.site_relative_url and self.definition.server_relative_url):
@@ -280,6 +331,7 @@ class WorkspacePane(QFrame):
         self._view.setModel(proxy)
         self._set_root_indexes(None, QModelIndex())
         self._connect_selection()
+        self._sync_icon_model()
 
     def _build_translation_model(self) -> None:
         if not self.definition.base_workspace_id:
@@ -319,12 +371,128 @@ class WorkspacePane(QFrame):
         else:
             self._set_root_indexes(None, QModelIndex())
         self._connect_selection()
+        self._sync_icon_model()
+
+    def _build_nav_bar(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.setContentsMargins(6, 0, 6, 0)
+        bar.setSpacing(6)
+
+        self._back_btn = QToolButton(self)
+        self._back_btn.setText("←")
+        self._back_btn.setToolTip("Back")
+        self._back_btn.setAutoRaise(True)
+        self._back_btn.clicked.connect(lambda checked=False: self._navigate_history(-1))
+
+        self._forward_btn = QToolButton(self)
+        self._forward_btn.setText("→")
+        self._forward_btn.setToolTip("Forward")
+        self._forward_btn.setAutoRaise(True)
+        self._forward_btn.clicked.connect(lambda checked=False: self._navigate_history(1))
+
+        self._up_btn = QToolButton(self)
+        self._up_btn.setText("↑")
+        self._up_btn.setToolTip("Up one level")
+        self._up_btn.setAutoRaise(True)
+        self._up_btn.clicked.connect(lambda checked=False: self.navigate_up())
+
+        self._view_mode_btn = QToolButton(self)
+        self._view_mode_btn.setText("☰")
+        self._view_mode_btn.setCheckable(True)
+        self._view_mode_btn.setToolTip("Toggle icon view")
+        self._view_mode_btn.setAutoRaise(True)
+        self._view_mode_btn.toggled.connect(self._toggle_view_mode)
+        self._view_mode_btn.setEnabled(self._supports_icon_mode)
+        self._view_mode_btn.setVisible(self._supports_icon_mode)
+
+        for btn in (self._back_btn, self._forward_btn, self._up_btn):
+            btn.setEnabled(False)
+            btn.installEventFilter(self)
+            bar.addWidget(btn)
+
+        bar.addStretch(1)
+        bar.addWidget(self._view_mode_btn)
+        return bar
+
+    def _update_style(self, active: bool) -> None:
+        palette = self.palette()
+        base_color = palette.color(QPalette.Base).name()
+        highlight = palette.color(QPalette.Highlight).name()
+        mid = palette.color(QPalette.Mid).name()
+        if mid.lower() == base_color.lower():
+            mid = palette.color(QPalette.AlternateBase).name()
+        if mid.lower() == base_color.lower():
+            mid = "#aab3c3" if not self._sharepoint_mode else "#44525d"
+
+        border_color = highlight if active else mid
+        border_width = 2 if active else 1
+        self.setStyleSheet(
+            f"WorkspacePane {{ border: {border_width}px solid {border_color}; border-radius: 6px; background-color: {base_color}; }}"
+        )
+        self._apply_header_style(active)
+
+    def _apply_header_style(self, active: bool) -> None:
+        color = self._header_active_color if active else self._header_color
+        weight = "600" if active else "500"
+        text_color = self._preferred_text_color(color)
+        shadow = "rgba(0, 0, 0, 0.20)" if active else "rgba(0, 0, 0, 0.08)"
+        self.header.setStyleSheet(
+            f"QLabel {{ background-color: {color}; color: {text_color}; padding: 6px 10px; margin: 0px; "
+            f"font-weight: {weight}; border-top-left-radius: 6px; border-top-right-radius: 6px; "
+            f"border-bottom: 1px solid {shadow}; }}"
+        )
+
+    def update_header_palette(self, header_color: str, header_active_color: str) -> None:
+        self._header_color = header_color
+        self._header_active_color = header_active_color
+        self._apply_header_style(self._is_active)
+
+    @staticmethod
+    def _preferred_text_color(color: str) -> str:
+        color = color.lstrip("#")
+        if len(color) != 6:
+            return "#1f2b3a"
+        r = int(color[0:2], 16)
+        g = int(color[2:4], 16)
+        b = int(color[4:6], 16)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "#1f2b3a" if luminance >= 0.6 else "#f6fbff"
+
+    def _toggle_view_mode(self, checked: bool) -> None:
+        if not self._supports_icon_mode:
+            blocker = self._view_mode_btn.blockSignals(True)
+            self._view_mode_btn.setChecked(False)
+            self._view_mode_btn.blockSignals(blocker)
+            return
+        self._icon_mode = checked
+        self._view_stack.setCurrentIndex(1 if checked else 0)
+        self._view_mode_btn.setText("🗂" if checked else "☰")
+        self._view_mode_btn.setToolTip("Show tree view" if checked else "Show icon view")
+        self._sync_icon_model()
+        if checked:
+            self._icon_view.setFocus()
+        else:
+            self._view.setFocus()
 
     # --- interactions -------------------------------------------------------
     def set_translator(self, translator: Translator) -> None:
         self._translator = translator
         if self._translated_model:
             self._translated_model.set_translator(translator)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress:
+            if isinstance(event, QMouseEvent) and event.button() == Qt.LeftButton:
+                self._emit_pane_clicked()
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if isinstance(event, QMouseEvent) and event.button() == Qt.LeftButton:
+            self._emit_pane_clicked()
+        super().mousePressEvent(event)
+
+    def _emit_pane_clicked(self) -> None:
+        self.pane_clicked.emit(self.definition.id)
 
     def set_language(self, language: str) -> None:
         if self.definition.kind == "translation" and self._translated_model:
@@ -339,6 +507,206 @@ class WorkspacePane(QFrame):
             self._source_model.endResetModel()
         elif isinstance(self._source_model, TranslatedProxyModel):
             self._source_model._cache.clear()  # type: ignore[attr-defined]
+
+    # --- navigation --------------------------------------------------------
+    def current_path(self) -> str:
+        return self._normalize_path(self._path_for_source_index(self.root_source_index()))
+
+    def navigate_back(self) -> None:
+        self._navigate_history(-1)
+
+    def navigate_forward(self) -> None:
+        self._navigate_history(1)
+
+    def navigate_up(self) -> None:
+        current = self.current_path()
+        parent = self._parent_path(current)
+        if not parent or parent == current:
+            return
+        if self._base_root_path and not self._is_within_base(parent):
+            return
+        self.go_to_path(parent)
+
+    def go_to_path(self, path: str, *, record: bool = True, emit: bool = True) -> bool:
+        target = self._normalize_path(path)
+        if not target:
+            return False
+        src_idx: Optional[QModelIndex] = None
+        root_idx: Optional[QModelIndex] = None
+        if self.definition.kind == "local":
+            fs_target = os.path.abspath(os.path.expanduser(target))
+            if not os.path.isdir(fs_target):
+                return False
+            target = os.path.normpath(fs_target)
+            try:
+                if hasattr(self._source_model, "setRootPath"):
+                    root_idx = self._source_model.setRootPath(target)  # type: ignore[attr-defined]
+            except Exception:
+                return False
+            target = self._normalize_path(target)
+        elif self._sharepoint_mode and hasattr(self._source_model, "set_root_path"):
+            try:
+                self._source_model.set_root_path(target)  # type: ignore[attr-defined]
+            except Exception:
+                return False
+        if src_idx is None:
+            src_idx = root_idx if isinstance(root_idx, QModelIndex) and root_idx.isValid() else self.source_index_for_path(target)
+        if src_idx is None and not self._allow_empty_index(target):
+            return False
+        view_idx = self._map_source_to_view(src_idx) if isinstance(src_idx, QModelIndex) else QModelIndex()
+        self._set_root_indexes(src_idx if isinstance(src_idx, QModelIndex) and src_idx.isValid() else None, view_idx)
+        if self._suspend_history:
+            return True
+        if record:
+            self._record_history(target, emit=emit)
+        elif emit:
+            self.path_changed.emit(self.definition.id, target)
+            self._update_navigation_buttons()
+        else:
+            self._update_navigation_buttons()
+        return True
+
+    def navigate_to_path(self, path: str) -> bool:
+        return self.go_to_path(path, record=True, emit=True)
+
+    def _allow_empty_index(self, path: str) -> bool:
+        normalized = self._normalize_path(path)
+        base = self._normalize_path(self._base_root_path)
+        return normalized == base
+
+    def _navigate_history(self, delta: int) -> None:
+        if not self._history:
+            return
+        target = self._history_index + delta
+        if 0 <= target < len(self._history):
+            self._apply_history_index(target)
+
+    def _apply_history_index(self, index: int) -> None:
+        if index == self._history_index or not (0 <= index < len(self._history)):
+            return
+        path = self._history[index]
+        self._suspend_history = True
+        try:
+            self.go_to_path(path, record=False, emit=False)
+        finally:
+            self._suspend_history = False
+        self._history_index = index
+        self.path_changed.emit(self.definition.id, path)
+        self._update_navigation_buttons()
+
+    def _record_history(self, path: str, *, emit: bool) -> None:
+        if self._suspend_history:
+            return
+        normalized = self._normalize_path(path)
+        if not normalized:
+            return
+        if self._history_index >= 0 and self._history[self._history_index] == normalized:
+            if emit:
+                self.path_changed.emit(self.definition.id, normalized)
+            self._update_navigation_buttons()
+            return
+        if self._history_index < len(self._history) - 1:
+            self._history = self._history[: self._history_index + 1]
+        self._history.append(normalized)
+        self._history_index = len(self._history) - 1
+        if emit:
+            self.path_changed.emit(self.definition.id, normalized)
+        self._update_navigation_buttons()
+
+    def _initialize_history(self) -> None:
+        current = self.current_path()
+        if current:
+            self._history = [current]
+            self._history_index = 0
+        else:
+            self._history = []
+            self._history_index = -1
+        self._update_navigation_buttons()
+
+    def _determine_base_root(self) -> str:
+        if self.definition.kind == "local":
+            base = self.definition.root_path or ""
+        elif self.definition.kind == "sharepoint":
+            base = self.definition.server_relative_url or "/"
+        elif self.definition.kind == "translation":
+            base = ""
+            if self.definition.base_workspace_id:
+                base_pane = self._base_panes.get(self.definition.base_workspace_id)
+                if base_pane is not None:
+                    base = base_pane._base_root_path or base_pane.current_path()
+            if not base:
+                base = self.current_path()
+        else:
+            base = self.current_path()
+        return self._normalize_path(base)
+
+    def _normalize_path(self, path: Optional[str]) -> str:
+        if not path:
+            return ""
+        path = str(path).strip()
+        if not path:
+            return ""
+        if path.startswith("/"):
+            normalized = os.path.normpath(path)
+            if self._sharepoint_mode:
+                return normalized if normalized != "" else "/"
+            return normalized
+        if self._sharepoint_mode:
+            normalized = "/" + path.lstrip("/")
+            return normalized if normalized != "//" else "/"
+        expanded = os.path.expanduser(path)
+        if not os.path.isabs(expanded):
+            expanded = os.path.abspath(expanded)
+        return os.path.normpath(expanded)
+
+    def _parent_path(self, path: str) -> str:
+        normalized = self._normalize_path(path)
+        if not normalized:
+            return ""
+        if normalized.startswith("/"):
+            trimmed = normalized.rstrip("/")
+            if not trimmed or trimmed == "/":
+                return "/"
+            parent = trimmed.rsplit("/", 1)[0]
+            return parent or "/"
+        return os.path.normpath(os.path.dirname(os.path.normpath(normalized)))
+
+    def _is_within_base(self, path: str) -> bool:
+        if self.definition.kind == "local" or (self.definition.kind == "translation" and not self._sharepoint_mode):
+            return True
+        if not self._base_root_path:
+            return True
+        if self._sharepoint_mode:
+            base = self._normalize_path(self._base_root_path) or "/"
+            target = self._normalize_path(path)
+            if base in ("", "/"):
+                return True
+            base = base.rstrip("/")
+            return target == base or target.startswith(base + "/")
+        base_abs = os.path.abspath(self._normalize_path(self._base_root_path))
+        target_abs = os.path.abspath(self._normalize_path(path))
+        try:
+            return os.path.commonpath([target_abs, base_abs]) == base_abs
+        except Exception:
+            return True
+
+    def _update_navigation_buttons(self) -> None:
+        if hasattr(self, "_back_btn"):
+            self._back_btn.setEnabled(self._history_index > 0)
+        if hasattr(self, "_forward_btn"):
+            self._forward_btn.setEnabled(0 <= self._history_index < len(self._history) - 1)
+        if hasattr(self, "_up_btn"):
+            self._up_btn.setEnabled(self._can_navigate_up())
+
+    def _can_navigate_up(self) -> bool:
+        current = self.current_path()
+        parent = self._parent_path(current)
+        if not parent or parent == current:
+            return False
+        if self._base_root_path:
+            if not self._is_within_base(parent):
+                return False
+        return True
 
     def current_paths(self) -> List[str]:
         indexes = self._view.selectionModel().selectedIndexes() if self._view.selectionModel() else []
@@ -396,6 +764,21 @@ class WorkspacePane(QFrame):
         sel_model = self._view.selectionModel()
         if sel_model:
             sel_model.selectionChanged.connect(self._on_selection_changed)
+        if self._icon_view.model() is not None and self._view.selectionModel() is not None:
+            self._icon_view.setSelectionModel(self._view.selectionModel())
+
+    def _sync_icon_model(self) -> None:
+        if not self._supports_icon_mode:
+            return
+        if self._filter_model is None:
+            self._icon_view.setModel(None)
+            return
+        self._icon_view.setModel(self._filter_model)
+        sel_model = self._view.selectionModel()
+        if sel_model:
+            self._icon_view.setSelectionModel(sel_model)
+        root_index = self._view.rootIndex()
+        self._icon_view.setRootIndex(root_index)
 
     def _on_selection_changed(self, *_args) -> None:
         if self._suppress_selection_signal:
@@ -420,15 +803,27 @@ class WorkspacePane(QFrame):
 
     def _on_activated(self, index: QModelIndex) -> None:
         path = None
+        is_dir = False
         src_idx = self._map_to_source(index)
         if src_idx and src_idx.isValid():
             model = src_idx.model()
             if hasattr(model, "filePath"):
                 path = model.filePath(src_idx)  # type: ignore[attr-defined]
+                if hasattr(model, "isDir"):
+                    try:
+                        is_dir = bool(model.isDir(src_idx))  # type: ignore[attr-defined]
+                    except Exception:
+                        is_dir = False
             else:
                 path = model.data(src_idx, PATH_ROLE)
+                is_dir = bool(model.data(src_idx, IS_DIR_ROLE))
+        if not path and index.isValid():
+            path = index.data(PATH_ROLE)
         if path:
-            self.activated.emit(self.definition.id, path)
+            if is_dir:
+                self.go_to_path(path)
+            else:
+                self.activated.emit(self.definition.id, path)
 
     def _map_to_source(self, index: QModelIndex) -> Optional[QModelIndex]:
         model = self._view.model()
@@ -504,12 +899,11 @@ class WorkspacePane(QFrame):
             self._view.collapse(view_idx)
             self._suppress_expand_signal = False
 
-    def set_root_to_path(self, path: str) -> None:
-        src_idx = self.source_index_for_path(path)
-        view_idx = self._map_source_to_view(src_idx)
-        self._set_root_indexes(src_idx if src_idx and src_idx.isValid() else None, view_idx)
+    def set_root_to_path(self, path: str, *, record: bool = True, emit: bool = True) -> None:
+        self.go_to_path(path, record=record, emit=emit)
 
     def source_index_for_path(self, path: str) -> Optional[QModelIndex]:
+        path = self._normalize_path(path)
         if not path:
             return None
         if hasattr(self._source_model, "filePath"):
@@ -530,15 +924,16 @@ class WorkspacePane(QFrame):
             model = source_idx.model()
             if hasattr(model, "filePath"):
                 try:
-                    return model.filePath(source_idx)  # type: ignore[attr-defined]
+                    value = model.filePath(source_idx)  # type: ignore[attr-defined]
                 except Exception:
-                    return ""
-            value = model.data(source_idx, PATH_ROLE)
-            return value or ""
+                    value = ""
+            else:
+                value = model.data(source_idx, PATH_ROLE)
+            return self._normalize_path(value or "")
         if self.definition.kind == "local":
-            return self.definition.root_path or ""
+            return self._normalize_path(self.definition.root_path or "")
         if self.definition.kind == "sharepoint":
-            return self.definition.server_relative_url or ""
+            return self._normalize_path(self.definition.server_relative_url or "")
         if self.definition.kind == "translation" and self.definition.base_workspace_id:
             base = self._base_panes.get(self.definition.base_workspace_id)
             if base:
@@ -562,7 +957,15 @@ class WorkspacePane(QFrame):
             return
         root_path = state.get("root_path")
         if root_path:
-            self.set_root_to_path(root_path)
+            if self.go_to_path(root_path, record=False, emit=False):
+                current = self.current_path()
+                if current:
+                    self._history = [current]
+                    self._history_index = 0
+                else:
+                    self._history = []
+                    self._history_index = -1
+                self._update_navigation_buttons()
         selection = state.get("selection") or []
         if selection:
             self.select_paths(selection)
@@ -575,6 +978,9 @@ class WorkspacePane(QFrame):
             view_idx = QModelIndex()
         self._root_view_index = view_idx
         self._view.setRootIndex(view_idx)
+        if self._supports_icon_mode and self._icon_view.model() is not None:
+            self._icon_view.setRootIndex(view_idx)
+        self._update_navigation_buttons()
 
     # --- drag/drop ----------------------------------------------------------
     def _start_drag(self, supported_actions: Qt.DropAction) -> None:
