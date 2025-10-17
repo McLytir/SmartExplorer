@@ -17,26 +17,11 @@
   "last_source": "SharePoint",
   "workspaces": [
     {
-      "id": "ws-local",
-      "kind": "local",
-      "name": "resources",
-      "root_path": "/home/shalulu/PotreeConverter/build/resources",
-      "auto_sync": true
-    },
-    {
-      "id": "ws-tr-3",
-      "kind": "translation",
-      "name": "Local (English)",
-      "base_workspace_id": "ws-local",
-      "language": "English",
-      "auto_sync": true
-    },
-    {
-      "id": "ws-tr",
-      "kind": "translation",
-      "name": "shalulu (English)",
-      "base_workspace_id": "ws",
-      "language": "English",
+      "id": "ws-sp",
+      "kind": "sharepoint",
+      "name": "Peak Energy - All - Documents",
+      "site_relative_url": "/sites/PeakEnergy-All",
+      "server_relative_url": "/sites/PeakEnergy-All/Shared Documents",
       "auto_sync": true
     },
     {

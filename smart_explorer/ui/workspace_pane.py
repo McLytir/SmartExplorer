@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE, PATH_ROLE
 from ..models.translated_fs_model import TranslatedProxyModel
+from ..tagging import TagStore
 from ..translation_cache import TranslationCache
 from ..translators.base import Translator, IdentityTranslator
 from ..workspaces import WorkspaceDefinition
@@ -63,6 +65,59 @@ class WorkspaceTreeView(QTreeView):
         else:
             event.ignore()
 
+class TagFilterProxyModel(QSortFilterProxyModel):
+    def __init__(self, *, tag_store: Optional[TagStore] = None, parent=None) -> None:
+        super().__init__(parent)
+        self._tag_store = tag_store
+        self._name_terms: List[str] = []
+        self._tag_terms: List[str] = []
+
+    def set_tag_store(self, store: Optional[TagStore]) -> None:
+        self._tag_store = store
+        self.invalidateFilter()
+
+    def set_search_query(self, text: str) -> None:
+        tokens = [tok.strip() for tok in text.split() if tok.strip()]
+        name_terms: List[str] = []
+        tag_terms: List[str] = []
+        for token in tokens:
+            if token.startswith("#") and len(token) > 1:
+                tag_terms.append(token[1:].lower())
+            else:
+                name_terms.append(token.lower())
+        if self._name_terms == name_terms and self._tag_terms == tag_terms:
+            return
+        self._name_terms = name_terms
+        self._tag_terms = tag_terms
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
+        if not self._name_terms and not self._tag_terms:
+            return True
+        model = self.sourceModel()
+        index = model.index(source_row, 0, parent)
+        name = str(model.data(index, Qt.DisplayRole) or "").lower()
+        for term in self._name_terms:
+            if term not in name:
+                return False
+        if not self._tag_terms:
+            return True
+        if not self._tag_store:
+            return False
+        path = None
+        if hasattr(model, "filePath"):
+            try:
+                path = model.filePath(index)  # type: ignore[attr-defined]
+            except Exception:
+                path = None
+        if not path:
+            path = model.data(index, PATH_ROLE)
+        if not path:
+            return False
+        tags = [t.lower() for t in self._tag_store.tags_for(path)]
+        if not tags:
+            return False
+        return all(term in tags for term in self._tag_terms)
 
 class WorkspaceHeader(QLabel):
     reorder_requested = Signal(str, str)  # source_id, target_id
@@ -177,6 +232,26 @@ class WorkspacePane(QFrame):
             if base is not None:
                 self._sharepoint_mode = base.definition.kind == "sharepoint"
         self._is_active = False
+        self._tag_store: Optional[TagStore] = None
+        self._owns_tag_store = False
+        self._tag_widget: Optional[QWidget] = None
+        self._tag_label: Optional[QLabel] = None
+        self._tag_buttons_container: Optional[QWidget] = None
+        self._tag_buttons_layout: Optional[QHBoxLayout] = None
+        self._tag_add_btn: Optional[QToolButton] = None
+        self._current_tag_paths: List[str] = []
+        self._search_saved_root: Optional[str] = None
+        initial_root = self._resolve_root_path()
+        if initial_root:
+            try:
+                os.makedirs(initial_root, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                self._tag_store = TagStore(initial_root)
+                self._owns_tag_store = (self.definition.kind == "local")
+            except Exception:
+                self._tag_store = None
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setObjectName(f"WorkspacePane::{definition.id}")
@@ -226,6 +301,26 @@ class WorkspacePane(QFrame):
         layout.addWidget(self.header)
         layout.addLayout(self._build_nav_bar())
         layout.addWidget(self._search)
+        self._tag_widget = QWidget(self)
+        self._tag_widget.setObjectName("TagWidget")
+        tag_layout = QHBoxLayout(self._tag_widget)
+        tag_layout.setContentsMargins(6, 4, 6, 4)
+        tag_layout.setSpacing(6)
+        self._tag_label = QLabel("Select a file to manage tags", self._tag_widget)
+        tag_layout.addWidget(self._tag_label)
+        tag_layout.addStretch(1)
+        self._tag_buttons_container = QWidget(self._tag_widget)
+        self._tag_buttons_layout = QHBoxLayout(self._tag_buttons_container)
+        self._tag_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self._tag_buttons_layout.setSpacing(4)
+        tag_layout.addWidget(self._tag_buttons_container)
+        self._tag_add_btn = QToolButton(self._tag_widget)
+        self._tag_add_btn.setText("+")
+        self._tag_add_btn.setToolTip("Add tag")
+        self._tag_add_btn.setAutoRaise(True)
+        self._tag_add_btn.clicked.connect(self._on_tag_add)
+        tag_layout.addWidget(self._tag_add_btn)
+        layout.addWidget(self._tag_widget)
         layout.addWidget(self._view_container, 1)
 
         self.installEventFilter(self)
@@ -247,6 +342,16 @@ class WorkspacePane(QFrame):
         self._initialize_history()
         self._search.textChanged.connect(self._on_search_text_changed)
         self._update_style(False)
+        if self._owns_tag_store and self._tag_store:
+            try:
+                self._tag_store.reconcile()
+            except Exception:
+                pass
+        self._ensure_tag_store()
+        if self._tag_add_btn is not None:
+            self._tag_add_btn.setEnabled(self._tag_store is not None)
+        if self._tag_widget is not None:
+            self._update_tag_widget()
 
     # --- properties ---------------------------------------------------------
     @property
@@ -261,6 +366,43 @@ class WorkspacePane(QFrame):
 
     def site_relative_url(self) -> Optional[str]:
         return self.definition.site_relative_url
+
+    def _resolve_root_path(self) -> Optional[str]:
+        if self.definition.kind == "local":
+            return self.definition.root_path
+        if self.definition.kind == "translation" and self.definition.base_workspace_id:
+            base = self._base_panes.get(self.definition.base_workspace_id)
+            if base is not None:
+                return base._resolve_root_path()
+        return None
+
+    def _ensure_tag_store(self) -> Optional[TagStore]:
+        if self._sharepoint_mode:
+            return None
+        if self._tag_store is not None:
+            return self._tag_store
+        root = self._resolve_root_path()
+        if not root:
+            return None
+        try:
+            os.makedirs(root, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            self._tag_store = TagStore(root)
+            if self.definition.kind == "local":
+                self._owns_tag_store = True
+        except Exception:
+            self._tag_store = None
+        if isinstance(self._filter_model, TagFilterProxyModel):
+            self._filter_model.set_tag_store(self._tag_store)
+        if self._tag_add_btn:
+            self._tag_add_btn.setEnabled(bool(self._tag_store))
+        return self._tag_store
+
+    @property
+    def tag_store(self) -> Optional[TagStore]:
+        return self._ensure_tag_store()
 
     def root_source_index(self) -> Optional[QModelIndex]:
         return self._root_source_index
@@ -299,7 +441,7 @@ class WorkspacePane(QFrame):
         root = self.definition.root_path or ""
         fs_model.setRootPath(root)
         self._source_model = fs_model
-        proxy = QSortFilterProxyModel(self)
+        proxy = TagFilterProxyModel(tag_store=self._tag_store, parent=self)
         proxy.setSourceModel(fs_model)
         proxy.setRecursiveFilteringEnabled(True)
         proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -311,6 +453,8 @@ class WorkspacePane(QFrame):
         for column in range(1, fs_model.columnCount()):
             self._view.setColumnHidden(column, True)
         self._connect_selection()
+        if isinstance(self._filter_model, TagFilterProxyModel):
+            self._filter_model.set_tag_store(self._tag_store)
         self._sync_icon_model()
 
     def _build_sharepoint_model(self) -> None:
@@ -323,7 +467,7 @@ class WorkspacePane(QFrame):
             self,
         )
         self._source_model = sp_model
-        proxy = QSortFilterProxyModel(self)
+        proxy = TagFilterProxyModel(parent=self)
         proxy.setSourceModel(sp_model)
         proxy.setRecursiveFilteringEnabled(True)
         proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -353,7 +497,7 @@ class WorkspacePane(QFrame):
         )
         translated.setSourceModel(source)
         self._translated_model = translated
-        proxy = QSortFilterProxyModel(self)
+        proxy = TagFilterProxyModel(tag_store=self._tag_store, parent=self)
         proxy.setSourceModel(translated)
         proxy.setRecursiveFilteringEnabled(True)
         proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -473,6 +617,101 @@ class WorkspacePane(QFrame):
             self._icon_view.setFocus()
         else:
             self._view.setFocus()
+        self._update_tag_widget()
+
+    def _update_tag_widget(self) -> None:
+        if not self._tag_widget:
+            return
+        if self._sharepoint_mode:
+            if self._tag_label:
+                self._tag_label.setText("Tagging coming soon for SharePoint workspaces")
+            if self._tag_add_btn:
+                self._tag_add_btn.setEnabled(False)
+            self._render_tag_buttons([])
+            return
+        store = self._ensure_tag_store()
+        if not store:
+            if self._tag_label:
+                self._tag_label.setText("Tagging not available (invalid root path)")
+            if self._tag_add_btn:
+                self._tag_add_btn.setEnabled(False)
+            self._render_tag_buttons([])
+            return
+        if self._tag_add_btn:
+            self._tag_add_btn.setEnabled(True)
+        items = [item for item in self.current_items() if not item.get("is_dir")]
+        paths = [item["path"] for item in items]
+        self._current_tag_paths = paths
+        has_selection = bool(paths)
+        if self._tag_add_btn:
+            self._tag_add_btn.setEnabled(has_selection)
+        if not has_selection:
+            if self._tag_label:
+                self._tag_label.setText("Select a file to manage tags")
+            self._render_tag_buttons([])
+            return
+        if self._tag_label:
+            if len(paths) == 1:
+                self._tag_label.setText(f"Tags for {os.path.basename(paths[0]) or paths[0]}")
+            else:
+                self._tag_label.setText(f"Common tags for {len(paths)} files")
+        tag_sets: List[set[str]] = []
+        for path in paths:
+            tags = set(t.lower() for t in store.tags_for(path))
+            tag_sets.append(tags)
+        common: List[str] = []
+        if tag_sets:
+            common_lower = set.intersection(*tag_sets) if len(tag_sets) > 1 else tag_sets[0]
+            if common_lower:
+                # retrieve original casing from first path
+                lookup = {t.lower(): t for t in store.tags_for(paths[0])}
+                common = sorted(lookup.get(tag, tag) for tag in common_lower)
+        self._render_tag_buttons(common)
+
+    def _render_tag_buttons(self, tags: List[str]) -> None:
+        if not self._tag_buttons_layout:
+            return
+        while self._tag_buttons_layout.count():
+            item = self._tag_buttons_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for tag in tags:
+            btn = QToolButton(self._tag_buttons_container)
+            btn.setText(f"{tag} ✕")
+            btn.setToolTip(f"Remove tag '{tag}' from selection")
+            btn.setAutoRaise(True)
+            btn.clicked.connect(lambda _, t=tag: self._on_tag_remove(t))
+            self._tag_buttons_layout.addWidget(btn)
+        self._tag_buttons_layout.addStretch(1)
+
+    def _on_tag_add(self) -> None:
+        store = self._ensure_tag_store()
+        if not store or not self._current_tag_paths:
+            return
+        text, ok = QInputDialog.getText(self, "Add Tags", "Tag names (comma or space separated):")
+        if not ok:
+            return
+        cleaned = text.replace(";", " ").replace(",", " ")
+        entries = [t.strip() for t in cleaned.split() if t.strip()]
+        if not entries:
+            return
+        for tag in entries:
+            for path in self._current_tag_paths:
+                store.add_tag(path, tag)
+        if isinstance(self._filter_model, TagFilterProxyModel):
+            self._filter_model.invalidateFilter()
+        self._update_tag_widget()
+
+    def _on_tag_remove(self, tag: str) -> None:
+        store = self._ensure_tag_store()
+        if not store or not self._current_tag_paths:
+            return
+        for path in self._current_tag_paths:
+            store.remove_tag(path, tag)
+        if isinstance(self._filter_model, TagFilterProxyModel):
+            self._filter_model.invalidateFilter()
+        self._update_tag_widget()
 
     # --- interactions -------------------------------------------------------
     def set_translator(self, translator: Translator) -> None:
@@ -507,6 +746,8 @@ class WorkspacePane(QFrame):
             self._source_model.endResetModel()
         elif isinstance(self._source_model, TranslatedProxyModel):
             self._source_model._cache.clear()  # type: ignore[attr-defined]
+        self._sync_icon_model()
+        self._update_tag_widget()
 
     # --- navigation --------------------------------------------------------
     def current_path(self) -> str:
@@ -683,12 +924,7 @@ class WorkspacePane(QFrame):
                 return True
             base = base.rstrip("/")
             return target == base or target.startswith(base + "/")
-        base_abs = os.path.abspath(self._normalize_path(self._base_root_path))
-        target_abs = os.path.abspath(self._normalize_path(path))
-        try:
-            return os.path.commonpath([target_abs, base_abs]) == base_abs
-        except Exception:
-            return True
+        return True
 
     def _update_navigation_buttons(self) -> None:
         if hasattr(self, "_back_btn"):
@@ -757,8 +993,22 @@ class WorkspacePane(QFrame):
 
     # --- helpers ------------------------------------------------------------
     def _on_search_text_changed(self, text: str) -> None:
-        if self._filter_model:
+        current_root = self.current_path()
+        if text and not self._search_saved_root:
+            self._search_saved_root = current_root
+        if self._filter_model and isinstance(self._filter_model, TagFilterProxyModel):
+            self._filter_model.set_search_query(text)
+        elif self._filter_model:
             self._filter_model.setFilterFixedString(text)
+        if not text and self._search_saved_root:
+            saved = self._search_saved_root
+            self._search_saved_root = None
+            if saved:
+                self._suspend_history = True
+                try:
+                    self.go_to_path(saved, record=False, emit=False)
+                finally:
+                    self._suspend_history = False
 
     def _connect_selection(self) -> None:
         sel_model = self._view.selectionModel()
@@ -779,11 +1029,14 @@ class WorkspacePane(QFrame):
             self._icon_view.setSelectionModel(sel_model)
         root_index = self._view.rootIndex()
         self._icon_view.setRootIndex(root_index)
+        if isinstance(self._filter_model, TagFilterProxyModel):
+            self._filter_model.set_tag_store(self._tag_store)
 
     def _on_selection_changed(self, *_args) -> None:
         if self._suppress_selection_signal:
             return
         self.selection_changed.emit(self.definition.id)
+        self._update_tag_widget()
 
     def _on_expanded(self, index: QModelIndex) -> None:
         if self._suppress_expand_signal:

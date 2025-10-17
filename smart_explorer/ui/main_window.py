@@ -1132,6 +1132,10 @@ QLabel { color: #eee8d5; }
             action = QAction(text, pane)
             action.triggered.connect(handler)
             pane.addAction(action)
+        if pane.tag_store:
+            tag_action = QAction("Edit Tags…", pane)
+            tag_action.triggered.connect(self._edit_tags)
+            pane.addAction(tag_action)
         close_action = QAction("Close Pane", pane)
         close_action.triggered.connect(lambda _, ws_id=pane.id: self._remove_workspace(ws_id))
         pane.addAction(close_action)
@@ -1339,7 +1343,9 @@ QLabel { color: #eee8d5; }
             translated_name = translated_name.strip()
             if base_pane.definition.kind == "local":
                 try:
-                    apply_rename(path, translated_name)
+                    new_path = apply_rename(path, translated_name)
+                    if base_pane.tag_store:
+                        base_pane.tag_store.move(path, new_path, is_dir=item["is_dir"])
                 except Exception:
                     errors += 1
             else:
@@ -1359,6 +1365,43 @@ QLabel { color: #eee8d5; }
         if base_pane:
             base_pane.refresh()
         pane.refresh()
+
+    def _edit_tags(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        store = pane.tag_store
+        if not store:
+            QMessageBox.information(self, "Tags", "Tagging is only available for local workspaces.")
+            return
+        items = [item for item in pane.current_items() if not item.get("is_dir")]
+        if not items:
+            QMessageBox.information(self, "Tags", "Select at least one file to edit tags.")
+            return
+        existing_sets = [set(store.tags_for(item["path"])) for item in items]
+        if len(items) == 1:
+            initial = sorted(existing_sets[0])
+            prompt = "Tags (comma separated):"
+        else:
+            common = set.intersection(*existing_sets) if existing_sets else set()
+            initial = sorted(common)
+            prompt = "Tags to apply to selected files (comma separated):"
+        text, ok = QInputDialog.getText(
+            self,
+            "Edit Tags",
+            prompt,
+            text=", ".join(initial),
+        )
+        if not ok:
+            return
+        tags = [t.strip() for t in text.split(",") if t.strip()]
+        if len(items) == 1:
+            store.set_tags(items[0]["path"], tags)
+        else:
+            for item in items:
+                store.set_tags(item["path"], tags)
+        pane.refresh()
+        self.statusBar().showMessage(f"Updated tags for {len(items)} item(s).", 3000)
 
     def _clipboard_copy(self, cut: bool) -> None:
         pane = self._active_pane()
@@ -1420,6 +1463,8 @@ QLabel { color: #eee8d5; }
             if base_pane and base_pane.definition.kind == "sharepoint":
                 source_site = base_pane.definition.site_relative_url
 
+        target_store = target.tag_store
+        source_store = source.tag_store
         for item in items:
             src = item["path"]
             base_name = os.path.basename(src)
@@ -1447,6 +1492,28 @@ QLabel { color: #eee8d5; }
                             pass
             except Exception:
                 errors += 1
+            else:
+                is_dir = bool(item["is_dir"])
+                entries = source_store.entries_under(src, is_dir=is_dir) if source_store else []
+                if move:
+                    if source_store and target_store and source_store is target_store:
+                        source_store.move(src, dest, is_dir=is_dir)
+                    else:
+                        if source_store:
+                            source_store.clear(src, is_dir=is_dir)
+                        if target_store and entries:
+                            for suffix, tags in entries:
+                                if not tags:
+                                    continue
+                                dest_path = os.path.join(dest, suffix.replace("/", os.sep)) if suffix else dest
+                                target_store.set_tags(dest_path, tags)
+                else:
+                    if target_store and entries:
+                        for suffix, tags in entries:
+                            if not tags:
+                                continue
+                            dest_path = os.path.join(dest, suffix.replace("/", os.sep)) if suffix else dest
+                            target_store.set_tags(dest_path, tags)
         if errors:
             QMessageBox.warning(self, "Paste", f"Some items failed ({errors}).")
         target.refresh()
@@ -1487,6 +1554,8 @@ QLabel { color: #eee8d5; }
             base_pane = self._workspace_panes.get(source.definition.base_workspace_id)
             if base_pane and base_pane.definition.kind == "sharepoint":
                 source_site = base_pane.definition.site_relative_url
+        source_store = source.tag_store
+        target_store = target.tag_store
 
         for item in items:
             src = item["path"]
@@ -1529,6 +1598,9 @@ QLabel { color: #eee8d5; }
                             pass
             except Exception:
                 errors += 1
+            else:
+                if move and source_store:
+                    source_store.clear(src, is_dir=item["is_dir"])
         if errors:
             QMessageBox.warning(self, "Paste", f"Some SharePoint items failed ({errors}).")
         target.refresh()
@@ -1575,6 +1647,10 @@ QLabel { color: #eee8d5; }
                     errors += 1
         if errors:
             QMessageBox.warning(self, "Delete", f"Some items failed to delete ({errors}).")
+        store = pane.tag_store
+        if store:
+            for item in items:
+                store.clear(item["path"], is_dir=item["is_dir"])
         pane.refresh()
 
     def _copy_share_link(self) -> None:
