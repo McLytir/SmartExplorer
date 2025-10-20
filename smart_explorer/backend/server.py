@@ -88,11 +88,7 @@ class SettingsUpdateRequest(BaseModel):
     sp_base_url: Optional[str] = None
 
 
-def create_translator(cfg: AppConfig) -> Translator:
-    api_key = (cfg.api_key or "").strip()
-    if api_key:
-        return OpenAITranslator(api_key=api_key, model=cfg.model)
-    return IdentityTranslator()
+def create_translator(cfg: AppConfig) -> Translator:\n    api_key = (cfg.api_key or "").strip()\n    if not api_key:\n        try:\n            from ..services import secret_store\n            api_key = secret_store.get_secret("OPENAI_API_KEY") or ""\n        except Exception:\n            api_key = ""\n    if api_key:\n        return OpenAITranslator(api_key=api_key, model=cfg.model)\n    return IdentityTranslator()
 
 
 cfg = load_config()
@@ -239,9 +235,7 @@ def update_settings(update: SettingsUpdateRequest):
         changed_translator = True
     if update.ignore_patterns is not None:
         cfg.ignore_patterns = update.ignore_patterns or []
-    if update.api_key is not None:
-        cfg.api_key = update.api_key.strip() or None
-        changed_translator = True
+    if update.api_key is not None:\n        # Store in system keyring instead of config\n        try:\n            from ..services import secret_store\n            key_text = (update.api_key or "").strip()\n            if key_text:\n                secret_store.set_secret("OPENAI_API_KEY", key_text)\n                cfg.api_key = None\n            else:\n                cfg.api_key = None\n                secret_store.delete_secret("OPENAI_API_KEY")\n        except Exception:\n            cfg.api_key = (update.api_key or "").strip() or None\n        changed_translator = True
     if update.sp_base_url is not None:
         if update.sp_base_url:
             sp_client = SharePointClient(update.sp_base_url)
@@ -689,6 +683,35 @@ def translate(req: TranslateRequest):
 
 
 # Removed warmup endpoints that depended on local filesystem
+
+
+class SPPropertiesRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    server_relative_url: str
+    is_folder: bool
+
+
+class SPPropertiesResponse(BaseModel):
+    name: Optional[str] = None
+    path: Optional[str] = None
+    isDir: bool = False
+    size: int = 0
+    mtime: Optional[str] = None
+    author: Optional[str] = None
+    modifiedBy: Optional[str] = None
+
+
+@app.post("/api/sp/properties", response_model=SPPropertiesResponse)
+def sp_properties(req: SPPropertiesRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        info = sp_client.get_item_info(req.server_relative_url, is_folder=req.is_folder, site_relative_url=req.site_relative_url)  # type: ignore[arg-type]
+        return SPPropertiesResponse(**info)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get properties: {e}")
 
 
 def main(argv: Optional[list[str]] = None):

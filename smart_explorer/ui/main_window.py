@@ -4,16 +4,18 @@ import base64
 import colorsys
 import os
 import sys
+import subprocess
 import uuid
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPalette, QColor
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPalette, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QInputDialog,
     QMainWindow,
+    QCompleter,
     QLineEdit,
     QMessageBox,
     QMenu,
@@ -22,10 +24,11 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QDialog,
+    QTabBar,
 )
 
 from ..api.backend_client import BackendClient
-from ..services.rename_service import apply_rename
+from ..services.rename_service import apply_rename, safe_new_name
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
@@ -47,6 +50,7 @@ from .settings_dialog import SettingsDialog
 from .sharepoint_selector import SharePointSelectorDialog
 from .translation_dialog import TranslationWorkspaceDialog
 from .workspace_pane import WorkspacePane
+from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 
 
 class MainWindow(QMainWindow):
@@ -74,6 +78,14 @@ class MainWindow(QMainWindow):
         self._theme_specs = self._build_theme_specs()
         self._workspace_color_map: Dict[str, str] = {}
         self._base_color_palette: List[str] = self._theme_base_palette()
+        self._rename_undo_stack: List[List[dict]] = []
+        self._layout_tabs: Optional[QTabBar] = QTabBar(self)
+        self._layout_tab_ids: List[str] = []
+        self._layout_tabs.setExpanding(False)
+        self._layout_tabs.setMovable(False)
+        self._layout_tabs.setUsesScrollButtons(True)
+        self._layout_tabs.setDocumentMode(True)
+        self._layout_tabs.tabBarClicked.connect(self._on_layout_tab_clicked)
 
         self._container = QWidget(self)
         self._container_layout = QVBoxLayout(self._container)
@@ -114,6 +126,7 @@ class MainWindow(QMainWindow):
         self._rebuild_workspace_area()
         self.statusBar().showMessage("Ready")
         self._setup_shortcuts()
+        self._refresh_layout_tabs()
 
     # ------------------------------------------------------------------ UI --
     def _build_toolbar(self) -> QToolBar:
@@ -184,12 +197,64 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
+        goto_action = QAction("Go To…", self)
+        goto_action.setShortcut(QKeySequence("Ctrl+K"))
+        goto_action.triggered.connect(self._open_go_to_palette)
+        tb.addAction(goto_action)
+        self.addAction(goto_action)
+        # macOS-friendly alternative (⌘K)
+        try:
+            goto_action_mac = QShortcut(QKeySequence("Meta+K"), self)
+            goto_action_mac.activated.connect(self._open_go_to_palette)
+            self._shortcuts.append(goto_action_mac)
+        except Exception:
+            pass
+
         self._address_bar = QLineEdit(self)
         self._address_bar.setPlaceholderText("Path")
         self._address_bar.setClearButtonEnabled(True)
         self._address_bar.setMinimumWidth(320)
         self._address_bar.returnPressed.connect(self._on_address_bar_return)
         tb.addWidget(self._address_bar)
+
+        # Local path autocompletion in address bar
+        try:
+            from PySide6.QtWidgets import QFileSystemModel
+            fs_model = QFileSystemModel(self)
+            # Use root of current drive or system root
+            fs_model.setRootPath("")
+            completer = QCompleter(self)
+            completer.setModel(fs_model)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            self._address_bar.setCompleter(completer)
+        except Exception:
+            pass
+
+        # Focus address bar shortcut
+        focus_addr = QShortcut(QKeySequence("Ctrl+L"), self)
+        focus_addr.activated.connect(lambda: (self._address_bar.setFocus() if self._address_bar else None))
+        self._shortcuts.append(focus_addr)
+        try:
+            focus_addr_mac = QShortcut(QKeySequence("Meta+L"), self)
+            focus_addr_mac.activated.connect(lambda: (self._address_bar.setFocus() if self._address_bar else None))
+            self._shortcuts.append(focus_addr_mac)
+        except Exception:
+            pass
+
+        # Undo last rename batch
+        undo_action = QAction("Undo Last Rename", self)
+        undo_action.triggered.connect(self._undo_last_rename_batch)
+        tb.addAction(undo_action)
+
+        # Follow base toggle for translation panes
+        self._follow_toggle = QAction("Follow Base", self)
+        self._follow_toggle.setCheckable(True)
+        self._follow_toggle.setChecked(True)
+        self._follow_toggle.triggered.connect(self._toggle_follow_active)
+        tb.addAction(self._follow_toggle)
+        # Initially disabled until a translation pane is active
+        self._follow_toggle.setEnabled(False)
 
         return tb
 
@@ -203,11 +268,21 @@ class MainWindow(QMainWindow):
             ("Alt+Left", "back"),
             ("Alt+Right", "forward"),
             ("Alt+Up", "up"),
+            ("Meta+[", "back"),
+            ("Meta+]", "forward"),
+            ("Meta+Up", "up"),
         ):
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.activated.connect(lambda checked=False, a=action: self._navigate_active_pane(a))
             self._shortcuts.append(shortcut)
         self._sync_address_bar()
+
+    def _toggle_follow_active(self, checked: bool) -> None:
+        pane = self._active_pane()
+        if not pane or pane.definition.kind != "translation":
+            return
+        pane.set_follow_base(bool(checked))
+        self._on_pane_link_toggled(pane.id, bool(checked))
 
     def _navigate_active_pane(self, action: str) -> None:
         pane = self._active_pane()
@@ -233,6 +308,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Navigate", f"Unable to open '{target}'.")
             self._sync_address_bar()
 
+    def _open_go_to_palette(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        current = pane.current_path() or ""
+        text, ok = QInputDialog.getText(self, "Go To", "Path:", text=current)
+        if not ok:
+            return
+        target = (text or current).strip()
+        if target:
+            if not pane.go_to_path(target):
+                QMessageBox.warning(self, "Go To", f"Unable to open '{target}'.")
+            self._sync_address_bar()
+
     def _sync_address_bar(self) -> None:
         if not self._address_bar:
             return
@@ -250,6 +340,59 @@ class MainWindow(QMainWindow):
     def _on_workspace_path_changed(self, workspace_id: str, path: str) -> None:
         if workspace_id == self._active_workspace_id:
             self._update_address_bar_text(path)
+        pane = self._workspace_panes.get(workspace_id)
+        if pane:
+            pane.set_title(self._display_name_for_pane(pane))
+            # Keep translation panes mirrored to the base pane's path (if linked)
+            if pane.definition.kind != "translation":
+                for dep in self._translation_dependents(workspace_id):
+                    try:
+                        if getattr(dep.definition, "follow_base", True):
+                            dep.set_root_to_path(path, record=False, emit=False)
+                        dep.set_title(self._display_name_for_pane(dep))
+                    except Exception:
+                        pass
+            else:
+                for dep in self._translation_dependents(workspace_id):
+                    dep.set_title(self._display_name_for_pane(dep))
+
+    def _display_name_for_pane(self, pane: WorkspacePane) -> str:
+        try:
+            kind = pane.definition.kind
+            # Manual override takes precedence
+            override = getattr(pane.definition, "title_override", None)
+            if override:
+                return override
+            if kind == "translation":
+                base_id = pane.definition.base_workspace_id
+                language = pane.definition.language or (getattr(self._cfg, "target_language", None) or "English")
+                base_title = ""
+                if base_id and base_id in self._workspace_panes:
+                    base_title = self._display_name_for_pane(self._workspace_panes[base_id])
+                else:
+                    base_title = pane.definition.name or "Translation"
+                return f"{base_title} → {language}"
+            if kind == "local":
+                p = pane.current_path() or pane.definition.root_path or ""
+                if not p:
+                    return pane.definition.name or "Local"
+                drive, rest = os.path.splitdrive(p)
+                tail = os.path.basename(p.rstrip("/\\"))
+                if not tail:
+                    return (drive + os.sep) if drive else os.sep
+                return tail
+            if kind == "sharepoint":
+                p = pane.current_path() or pane.definition.server_relative_url or "/"
+                if not p:
+                    return pane.definition.name or "SharePoint"
+                s = p.rstrip("/")
+                if not s or s == "/":
+                    return "SharePoint"
+                label = s.split("/")[-1] or "SharePoint"
+                return label
+        except Exception:
+            pass
+        return pane.definition.name or "Pane"
 
     def _build_theme_specs(self) -> Dict[str, dict]:
         return {
@@ -606,6 +749,10 @@ QLabel { color: #eee8d5; }
         # Restore state where possible
         for wid, pane in self._workspace_panes.items():
             pane.restore_state(prev_states.get(wid, {}))
+            try:
+                pane.set_title(self._display_name_for_pane(pane))
+            except Exception:
+                pass
         self._sync_address_bar()
 
     def _build_splitter_layout(self, panes: List[WorkspacePane]) -> QSplitter:
@@ -656,6 +803,17 @@ QLabel { color: #eee8d5; }
         else:
             self._active_workspace_id = None
         self._sync_address_bar()
+        # Update follow toggle state/visibility
+        try:
+            if hasattr(self, "_follow_toggle") and self._follow_toggle:
+                pane = self._workspace_panes.get(self._active_workspace_id) if self._active_workspace_id else None
+                if pane and pane.definition.kind == "translation":
+                    self._follow_toggle.setEnabled(True)
+                    self._follow_toggle.setChecked(getattr(pane.definition, "follow_base", True))
+                else:
+                    self._follow_toggle.setEnabled(False)
+        except Exception:
+            pass
 
     def _translation_dependents(self, base_workspace_id: str) -> List[WorkspacePane]:
         return [
@@ -693,8 +851,30 @@ QLabel { color: #eee8d5; }
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
+        # Layout tabs (layouts as quick tabs)
+        if self._layout_tabs is not None:
+            self._container_layout.addWidget(self._layout_tabs)
         self._container_layout.addWidget(splitter, 1)
         self._update_splitter_sizes()
+
+    # ---------------------------------------------------------- layout tabs --
+    def _refresh_layout_tabs(self) -> None:
+        if not self._layout_tabs:
+            return
+        self._layout_tabs.blockSignals(True)
+        try:
+            while self._layout_tabs.count():
+                self._layout_tabs.removeTab(0)
+            self._layout_tab_ids = []
+            for layout in self._layouts_manager.all():
+                self._layout_tabs.addTab(layout.name)
+                self._layout_tab_ids.append(layout.id)
+        finally:
+            self._layout_tabs.blockSignals(False)
+
+    def _on_layout_tab_clicked(self, index: int) -> None:
+        if 0 <= index < len(self._layout_tab_ids):
+            self._on_apply_layout(self._layout_tab_ids[index])
 
     def _update_splitter_sizes(self) -> None:
         if not self._main_splitter:
@@ -877,6 +1057,7 @@ QLabel { color: #eee8d5; }
         self._refresh_favorites_panel()
         self._favorites_panel.select_layout(layout.id)
         self._persist_state(save_workspaces=False)
+        self._refresh_layout_tabs()
 
     def _on_apply_layout(self, layout_id: str) -> None:
         layout = self._layouts_manager.get(layout_id)
@@ -888,6 +1069,7 @@ QLabel { color: #eee8d5; }
         self._workspace_manager = ensure_workspaces(self._cfg)
         self._persist_state()
         self._rebuild_workspace_area()
+        self._refresh_layout_tabs()
 
     def _on_remove_layout(self, layout_id: str) -> None:
         layout = self._layouts_manager.get(layout_id)
@@ -898,6 +1080,7 @@ QLabel { color: #eee8d5; }
         self._layouts_manager.remove(layout_id)
         self._refresh_favorites_panel()
         self._persist_state(save_workspaces=False)
+        self._refresh_layout_tabs()
 
     def _on_rename_layout(self, layout_id: str) -> None:
         layout = self._layouts_manager.get(layout_id)
@@ -911,12 +1094,14 @@ QLabel { color: #eee8d5; }
         self._refresh_favorites_panel()
         self._favorites_panel.select_layout(layout.id)
         self._persist_state(save_workspaces=False)
+        self._refresh_layout_tabs()
 
     def _on_move_layout(self, layout_id: str, offset: int) -> None:
         self._layouts_manager.move_by_offset(layout_id, offset)
         self._refresh_favorites_panel()
         self._favorites_panel.select_layout(layout_id)
         self._persist_state(save_workspaces=False)
+        self._refresh_layout_tabs()
 
     def _move_active_workspace(self, offset: int) -> None:
         if not self._active_workspace_id or offset == 0:
@@ -971,11 +1156,13 @@ QLabel { color: #eee8d5; }
         if definition.kind != "translation" and self._translation_dependents(definition.id):
             QMessageBox.warning(self, "Workspace", "Cannot convert a workspace that other translations depend on.")
             return
-        base_options = [
-            (ws.id, ws.name)
-            for ws in self._workspace_manager.definitions()
-            if ws.id != definition.id and ws.kind in ("local", "sharepoint")
-        ]
+        base_options = []
+        for ws in self._workspace_manager.definitions():
+            if ws.id == definition.id or ws.kind not in ("local", "sharepoint"):
+                continue
+            pane2 = self._workspace_panes.get(ws.id)
+            display2 = self._display_name_for_pane(pane2) if pane2 else (getattr(ws, "title_override", None) or ws.name)
+            base_options.append((ws.id, display2))
         if not base_options:
             QMessageBox.information(self, "Translation", "Create a local or SharePoint workspace first.")
             return
@@ -990,6 +1177,7 @@ QLabel { color: #eee8d5; }
         definition.kind = "translation"
         definition.base_workspace_id = base_id
         definition.language = language
+        definition.follow_base = True
         definition.root_path = None
         definition.site_relative_url = None
         definition.server_relative_url = None
@@ -1084,6 +1272,8 @@ QLabel { color: #eee8d5; }
         pane.expanded_path.connect(self._on_workspace_expanded)
         pane.collapsed_path.connect(self._on_workspace_collapsed)
         pane.pane_clicked.connect(self._on_pane_clicked)
+        if hasattr(pane, "link_toggled"):
+            pane.link_toggled.connect(self._on_pane_link_toggled)
         if hasattr(pane, "header"):
             pane.header.reorder_requested.connect(self._on_header_reorder)
             pane.header.context_menu_requested.connect(self._on_header_context_menu)
@@ -1119,22 +1309,63 @@ QLabel { color: #eee8d5; }
             pane.collapse_path(path)
 
     def _attach_context_menu(self, pane: WorkspacePane) -> None:
-        menu_actions = {
-            "Rename…": self._apply_translated_rename,
-            "Copy": lambda: self._clipboard_copy(False),
-            "Cut": lambda: self._clipboard_copy(True),
-            "Paste": self._clipboard_paste,
-            "Delete": self._delete_selected_items,
-            "Copy Share Link": self._copy_share_link,
-            "Open in SharePoint": self._open_in_sharepoint,
-        }
-        for text, handler in menu_actions.items():
-            action = QAction(text, pane)
-            action.triggered.connect(handler)
-            pane.addAction(action)
+        def add_action(text, handler=None, *, separator=False):
+            act = QAction(text, pane)
+            if separator:
+                act.setSeparator(True)
+            elif handler:
+                act.triggered.connect(handler)
+            pane.addAction(act)
+            try:
+                if hasattr(pane, "_view"):
+                    pane._view.addAction(act)
+                if hasattr(pane, "_icon_view"):
+                    pane._icon_view.addAction(act)
+            except Exception:
+                pass
+            return act
+
+        # Open group
+        add_action("Open", self._open_selected_items)
+        add_action("Open With…", self._open_with_selected_items)
+        add_action("Reveal in File Manager", self._reveal_in_file_manager)
+        add_action("", separator=True)
+        # Clipboard group
+        add_action("Copy", lambda: self._clipboard_copy(False))
+        add_action("Cut", lambda: self._clipboard_copy(True))
+        add_action("Paste", self._clipboard_paste)
+        add_action("Copy Path", self._copy_paths_to_clipboard)
+        add_action("", separator=True)
+        # Edit group
+        add_action("Rename", self._rename_selected_item)
+        add_action("New Folder", self._new_folder)
+        add_action("Delete", self._delete_selected_items)
+        add_action("", separator=True)
+        # Translation group
+        add_action("Apply Translation Rename", self._apply_translated_rename)
+        add_action("", separator=True)
+        # SharePoint group
+        add_action("Copy Share Link", self._copy_share_link)
+        add_action("Open in SharePoint", self._open_in_sharepoint)
+        add_action("", separator=True)
+        # Properties
+        add_action("Properties", self._show_properties)
         close_action = QAction("Close Pane", pane)
         close_action.triggered.connect(lambda _, ws_id=pane.id: self._remove_workspace(ws_id))
         pane.addAction(close_action)
+        try:
+            reveal_label = "Reveal in Explorer" if sys.platform.startswith("win") else ("Reveal in Finder" if sys.platform == "darwin" else "Reveal in Files")
+        except Exception:
+            reveal_label = "Reveal in File Manager"
+        reveal_action = QAction(reveal_label, pane)
+        reveal_action.triggered.connect(self._reveal_in_file_manager)
+        pane.addAction(reveal_action)
+        copy_path_action = QAction("Copy Path", pane)
+        copy_path_action.triggered.connect(self._copy_paths_to_clipboard)
+        pane.addAction(copy_path_action)
+        sp_reveal = QAction("Reveal in SharePoint (Web)", pane)
+        sp_reveal.triggered.connect(self._open_in_sharepoint)
+        pane.addAction(sp_reveal)
 
     def _on_workspace_drop_request(self, target_workspace_id: str, payload: dict, target_path: str, move: bool, site: Optional[str]) -> None:
         source_workspace_id = payload.get("source_workspace")
@@ -1158,6 +1389,42 @@ QLabel { color: #eee8d5; }
         self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=source_id)
 
+    def _reveal_in_file_manager(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        path = items[0].get("path")
+        if not path:
+            return
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["explorer.exe", "/select,", path])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path])
+            else:
+                folder = os.path.dirname(path) if not items[0].get("is_dir") else path
+                if folder:
+                    try:
+                        subprocess.Popen(["xdg-open", folder])
+                    except Exception:
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        except Exception:
+            pass
+
+    def _copy_paths_to_clipboard(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        text = "\n".join([it.get("path") for it in items if it.get("path")])
+        if text:
+            QGuiApplication.clipboard().setText(text)
+
     def _on_header_context_menu(self, workspace_id: str, global_pos) -> None:
         pane = self._workspace_panes.get(workspace_id)
         definition = self._workspace_manager.get(workspace_id)
@@ -1168,6 +1435,9 @@ QLabel { color: #eee8d5; }
         sharepoint_action = menu.addAction("Switch to SharePoint…")
         translation_label = "Configure Translation…" if definition.kind == "translation" else "Switch to Translation…"
         translation_action = menu.addAction(translation_label)
+        menu.addSeparator()
+        rename_action = menu.addAction("Rename Pane…")
+        reset_title_action = menu.addAction("Reset Auto Title")
         if definition.kind == "local":
             local_action.setEnabled(False)
         if definition.kind == "sharepoint":
@@ -1176,6 +1446,18 @@ QLabel { color: #eee8d5; }
             translation_action.setEnabled(False)
         if definition.kind != "translation" and self._translation_dependents(definition.id):
             translation_action.setEnabled(False)
+        if not getattr(definition, "title_override", None):
+            reset_title_action.setEnabled(False)
+
+        # Add link/unlink toggle for translation panes
+        link_action = None
+        if definition.kind == "translation":
+            link_action = menu.addAction("Link to Base Navigation")
+            link_action.setCheckable(True)
+            try:
+                link_action.setChecked(getattr(definition, "follow_base", True))
+            except Exception:
+                link_action.setChecked(True)
 
         action = menu.exec(global_pos)
         if not action:
@@ -1186,6 +1468,27 @@ QLabel { color: #eee8d5; }
             self._convert_workspace_to_sharepoint(definition)
         elif action is translation_action:
             self._convert_workspace_to_translation(definition)
+        elif link_action is not None and action is link_action:
+            new_state = not getattr(definition, "follow_base", True)
+            definition.follow_base = new_state
+            self._workspace_manager.update(definition)
+            self._persist_state()
+            if new_state and definition.base_workspace_id and definition.base_workspace_id in self._workspace_panes:
+                base = self._workspace_panes[definition.base_workspace_id]
+                pane.set_root_to_path(base.current_path(), record=False, emit=False)
+        elif 'rename_action' in locals() and action is rename_action:
+            current_title = self._display_name_for_pane(pane)
+            new_name, ok = QInputDialog.getText(self, "Rename Pane", "Title:", text=current_title)
+            if ok and new_name.strip():
+                definition.title_override = new_name.strip()
+                self._workspace_manager.update(definition)
+                self._persist_state()
+                pane.set_title(definition.title_override)
+        elif 'reset_title_action' in locals() and action is reset_title_action:
+            definition.title_override = None
+            self._workspace_manager.update(definition)
+            self._persist_state()
+            pane.set_title(self._display_name_for_pane(pane))
 
     # ------------------------------------------------------------- workspace ops
     def _on_workspace_selection_changed(self, workspace_id: str) -> None:
@@ -1194,14 +1497,266 @@ QLabel { color: #eee8d5; }
         if not pane:
             return
         selected = pane.current_items()
-        self.statusBar().showMessage(f"{pane.definition.name}: {len(selected)} selected")
+        try:
+            title = self._display_name_for_pane(pane)
+        except Exception:
+            title = pane.definition.name
+        self.statusBar().showMessage(f"{title}: {len(selected)} selected")
         self._mirror_selection(workspace_id)
+        # keep toolbar follow toggle in sync
+        try:
+            if hasattr(self, "_follow_toggle") and self._follow_toggle:
+                if pane.definition.kind == "translation":
+                    self._follow_toggle.setEnabled(True)
+                    self._follow_toggle.setChecked(getattr(pane.definition, "follow_base", True))
+                else:
+                    self._follow_toggle.setEnabled(False)
+        except Exception:
+            pass
 
     def _on_pane_clicked(self, workspace_id: str) -> None:
         self._focus_workspace(workspace_id)
 
+    def _on_pane_link_toggled(self, workspace_id: str, follow: bool) -> None:
+        definition = self._workspace_manager.get(workspace_id)
+        pane = self._workspace_panes.get(workspace_id)
+        if not definition or not pane:
+            return
+        try:
+            definition.follow_base = bool(follow)
+            self._workspace_manager.update(definition)
+            self._persist_state()
+        except Exception:
+            pass
+        # update toolbar state
+        try:
+            if hasattr(self, "_follow_toggle") and self._active_workspace_id == workspace_id:
+                self._follow_toggle.setEnabled(True)
+                self._follow_toggle.setChecked(bool(follow))
+        except Exception:
+            pass
+        # if linking now, sync path to base
+        try:
+            if follow and definition.base_workspace_id and definition.base_workspace_id in self._workspace_panes:
+                base = self._workspace_panes[definition.base_workspace_id]
+                pane.set_follow_base(True)
+                pane.set_root_to_path(base.current_path(), record=False, emit=False)
+        except Exception:
+            pass
+
     def _on_workspace_item_activated(self, workspace_id: str, path: str) -> None:
-        self.statusBar().showMessage(f"Opened: {path}", 4000)
+        pane = self._workspace_panes.get(workspace_id)
+        if not pane:
+            return
+        effective_kind = pane.definition.kind
+        effective_site = pane.definition.site_relative_url
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            base = self._workspace_panes.get(pane.definition.base_workspace_id)
+            if base:
+                effective_kind = base.definition.kind
+                effective_site = base.definition.site_relative_url
+        try:
+            if effective_kind == "local":
+                if os.path.exists(path):
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                else:
+                    QMessageBox.warning(self, "Open", f"File not found: {path}")
+            elif effective_kind == "sharepoint":
+                try:
+                    data = self._backend.sp_download(path, site_relative_url=effective_site)
+                except Exception as exc:
+                    QMessageBox.warning(self, "Open", f"Download failed: {exc}")
+                    return
+                try:
+                    import tempfile
+                    import uuid as _uuid
+                    name = os.path.basename(path) or f"download-{_uuid.uuid4().hex}"
+                    # Use configured download dir if provided, else temp
+                    target_dir = getattr(self._cfg, "sp_download_dir", None) or tempfile.gettempdir()
+                    try:
+                        os.makedirs(target_dir, exist_ok=True)
+                    except Exception:
+                        target_dir = tempfile.gettempdir()
+                    temp_path = os.path.join(target_dir, name)
+                    with open(temp_path, "wb") as f:
+                        f.write(data)
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(temp_path))
+                except Exception as exc:
+                    QMessageBox.warning(self, "Open", f"Failed to open file: {exc}")
+            else:
+                self.statusBar().showMessage(f"Opened: {path}", 4000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Open", f"Failed to open: {exc}")
+
+    def _open_selected_items(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        for it in items:
+            p = it.get("path") or ""
+            if not p:
+                continue
+            if it.get("is_dir"):
+                pane.go_to_path(p)
+            else:
+                self._on_workspace_item_activated(pane.id, p)
+    def _open_with_selected_items(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        files = [it.get("path") for it in items if it.get("path") and not it.get("is_dir")]
+        if not files:
+            return
+        try:
+            if sys.platform.startswith("win"):
+                for p in files:
+                    subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", p])
+            elif sys.platform == "darwin":
+                try:
+                    app, _ = QFileDialog.getOpenFileName(self, "Choose Application", "/Applications")
+                except Exception:
+                    app = ''
+                for p in files:
+                    if app:
+                        subprocess.Popen(["open", "-a", app, p])
+                    else:
+                        subprocess.Popen(["open", p])
+            else:
+                try:
+                    cmd, ok = QInputDialog.getText(self, "Open With", "Application (command):", text="xdg-open")
+                    if not ok:
+                        return
+                    parts = (cmd or "").strip().split()
+                    if not parts:
+                        parts = ["xdg-open"]
+                except Exception:
+                    parts = ["xdg-open"]
+                for p in files:
+                    subprocess.Popen(parts + [p])
+        except Exception as exc:
+            QMessageBox.warning(self, "Open With", f"Failed: {exc}")
+
+    def _rename_selected_item(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        it = items[0]
+        path = it.get("path") or ""
+        if not path:
+            return
+        current_name = os.path.basename(path)
+        new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=current_name)
+        if not ok or not (new_name or "").strip():
+            return
+        new_name = new_name.strip()
+        target_pane = pane
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            target_pane = self._workspace_panes.get(pane.definition.base_workspace_id) or pane
+        try:
+            if target_pane.definition.kind == "local":
+                from ..services.rename_service import apply_rename
+                apply_rename(path, new_name)
+            elif target_pane.definition.kind == "sharepoint":
+                self._backend.sp_rename(
+                    server_relative_url=path,
+                    new_name=new_name,
+                    is_folder=bool(it.get("is_dir")),
+                    site_relative_url=target_pane.definition.site_relative_url,
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename", f"Failed to rename item: {exc}")
+        try:
+            target_pane.refresh()
+            pane.refresh()
+        except Exception:
+            pass
+
+    def _new_folder(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        target_dir = pane.current_path()
+        if not target_dir:
+            return
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="New Folder")
+        if not ok or not (name or "").strip():
+            return
+        name = name.strip()
+        target_pane = pane
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            target_pane = self._workspace_panes.get(pane.definition.base_workspace_id) or pane
+        try:
+            if target_pane.definition.kind == "local":
+                os.makedirs(os.path.join(target_dir, name), exist_ok=False)
+            elif target_pane.definition.kind == "sharepoint":
+                self._backend.sp_create_folder(
+                    parent_server_relative_url=target_dir,
+                    name=name,
+                    site_relative_url=target_pane.definition.site_relative_url,
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "New Folder", f"Failed to create folder: {exc}")
+        try:
+            target_pane.refresh()
+            pane.refresh()
+        except Exception:
+            pass
+
+    def _show_properties(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        it = items[0]
+        path = it.get("path") or ""
+        is_dir = bool(it.get("is_dir"))
+        info_lines = [
+            "Path: " + path,
+            "Type: " + ("Folder" if is_dir else "File"),
+        ]
+        # For translation panes, use the base pane kind/site
+        eff = pane
+        if pane.definition.kind == 'translation' and pane.definition.base_workspace_id:
+            eff = self._workspace_panes.get(pane.definition.base_workspace_id) or pane
+        try:
+            if eff.definition.kind == 'local':
+                st = os.stat(path)
+                info_lines.append("Size: " + str(st.st_size) + " bytes")
+                from datetime import datetime
+                info_lines.append("Modified: " + datetime.fromtimestamp(st.st_mtime).isoformat(sep=' ', timespec='seconds'))
+                try:
+                    import pwd
+                    info_lines.append("Owner: " + pwd.getpwuid(st.st_uid).pw_name)
+                except Exception:
+                    pass
+            elif eff.definition.kind == 'sharepoint':
+                try:
+                    props = self._backend.sp_properties(path, is_folder=is_dir, site_relative_url=eff.definition.site_relative_url)
+                    sz = props.get('size')
+                    if isinstance(sz, int):
+                        info_lines.append("Size: " + str(sz) + " bytes")
+                    if props.get('mtime'):
+                        info_lines.append("Modified: " + str(props.get('mtime')))
+                    if props.get('author'):
+                        info_lines.append("Author: " + str(props.get('author')))
+                    if props.get('modifiedBy'):
+                        info_lines.append("Modified By: " + str(props.get('modifiedBy')))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        QMessageBox.information(self, "Properties", "\n".join(info_lines))
 
     def _add_local_workspace(self) -> None:
         start_dir = self._cfg.root_path if os.path.isdir(self._cfg.root_path) else os.path.expanduser("~")
@@ -1245,7 +1800,13 @@ QLabel { color: #eee8d5; }
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _add_translation_workspace(self) -> None:
-        base_options = [(ws.id, ws.name) for ws in self._workspace_manager.definitions() if ws.kind in ("local", "sharepoint")]
+        base_options = []
+        for ws in self._workspace_manager.definitions():
+            if ws.kind not in ("local", "sharepoint"):
+                continue
+            pane = self._workspace_panes.get(ws.id)
+            display = self._display_name_for_pane(pane) if pane else (getattr(ws, "title_override", None) or ws.name)
+            base_options.append((ws.id, display))
         if not base_options:
             QMessageBox.information(self, "Translation", "Create a base workspace (local or SharePoint) first.")
             return
@@ -1329,29 +1890,92 @@ QLabel { color: #eee8d5; }
         if not base_pane:
             QMessageBox.warning(self, "Rename", "Base workspace missing; cannot apply rename.")
             return
-        errors = 0
-        for item in items:
-            path = item["path"]
-            current_name = item.get("display") or os.path.basename(path)
-            translated_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=current_name)
-            if not ok or not translated_name.strip():
-                continue
-            translated_name = translated_name.strip()
-            if base_pane.definition.kind == "local":
+        # Build candidates using original and translated display names
+        candidates: List[RenameCandidate] = []
+        for it in items:
+            path = it["path"]
+            orig = os.path.basename(path)
+            trans = (it.get("display") or orig).strip()
+            candidates.append(RenameCandidate(path, it["is_dir"], orig, trans))
+
+        # Conflict checker per backend
+        if base_pane.definition.kind == "local":
+            def checker(parent_dir: str, new_name: str, is_dir: bool):
+                # If exists, propose a safe new name; flag conflict only if identical exists
+                exists = os.path.exists(os.path.join(parent_dir, new_name))
+                suggestion = safe_new_name(parent_dir, new_name) if exists else None
+                return (exists, suggestion)
+        else:
+            def checker(parent_server_relative_url: str, new_name: str, is_dir: bool):
                 try:
-                    apply_rename(path, translated_name)
-                except Exception:
-                    errors += 1
-            else:
-                try:
-                    self._backend.sp_rename(
-                        server_relative_url=path,
-                        new_name=translated_name,
-                        is_folder=item["is_dir"],
-                        site_relative_url=base_pane.definition.site_relative_url,
+                    # List children and check name collision
+                    data = self._backend.sp_list(
+                        base_pane.definition.site_relative_url or "",
+                        parent_server_relative_url,
                     )
+                    items = data.get("items") or []
+                    names = [(it.get("name") or it.get("Name") or "") for it in items]
+                    names = [n for n in names if n]
+                    conflict = new_name in names
+                    return (conflict, None)
+                except Exception:
+                    return (False, None)
+
+        dlg = RenamePreviewDialog(candidates, parent=self, conflict_checker=checker)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        ops = dlg.selected_operations()
+        if not ops:
+            return
+
+        # Apply in batch and record for undo
+        undo_batch: List[dict] = []
+        errors = 0
+        self.statusBar().showMessage("Renaming items…", 3000)
+        if base_pane.definition.kind == "local":
+            for old_path, new_name, is_dir in ops:
+                try:
+                    new_path = apply_rename(old_path, new_name)
+                    undo_batch.append({
+                        "type": "local",
+                        "old_path": old_path,
+                        "new_path": new_path,
+                        "is_dir": is_dir,
+                    })
                 except Exception:
                     errors += 1
+        else:
+            site = base_pane.definition.site_relative_url
+            for old_path, new_name, is_dir in ops:
+                try:
+                    # Compute new server-relative path for undo
+                    parent = old_path.rsplit("/", 1)[0]
+                    new_path = f"{parent}/{new_name}"
+                    try:
+                        resp = self._backend.sp_rename(
+                            server_relative_url=old_path,
+                            new_name=new_name,
+                            is_folder=is_dir,
+                            site_relative_url=site,
+                        )
+                        if isinstance(resp, dict) and resp.get("newPath"):
+                            new_path = resp["newPath"]
+                    except Exception:
+                        raise
+                    undo_batch.append({
+                        "type": "sp",
+                        "old_path": old_path,
+                        "new_path": new_path,
+                        "is_dir": is_dir,
+                        "site": site,
+                    })
+                except Exception:
+                    errors += 1
+
+        if undo_batch:
+            self._rename_undo_stack.append(undo_batch)
+
         if errors:
             QMessageBox.warning(self, "Rename", f"Some items failed to rename ({errors}).")
         else:
@@ -1359,6 +1983,43 @@ QLabel { color: #eee8d5; }
         if base_pane:
             base_pane.refresh()
         pane.refresh()
+
+    def _undo_last_rename_batch(self) -> None:
+        if not self._rename_undo_stack:
+            QMessageBox.information(self, "Undo", "No rename to undo.")
+            return
+        batch = self._rename_undo_stack.pop()
+        errors = 0
+        # Undo in reverse order
+        for op in reversed(batch):
+            try:
+                if op["type"] == "local":
+                    if os.path.exists(op["new_path"]):
+                        os.rename(op["new_path"], op["old_path"])
+                else:
+                    # SharePoint: rename new_path back to original name
+                    new_path = op["new_path"]
+                    old_path = op["old_path"]
+                    site = op.get("site")
+                    name = os.path.basename(old_path)
+                    self._backend.sp_rename(
+                        server_relative_url=new_path,
+                        new_name=name,
+                        is_folder=op.get("is_dir", False),
+                        site_relative_url=site,
+                    )
+            except Exception:
+                errors += 1
+        if errors:
+            QMessageBox.warning(self, "Undo", f"Some items failed to undo ({errors}).")
+        else:
+            QMessageBox.information(self, "Undo", "Undo completed.")
+        # Refresh all panes
+        for p in self._workspace_panes.values():
+            try:
+                p.refresh()
+            except Exception:
+                pass
 
     def _clipboard_copy(self, cut: bool) -> None:
         pane = self._active_pane()
@@ -1654,7 +2315,7 @@ QLabel { color: #eee8d5; }
 
     # ------------------------------------------------------------- settings --
     def _create_translator(self) -> Translator:
-        api_key = (self._cfg.api_key or "").strip()
+        api_key = (self._cfg.api_key or "").strip()\n        if not api_key:\n            try:\n                from ..services import secret_store\n                api_key = secret_store.get_secret("OPENAI_API_KEY") or ""\n            except Exception:\n                api_key = ""
         if api_key:
             return OpenAITranslator(api_key=api_key, model=self._cfg.model)
         try:

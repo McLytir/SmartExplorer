@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
+    QToolBar,
     QLabel,
     QLineEdit,
     QListView,
@@ -145,6 +146,7 @@ class WorkspacePane(QFrame):
     drop_request = Signal(str, dict, str, bool, object)  # target_workspace, payload, target_path, move, site
     path_changed = Signal(str, str)  # workspace_id, path
     pane_clicked = Signal(str)       # workspace_id
+    link_toggled = Signal(str, bool) # workspace_id, follow_base
 
     def __init__(
         self,
@@ -223,7 +225,27 @@ class WorkspacePane(QFrame):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.header)
+        # Header row: title label + optional link toggle button
+        _hdr_row = QWidget(self)
+        _hdr_layout = QHBoxLayout(_hdr_row)
+        _hdr_layout.setContentsMargins(0, 0, 0, 0)
+        _hdr_layout.setSpacing(6)
+        _hdr_layout.addWidget(self.header)
+        # Link toggle (only meaningful for translation panes)
+        self._link_btn = QToolButton(self)
+        self._link_btn.setAutoRaise(True)
+        self._link_btn.setCheckable(True)
+        self._link_btn.toggled.connect(self._on_link_toggled)
+        try:
+            self._link_btn.setVisible(self.definition.kind == "translation")
+            self._link_btn.setChecked(getattr(self.definition, "follow_base", True))
+            self._link_btn.setText("🔗" if self._link_btn.isChecked() else "⛓")
+            self._link_btn.setToolTip("Linked to base navigation" if self._link_btn.isChecked() else "Unlinked from base navigation")
+        except Exception:
+            self._link_btn.setVisible(False)
+        _hdr_layout.addStretch(1)
+        _hdr_layout.addWidget(self._link_btn)
+        layout.addWidget(_hdr_row)
         layout.addLayout(self._build_nav_bar())
         layout.addWidget(self._search)
         layout.addWidget(self._view_container, 1)
@@ -272,10 +294,37 @@ class WorkspacePane(QFrame):
 
     def set_title(self, name: str) -> None:
         self.header.setText(name)
+        # keep link button visibility consistent
+        if hasattr(self, "_link_btn"):
+            try:
+                self._link_btn.setVisible(self.definition.kind == "translation")
+                self._link_btn.setChecked(getattr(self.definition, "follow_base", True))
+                self._link_btn.setText("🔗" if self._link_btn.isChecked() else "⛓")
+            except Exception:
+                pass
 
     def set_active(self, active: bool) -> None:
         self._is_active = active
         self._update_style(active)
+        if hasattr(self, "_link_btn"):
+            try:
+                self._link_btn.setVisible(self.definition.kind == "translation")
+            except Exception:
+                pass
+
+    def _on_link_toggled(self, checked: bool) -> None:
+        if self.definition.kind != "translation":
+            return
+        try:
+            self.definition.follow_base = bool(checked)
+        except Exception:
+            self.definition.follow_base = True if checked else False
+        # update glyph
+        try:
+            self._link_btn.setText("🔗" if checked else "⛓")
+        except Exception:
+            pass
+        self.link_toggled.emit(self.definition.id, bool(checked))
 
     def map_view_to_source(self, index: QModelIndex) -> Optional[QModelIndex]:
         return self._map_to_source(index)
@@ -410,7 +459,21 @@ class WorkspacePane(QFrame):
             btn.installEventFilter(self)
             bar.addWidget(btn)
 
-        bar.addStretch(1)
+        # Breadcrumbs area (expands)
+        self._breadcrumbs_holder = QWidget(self)
+        self._breadcrumbs_layout = QHBoxLayout(self._breadcrumbs_holder)
+        self._breadcrumbs_layout.setContentsMargins(0, 0, 0, 0)
+        self._breadcrumbs_layout.setSpacing(4)
+        bar.addWidget(self._breadcrumbs_holder, 1)
+
+        # Quick Go To
+        self._goto_btn = QToolButton(self)
+        self._goto_btn.setText("Go…")
+        self._goto_btn.setToolTip("Quick Go To palette")
+        self._goto_btn.setAutoRaise(True)
+        self._goto_btn.clicked.connect(self._open_go_to_palette)
+        bar.addWidget(self._goto_btn)
+
         bar.addWidget(self._view_mode_btn)
         return bar
 
@@ -507,6 +570,7 @@ class WorkspacePane(QFrame):
             self._source_model.endResetModel()
         elif isinstance(self._source_model, TranslatedProxyModel):
             self._source_model._cache.clear()  # type: ignore[attr-defined]
+        self._refresh_breadcrumbs()
 
     # --- navigation --------------------------------------------------------
     def current_path(self) -> str:
@@ -593,6 +657,7 @@ class WorkspacePane(QFrame):
         self._history_index = index
         self.path_changed.emit(self.definition.id, path)
         self._update_navigation_buttons()
+        self._refresh_breadcrumbs()
 
     def _record_history(self, path: str, *, emit: bool) -> None:
         if self._suspend_history:
@@ -612,6 +677,7 @@ class WorkspacePane(QFrame):
         if emit:
             self.path_changed.emit(self.definition.id, normalized)
         self._update_navigation_buttons()
+        self._refresh_breadcrumbs()
 
     def _initialize_history(self) -> None:
         current = self.current_path()
@@ -622,6 +688,67 @@ class WorkspacePane(QFrame):
             self._history = []
             self._history_index = -1
         self._update_navigation_buttons()
+        self._refresh_breadcrumbs()
+
+    # ---------------------------------------------------------- breadcrumbs --
+    def _split_path_segments(self, path: str):
+        segs = []
+        if self._sharepoint_mode or (self.definition.kind == "translation" and self._sharepoint_mode):
+            p = path or "/"
+            if not p.startswith("/"):
+                p = "/" + p
+            parts = [x for x in p.split("/") if x]
+            accum = ""
+            segs.append(("/", "/"))
+            for part in parts:
+                accum = (accum + "/" + part) if accum else ("/" + part)
+                segs.append((part, accum))
+        else:
+            p = os.path.normpath(path) if path else os.path.expanduser("~")
+            drive, rest = os.path.splitdrive(p)
+            if drive:
+                base = drive + os.sep
+                segs.append((base.rstrip(os.sep), base))
+                tokens = [x for x in rest.split(os.sep) if x]
+                accum = base.rstrip(os.sep)
+                for t in tokens:
+                    accum = accum + os.sep + t
+                    segs.append((t, accum))
+            else:
+                parts = [x for x in p.split(os.sep) if x]
+                segs.append((os.sep, os.sep))
+                accum = ""
+                for part in parts:
+                    accum = (accum + os.sep + part) if accum else (os.sep + part)
+                    segs.append((part, accum))
+        return segs
+
+    def _refresh_breadcrumbs(self) -> None:
+        if not hasattr(self, "_breadcrumbs_layout"):
+            return
+        while self._breadcrumbs_layout.count():
+            item = self._breadcrumbs_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        path = self.current_path()
+        for label, full_path in self._split_path_segments(path):
+            btn = QToolButton(self)
+            btn.setAutoRaise(True)
+            btn.setText(label)
+            btn.setToolTip(full_path)
+            btn.clicked.connect(lambda checked=False, p=full_path: self.go_to_path(p))
+            self._breadcrumbs_layout.addWidget(btn)
+        self._breadcrumbs_layout.addStretch(1)
+
+    def _open_go_to_palette(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        current = self.current_path() or ""
+        text, ok = QInputDialog.getText(self, "Go To", "Path:", text=current)
+        if ok:
+            target = (text or current).strip()
+            if target:
+                self.navigate_to_path(target)
 
     def _determine_base_root(self) -> str:
         if self.definition.kind == "local":

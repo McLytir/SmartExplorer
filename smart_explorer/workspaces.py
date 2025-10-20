@@ -17,6 +17,10 @@ class WorkspaceDefinition:
     id: str
     kind: WorkspaceKind
     name: str
+    # Optional manual title that overrides automatic titles in the UI
+    title_override: Optional[str] = None
+    # For translation panes: whether to mirror base pane navigation
+    follow_base: bool = True
     root_path: Optional[str] = None
     site_relative_url: Optional[str] = None
     server_relative_url: Optional[str] = None
@@ -35,6 +39,8 @@ class WorkspaceDefinition:
             id=str(data.get("id") or f"ws-{uuid.uuid4().hex[:6]}"),
             kind=data.get("kind", "local"),
             name=data.get("name") or data.get("id") or "Workspace",
+            title_override=data.get("title_override"),
+            follow_base=bool(data.get("follow_base", True)),
             root_path=data.get("root_path"),
             site_relative_url=data.get("site_relative_url"),
             server_relative_url=data.get("server_relative_url"),

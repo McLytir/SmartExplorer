@@ -26,6 +26,9 @@ class AppConfig:
     saved_layouts: Optional[list[dict]] = None  # saved workspace configurations
     favorites_bar_position: str = "left"  # left, right, top, bottom
     favorites_bar_size: int = 200  # pixels
+    # Directory to store SharePoint downloads when opening files.
+    # If None, uses the OS temporary directory.
+    sp_download_dir: Optional[str] = None
 
 
 def _config_path() -> str:

@@ -34,14 +34,18 @@ class SettingsDialog(QDialog):
         bux.addWidget(self.backend_url)
         root.addLayout(bux)
 
-        # OpenAI key
+        '# OpenAI key (masked; stored in system keyring)
         self.api_key = QLineEdit(self)
-        self.api_key.setPlaceholderText("OpenAI API Key (sk-...)")
-        self.api_key.setText(self.cfg.api_key or "")
+        self.api_key.setPlaceholderText("OpenAI API Key")
+        self.api_key.setEchoMode(QLineEdit.Password)
         akx = QHBoxLayout()
         akx.addWidget(QLabel("OpenAI Key:"))
         akx.addWidget(self.api_key)
-        root.addLayout(akx)
+        self.btn_api_clear = QPushButton("Clear", self)
+        self.btn_api_clear.setToolTip("Remove saved API key from system keyring")
+        self.btn_api_clear.clicked.connect(self._on_clear_api_key)
+        akx.addWidget(self.btn_api_clear)
+        root.addLayout(akx)'
 
         # Target language
         self.lang = QLineEdit(self)
@@ -84,6 +88,20 @@ class SettingsDialog(QDialog):
         srx.addWidget(self.sp_root)
         root.addLayout(srx)
 
+        # SharePoint download directory for opening files
+        self.sp_download_dir = QLineEdit(self)
+        try:
+            self.sp_download_dir.setText(getattr(self.cfg, "sp_download_dir", "") or "")
+        except Exception:
+            pass
+        sdd = QHBoxLayout()
+        sdd.addWidget(QLabel("SharePoint Download Dir:"))
+        sdd.addWidget(self.sp_download_dir, 1)
+        self.sp_download_browse = QPushButton("Browse…", self)
+        self.sp_download_browse.clicked.connect(self._browse_sp_download_dir)
+        sdd.addWidget(self.sp_download_browse)
+        root.addLayout(sdd)
+
         # Cookies
         self.cookie_header = QTextEdit(self)
         self.cookie_header.setPlaceholderText("Paste full Cookie header here (e.g., FedAuth=...; rtFa=...)\n-or- paste values below")
@@ -119,7 +137,7 @@ class SettingsDialog(QDialog):
         self.btn_close.clicked.connect(self.accept)
 
     def _on_save(self):
-        self.cfg.api_key = self.api_key.text().strip() or None
+        from ..services import secret_store\n        key_text = self.api_key.text().strip()\n        if key_text:\n            secret_store.set_secret("OPENAI_API_KEY", key_text)\n        self.cfg.api_key = None
         self.cfg.target_language = self.lang.text().strip() or "English"
         self.cfg.theme = self.theme_combo.currentData() or "light"
         # Persist backend URL
@@ -135,7 +153,18 @@ class SettingsDialog(QDialog):
             setattr(self.cfg, "sp_library_root", self.sp_root.text().strip() or None)
         except Exception:
             pass
+        try:
+            setattr(self.cfg, "sp_download_dir", self.sp_download_dir.text().strip() or None)
+        except Exception:
+            pass
         save_config(self.cfg)
+
+    def _browse_sp_download_dir(self):
+        from PySide6.QtWidgets import QFileDialog
+        start_dir = self.sp_download_dir.text().strip() or (self.cfg.root_path or "")
+        directory = QFileDialog.getExistingDirectory(self, "Select download directory", start_dir or "")
+        if directory:
+            self.sp_download_dir.setText(directory)
 
     def _on_send(self):
         # Update backend settings and cookies

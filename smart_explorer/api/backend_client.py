@@ -118,6 +118,14 @@ class BackendClient:
         }
         return self.post("/api/sp/share-link", json=payload)
 
+    def sp_properties(self, server_relative_url: str, *, is_folder: bool, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "server_relative_url": server_relative_url,
+            "is_folder": is_folder,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/properties", json=payload)
+
     def sp_download(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> bytes:
         params = {
             "server_relative_url": server_relative_url,

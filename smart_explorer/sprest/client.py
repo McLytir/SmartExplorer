@@ -418,6 +418,49 @@ class SharePointClient:
             resp.raise_for_status()
             return resp.content
 
+    # Fetch item metadata (file or folder) using SharePoint REST
+    def get_item_info(self, server_relative_url: str, *, is_folder: bool, site_relative_url: Optional[str] = None) -> dict:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        if is_folder:
+            url = (
+                f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
+                f"?$select=Name,ServerRelativeUrl,ItemCount,TimeLastModified"
+            )
+        else:
+            # Split query to avoid '&' issues in some shells
+            url = (
+                f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')"
+                f"?$select=Name,ServerRelativeUrl,Length,TimeLastModified,Author/Title,ModifiedBy/Title" \
+                f"&$expand=Author,ModifiedBy"
+            )
+        with self._http() as client:
+            r = client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        payload = data.get("d", data) or {}
+        info: dict = {
+            "name": payload.get("Name"),
+            "path": payload.get("ServerRelativeUrl"),
+            "mtime": payload.get("TimeLastModified"),
+            "isDir": bool(is_folder),
+        }
+        if is_folder:
+            info["size"] = 0
+            info["itemCount"] = payload.get("ItemCount")
+        else:
+            try:
+                info["size"] = int(payload.get("Length") or 0)
+            except Exception:
+                info["size"] = 0
+            auth = payload.get("Author") or {}
+            mod = payload.get("ModifiedBy") or {}
+            info["author"] = auth.get("Title")
+            info["modifiedBy"] = mod.get("Title")
+        return info
+
     def web_url(self, server_relative_url: str, *,
                 site_relative_url: Optional[str] = None) -> str:
         site = self._resolve_site(site_relative_url)
