@@ -159,6 +159,20 @@ class SettingsDialog(QDialog):
         sdd.addWidget(self.sp_download_browse)
         root.addLayout(sdd)
 
+        # Preview cache directory (optional). If empty, uses OS default location.
+        self.preview_cache_dir = QLineEdit(self)
+        try:
+            self.preview_cache_dir.setText(getattr(self.cfg, "preview_cache_dir", "") or "")
+        except Exception:
+            pass
+        pcd = QHBoxLayout()
+        pcd.addWidget(QLabel("Preview Cache Dir:"))
+        pcd.addWidget(self.preview_cache_dir, 1)
+        self.preview_cache_browse = QPushButton("Browse…", self)
+        self.preview_cache_browse.clicked.connect(self._browse_preview_cache_dir)
+        pcd.addWidget(self.preview_cache_browse)
+        root.addLayout(pcd)
+
         # Cookies
         self.cookie_header = QTextEdit(self)
         self.cookie_header.setPlaceholderText("Paste full Cookie header here (e.g., FedAuth=...; rtFa=...)\n-or- paste values below")

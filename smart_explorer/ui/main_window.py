@@ -53,6 +53,7 @@ from .sharepoint_selector import SharePointSelectorDialog
 from .translation_dialog import TranslationWorkspaceDialog
 from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
+from .preview_pane import PreviewPane
 
 
 class MainWindow(QMainWindow):
@@ -73,6 +74,9 @@ class MainWindow(QMainWindow):
 
         self._workspace_panes: Dict[str, WorkspacePane] = {}
         self._active_workspace_id: Optional[str] = None
+    # Preview pane is off by default; created on demand when user toggles it
+    self._preview_enabled: bool = False
+    self._preview_widget: Optional[PreviewPane] = None
         self._clipboard: Dict[str, dict] = {}
         self._selection_sync_block: set[str] = set()
         self._shortcuts: List[QShortcut] = []
@@ -197,6 +201,14 @@ class MainWindow(QMainWindow):
         settings.triggered.connect(self._open_settings)
         tb.addAction(settings)
 
+    # Toggle preview pane (off by default to avoid clutter)
+    toggle_preview = QAction("Preview Pane", self)
+    toggle_preview.setCheckable(True)
+    toggle_preview.setChecked(False)
+    toggle_preview.setToolTip("Show/Hide the optional preview pane")
+    toggle_preview.triggered.connect(self._toggle_preview_pane)
+    tb.addAction(toggle_preview)
+
         tb.addSeparator()
 
         goto_action = QAction("Go To…", self)
@@ -285,6 +297,22 @@ class MainWindow(QMainWindow):
             return
         pane.set_follow_base(bool(checked))
         self._on_pane_link_toggled(pane.id, bool(checked))
+
+    def _toggle_preview_pane(self, checked: bool) -> None:
+        """Create/destroy the preview pane and rebuild the workspace layout."""
+        try:
+            self._preview_enabled = bool(checked)
+            if self._preview_enabled and self._preview_widget is None:
+                try:
+                    self._preview_widget = PreviewPane(self)
+                    # When user requests open from preview, reuse existing opening logic
+                    self._preview_widget.open_requested.connect(lambda p: self._on_workspace_item_activated(self._active_workspace_id or "", p))
+                except Exception:
+                    self._preview_widget = None
+            # Rebuild layout so splitter wraps the preview pane when enabled
+            self._rebuild_workspace_area(focus_workspace_id=self._active_workspace_id)
+        except Exception:
+            pass
 
     def _navigate_active_pane(self, action: str) -> None:
         pane = self._active_pane()
@@ -744,7 +772,19 @@ QLabel { color: #eee8d5; }
 
         self._pane_splitter = self._build_splitter_layout(panes_in_order)
         self._normalize_splitter(self._pane_splitter)
-        self._workspace_layout.addWidget(self._pane_splitter, 1)
+
+        # If preview pane is enabled, place it to the right of the workspace panes
+        try:
+            if getattr(self, "_preview_enabled", False) and getattr(self, "_preview_widget", None):
+                combined = QSplitter(Qt.Horizontal, self)
+                combined.addWidget(self._pane_splitter)
+                combined.addWidget(self._preview_widget)
+                self._workspace_layout.addWidget(combined, 1)
+            else:
+                self._workspace_layout.addWidget(self._pane_splitter, 1)
+        except Exception:
+            # Fallback to just the pane splitter
+            self._workspace_layout.addWidget(self._pane_splitter, 1)
         target_focus = focus_workspace_id or self._active_workspace_id or (panes_in_order[0].id if panes_in_order else None)
         self._focus_workspace(target_focus)
 
@@ -1515,6 +1555,186 @@ QLabel { color: #eee8d5; }
                     self._follow_toggle.setEnabled(False)
         except Exception:
             pass
+        # Update preview pane (if enabled) with the selected paths from the active pane
+        try:
+            if getattr(self, "_preview_enabled", False) and getattr(self, "_preview_widget", None):
+                paths = [it.get("path") for it in selected if it.get("path")]
+                paths = [p for p in paths if p]
+                if not paths:
+                    self._preview_widget.preview_paths([])
+                else:
+                    # If this pane (or its base) is SharePoint, download file in background then preview
+                    effective_kind = pane.definition.kind
+                    effective_site = getattr(pane.definition, "site_relative_url", None)
+                    if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+                        base = self._workspace_panes.get(pane.definition.base_workspace_id)
+                        if base:
+                            effective_kind = base.definition.kind
+                            effective_site = getattr(base.definition, "site_relative_url", None)
+
+                    first = paths[0]
+                    if effective_kind == "sharepoint":
+                        # download asynchronously and preview when ready
+                        try:
+                            self._download_and_preview(first, effective_site)
+                        except Exception:
+                            # fallback: show no preview
+                            self._preview_widget.preview_paths([])
+                    else:
+                        # local file: preview directly
+                        self._preview_widget.preview_paths(paths[:10])
+        except Exception:
+            pass
+
+    def _download_and_preview(self, path: str, site: Optional[str]) -> None:
+        """Download SharePoint file in a background thread and preview it when finished.
+
+        Writes to the OS temp dir and schedules the preview on the Qt main thread.
+        """
+        if not getattr(self, "_preview_widget", None):
+            return
+
+        # If an existing download is running, cancel it
+        try:
+            if getattr(self, "_active_download_worker", None):
+                try:
+                    self._active_download_worker.cancel()
+                except Exception:
+                    pass
+                self._active_download_worker = None
+        except Exception:
+            pass
+
+        # Define a cancellable worker that streams the download and reports progress
+        class DownloadWorker:
+            def __init__(self, outer: "MainWindow", server_path: str, site_rel: Optional[str]):
+                self.outer = outer
+                self.server_path = server_path
+                self.site_rel = site_rel
+                self._cancel_event = threading.Event()
+
+            def cancel(self) -> None:
+                self._cancel_event.set()
+
+            def run(self) -> None:
+                try:
+                    from ..services.preview_cache import cached_download_path, save_existing_file
+                    import httpx
+                    import tempfile
+
+                    # Check cache first
+                    cached = cached_download_path(self.server_path)
+                    if cached and os.path.exists(cached):
+                        final_path = cached
+                        # schedule show
+                        from PySide6.QtCore import QTimer
+
+                        def show():
+                            try:
+                                if getattr(self.outer, "_preview_widget", None):
+                                    self.outer._preview_widget.preview_paths([final_path])
+                                    self.outer._preview_widget.hide_progress()
+                            except Exception:
+                                pass
+
+                        QTimer.singleShot(0, show)
+                        return
+
+                    url = self.outer._backend.base_url + "/api/sp/download"
+                    params = {"server_relative_url": self.server_path}
+                    if self.site_rel:
+                        params["site_relative_url"] = self.site_rel
+
+                    # Stream the response
+                    with httpx.Client(timeout=None) as client:
+                        with client.stream("GET", url, params=params) as r:
+                            r.raise_for_status()
+                            total = None
+                            try:
+                                total = int(r.headers.get("content-length"))
+                            except Exception:
+                                total = None
+                            # write to a temp file
+                            tf = tempfile.NamedTemporaryFile(delete=False)
+                            temp_path = tf.name
+                            downloaded = 0
+                            chunk_size = 64 * 1024
+                            for chunk in r.iter_bytes(chunk_size=chunk_size):
+                                if self._cancel_event.is_set():
+                                    try:
+                                        tf.close()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        os.remove(temp_path)
+                                    except Exception:
+                                        pass
+                                    # notify UI to hide progress
+                                    from PySide6.QtCore import QTimer
+
+                                    QTimer.singleShot(0, lambda: getattr(self.outer, "_preview_widget", None).hide_progress() if getattr(self.outer, "_preview_widget", None) else None)
+                                    return
+                                tf.write(chunk)
+                                downloaded += len(chunk)
+                                # report progress (0-100) if total known
+                                if total:
+                                    pct = int(downloaded / total * 100)
+                                else:
+                                    pct = 0
+                                from PySide6.QtCore import QTimer
+
+                                QTimer.singleShot(0, lambda p=pct: getattr(self.outer, "_preview_widget", None).show_progress(p) if getattr(self.outer, "_preview_widget", None) else None)
+                            try:
+                                tf.close()
+                            except Exception:
+                                pass
+
+                    # Move temp file into cache
+                    final_cached = save_existing_file(self.server_path, temp_path)
+
+                    # schedule UI update to show the cached file
+                    from PySide6.QtCore import QTimer
+
+                    def show_final():
+                        try:
+                            if getattr(self.outer, "_preview_widget", None):
+                                self.outer._preview_widget.preview_paths([final_cached])
+                                self.outer._preview_widget.hide_progress()
+                        except Exception:
+                            pass
+
+                    QTimer.singleShot(0, show_final)
+                except Exception as exc:
+                    from PySide6.QtCore import QTimer
+                    from PySide6.QtWidgets import QMessageBox
+
+                    def warn():
+                        try:
+                            if getattr(self.outer, "_preview_widget", None):
+                                self.outer._preview_widget.hide_progress()
+                            QMessageBox.warning(self.outer, "Preview", f"Download failed: {exc}")
+                        except Exception:
+                            pass
+
+                    QTimer.singleShot(0, warn)
+
+        import threading
+
+        worker = DownloadWorker(self, path, site)
+        t = threading.Thread(target=worker.run, daemon=True)
+        # store active worker so it can be cancelled
+        self._active_download_worker = worker
+        # when preview cancel requested, stop the worker
+        try:
+            self._preview_widget.cancel_requested.connect(lambda: worker.cancel())
+        except Exception:
+            pass
+        # show initial progress UI
+        try:
+            self._preview_widget.show_progress(0)
+        except Exception:
+            pass
+        t.start()
 
     def _on_pane_clicked(self, workspace_id: str) -> None:
         self._focus_workspace(workspace_id)
