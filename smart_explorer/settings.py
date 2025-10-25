@@ -12,6 +12,7 @@ class AppConfig:
     api_key: Optional[str] = None
     model: str = "gpt-4o-mini"
     target_language: str = "English"
+    translator_provider: str = "auto"  # auto, openai, backend, google_free, libretranslate, identity
     theme: str = "light"  # "light", "dark", "solarized_light", "solarized_dark"
     root_path: str = os.path.expanduser("~")
     ignore_patterns: list[str] = None  # glob patterns to skip translating
@@ -29,6 +30,8 @@ class AppConfig:
     # Directory to store SharePoint downloads when opening files.
     # If None, uses the OS temporary directory.
     sp_download_dir: Optional[str] = None
+    # LibreTranslate settings
+    libretranslate_url: Optional[str] = None  # e.g., https://libretranslate.de
 
 
 def _config_path() -> str:
@@ -60,6 +63,8 @@ def load_config() -> AppConfig:
         cfg.saved_layouts = []
     if getattr(cfg, "theme", None) not in {"light", "dark", "solarized_light", "solarized_dark"}:
         cfg.theme = "light"
+    if getattr(cfg, "translator_provider", None) not in {"auto", "openai", "backend", "google_free", "libretranslate", "identity"}:
+        cfg.translator_provider = "auto"
     if cfg.favorites_bar_position not in {"left", "right", "top", "bottom"}:
         cfg.favorites_bar_position = "left"
     try:

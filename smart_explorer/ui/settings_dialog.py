@@ -19,33 +19,90 @@ class SettingsDialog(QDialog):
         self.resize(520, 420)
         self.cfg = cfg
         self.backend = BackendClient()
+        self._lt_help_shown = False
 
         root = QVBoxLayout(self)
 
-        # Backend URL
+        # Translator provider selection
+        self.translator_combo = QComboBox(self)
+        self.translator_combo.addItem("Auto (prefer OpenAI, then Backend)", "auto")
+        self.translator_combo.addItem("OpenAI", "openai")
+        self.translator_combo.addItem("Backend", "backend")
+        self.translator_combo.addItem("Google Free (deep-translator)", "google_free")
+        self.translator_combo.addItem("LibreTranslate", "libretranslate")
+        self.translator_combo.addItem("Identity (no translation)", "identity")
+        try:
+            current_provider = getattr(self.cfg, "translator_provider", "auto") or "auto"
+            idx = self.translator_combo.findData(current_provider)
+            if idx >= 0:
+                self.translator_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+        trl = QHBoxLayout()
+        trl.addWidget(QLabel("Translator:"))
+        trl.addWidget(self.translator_combo)
+        root.addLayout(trl)
+        try:
+            self.translator_combo.currentIndexChanged.connect(self._on_translator_changed)
+        except Exception:
+            pass
+
+        # Backend URL (used for Backend translator and SharePoint backend)
         self.backend_url = QLineEdit(self)
         self.backend_url.setPlaceholderText("Backend URL (e.g., http://127.0.0.1:5001)")
         try:
             self.backend_url.setText(getattr(self.cfg, "backend_url", "") or "")
         except Exception:
             pass
-        bux = QHBoxLayout()
+        self._backend_url_row = QWidget(self)
+        bux = QHBoxLayout(self._backend_url_row)
+        bux.setContentsMargins(0, 0, 0, 0)
         bux.addWidget(QLabel("Backend URL:"))
         bux.addWidget(self.backend_url)
-        root.addLayout(bux)
+        root.addWidget(self._backend_url_row)
 
         '# OpenAI key (masked; stored in system keyring)
         self.api_key = QLineEdit(self)
         self.api_key.setPlaceholderText("OpenAI API Key")
         self.api_key.setEchoMode(QLineEdit.Password)
-        akx = QHBoxLayout()
+        self._openai_key_row = QWidget(self)
+        akx = QHBoxLayout(self._openai_key_row)
+        akx.setContentsMargins(0, 0, 0, 0)
         akx.addWidget(QLabel("OpenAI Key:"))
         akx.addWidget(self.api_key)
         self.btn_api_clear = QPushButton("Clear", self)
         self.btn_api_clear.setToolTip("Remove saved API key from system keyring")
         self.btn_api_clear.clicked.connect(self._on_clear_api_key)
         akx.addWidget(self.btn_api_clear)
-        root.addLayout(akx)'
+        root.addLayout(self._openai_key_row)'
+
+        # LibreTranslate settings
+        self.lt_url = QLineEdit(self)
+        self.lt_url.setPlaceholderText("LibreTranslate URL (e.g., https://libretranslate.de)")
+        try:
+            self.lt_url.setText(getattr(self.cfg, "libretranslate_url", "") or "")
+        except Exception:
+            pass
+        self._lt_url_row = QWidget(self)
+        ltu = QHBoxLayout(self._lt_url_row)
+        ltu.setContentsMargins(0, 0, 0, 0)
+        ltu.addWidget(QLabel("LibreTranslate URL:"))
+        ltu.addWidget(self.lt_url)
+        root.addWidget(self._lt_url_row)
+
+        self.lt_api_key = QLineEdit(self)
+        self.lt_api_key.setPlaceholderText("LibreTranslate API Key (optional)")
+        self.lt_api_key.setEchoMode(QLineEdit.Password)
+        self._lt_key_row = QWidget(self)
+        ltk = QHBoxLayout(self._lt_key_row)
+        ltk.setContentsMargins(0, 0, 0, 0)
+        ltk.addWidget(QLabel("LT API Key:"))
+        ltk.addWidget(self.lt_api_key)
+        self.btn_lt_clear = QPushButton("Clear", self)
+        self.btn_lt_clear.setToolTip("Remove saved LibreTranslate API key from system keyring")
+        self.btn_lt_clear.clicked.connect(self._on_clear_lt_key)
+        ltk.addWidget(self.btn_lt_clear)
+        root.addWidget(self._lt_key_row)
 
         # Target language
         self.lang = QLineEdit(self)
@@ -135,10 +192,21 @@ class SettingsDialog(QDialog):
         self.btn_send.clicked.connect(self._on_send)
         self.btn_capture.clicked.connect(self._on_capture)
         self.btn_close.clicked.connect(self.accept)
+        # Initialize visibility for provider-specific fields
+        try:
+            self._update_provider_visibility()
+        except Exception:
+            pass
 
     def _on_save(self):
-        from ..services import secret_store\n        key_text = self.api_key.text().strip()\n        if key_text:\n            secret_store.set_secret("OPENAI_API_KEY", key_text)\n        self.cfg.api_key = None
+        from ..services import secret_store\n        key_text = self.api_key.text().strip()\n        if key_text:\n            secret_store.set_secret("OPENAI_API_KEY", key_text)\n        # Save LT key
+        lt_key = self.lt_api_key.text().strip()\n        if lt_key:\n            secret_store.set_secret("LIBRETRANSLATE_API_KEY", lt_key)
         self.cfg.target_language = self.lang.text().strip() or "English"
+        # Persist translator provider
+        try:
+            setattr(self.cfg, "translator_provider", self.translator_combo.currentData())
+        except Exception:
+            pass
         self.cfg.theme = self.theme_combo.currentData() or "light"
         # Persist backend URL
         try:
@@ -155,6 +223,10 @@ class SettingsDialog(QDialog):
             pass
         try:
             setattr(self.cfg, "sp_download_dir", self.sp_download_dir.text().strip() or None)
+        except Exception:
+            pass
+        try:
+            setattr(self.cfg, "libretranslate_url", self.lt_url.text().strip() or None)
         except Exception:
             pass
         save_config(self.cfg)
@@ -227,3 +299,62 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, "Cookie Capture", "Cookies captured and sent to backend.")
         except Exception as exc:
             QMessageBox.warning(self, "Backend Error", f"Failed to send cookies: {exc}")
+
+    def _on_clear_lt_key(self):
+        try:
+            from ..services import secret_store
+            secret_store.delete_secret("LIBRETRANSLATE_API_KEY")
+        except Exception:
+            pass
+
+    def _on_translator_changed(self, index: int) -> None:
+        try:
+            data = self.translator_combo.itemData(index)
+        except Exception:
+            data = None
+        # Toggle visibility of provider-specific fields
+        try:
+            self._update_provider_visibility()
+        except Exception:
+            pass
+        if data == "libretranslate" and not self._lt_help_shown:
+            self._lt_help_shown = True
+            text = (
+                "LibreTranslate setup options:\n\n"
+                "- Public instance: set URL to https://libretranslate.de or https://libretranslate.com.\n"
+                "  Some instances require an API key — check their site.\n\n"
+                "- Self-host (recommended):\n"
+                "  Docker: docker run -ti --rm -p 5000:5000 libretranslate/libretranslate\n"
+                "  Then set URL to http://localhost:5000 in Settings.\n\n"
+                "Docs: https://libretranslate.com/docs/"
+            )
+            msg = QMessageBox(self)
+            msg.setWindowTitle("LibreTranslate Setup")
+            msg.setText(text)
+            open_btn = msg.addButton("Open Docs", QMessageBox.ActionRole)
+            ok_btn = msg.addButton(QMessageBox.Ok)
+            msg.exec()
+            try:
+                if msg.clickedButton() is open_btn:
+                    import webbrowser as _wb
+                    _wb.open("https://libretranslate.com/docs/")
+            except Exception:
+                pass
+
+    def _update_provider_visibility(self) -> None:
+        provider = None
+        try:
+            provider = self.translator_combo.currentData()
+        except Exception:
+            provider = None
+        visible = provider == "libretranslate"
+        if hasattr(self, "_lt_url_row") and self._lt_url_row is not None:
+            self._lt_url_row.setVisible(bool(visible))
+        if hasattr(self, "_lt_key_row") and self._lt_key_row is not None:
+            self._lt_key_row.setVisible(bool(visible))
+        # OpenAI key row only when OpenAI selected
+        if hasattr(self, "_openai_key_row") and self._openai_key_row is not None:
+            self._openai_key_row.setVisible(provider == "openai")
+        # Backend URL row only when Backend selected
+        if hasattr(self, "_backend_url_row") and self._backend_url_row is not None:
+            self._backend_url_row.setVisible(provider == "backend")

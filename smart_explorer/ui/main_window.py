@@ -34,6 +34,8 @@ from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
 from ..translators.base import IdentityTranslator, Translator
 from ..translators.openai_translator import OpenAITranslator
+from ..translators.google_free_translator import GoogleFreeTranslator
+from ..translators.libretranslate_translator import LibreTranslateTranslator
 from ..workspaces import (
     FavoriteLocation,
     FavoritesManager,
@@ -2315,16 +2317,69 @@ QLabel { color: #eee8d5; }
 
     # ------------------------------------------------------------- settings --
     def _create_translator(self) -> Translator:
-        api_key = (self._cfg.api_key or "").strip()\n        if not api_key:\n            try:\n                from ..services import secret_store\n                api_key = secret_store.get_secret("OPENAI_API_KEY") or ""\n            except Exception:\n                api_key = ""
-        if api_key:
-            return OpenAITranslator(api_key=api_key, model=self._cfg.model)
+        provider = getattr(self._cfg, "translator_provider", "auto") or "auto"
+        # Secrets
         try:
-            info = self._backend.get_settings()
-            if info.get("has_api_key"):
-                return BackendTranslator(self._backend.base_url)
+            from ..services import secret_store
         except Exception:
-            pass
-        return IdentityTranslator()
+            secret_store = None  # type: ignore
+
+        def openai_instance() -> Optional[Translator]:
+            key = (self._cfg.api_key or "").strip()
+            if not key and secret_store:
+                try:
+                    key = secret_store.get_secret("OPENAI_API_KEY") or ""
+                except Exception:
+                    key = ""
+            return OpenAITranslator(api_key=key, model=self._cfg.model) if key else None
+
+        def backend_instance() -> Optional[Translator]:
+            try:
+                info = self._backend.get_settings()
+                if info.get("has_api_key"):
+                    return BackendTranslator(self._backend.base_url)
+            except Exception:
+                return None
+            return None
+
+        def google_free_instance() -> Optional[Translator]:
+            try:
+                return GoogleFreeTranslator()
+            except Exception:
+                return None
+
+        def libretranslate_instance() -> Optional[Translator]:
+            try:
+                base = getattr(self._cfg, "libretranslate_url", None) or "https://libretranslate.de"
+                lt_key = None
+                if secret_store:
+                    try:
+                        lt_key = secret_store.get_secret("LIBRETRANSLATE_API_KEY") or None
+                    except Exception:
+                        lt_key = None
+                return LibreTranslateTranslator(base_url=base, api_key=lt_key)
+            except Exception:
+                return None
+
+        if provider == "openai":
+            return openai_instance() or IdentityTranslator()
+        if provider == "backend":
+            return backend_instance() or IdentityTranslator()
+        if provider == "google_free":
+            return google_free_instance() or IdentityTranslator()
+        if provider == "libretranslate":
+            return libretranslate_instance() or IdentityTranslator()
+        if provider == "identity":
+            return IdentityTranslator()
+
+        # auto: prefer OpenAI → Backend → LibreTranslate → GoogleFree → Identity
+        return (
+            openai_instance()
+            or backend_instance()
+            or libretranslate_instance()
+            or google_free_instance()
+            or IdentityTranslator()
+        )
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self._cfg, self)
