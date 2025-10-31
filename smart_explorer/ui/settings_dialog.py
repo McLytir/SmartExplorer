@@ -61,7 +61,7 @@ class SettingsDialog(QDialog):
         bux.addWidget(self.backend_url)
         root.addWidget(self._backend_url_row)
 
-        '# OpenAI key (masked; stored in system keyring)
+        # OpenAI key (masked; stored in system keyring)
         self.api_key = QLineEdit(self)
         self.api_key.setPlaceholderText("OpenAI API Key")
         self.api_key.setEchoMode(QLineEdit.Password)
@@ -74,7 +74,7 @@ class SettingsDialog(QDialog):
         self.btn_api_clear.setToolTip("Remove saved API key from system keyring")
         self.btn_api_clear.clicked.connect(self._on_clear_api_key)
         akx.addWidget(self.btn_api_clear)
-        root.addLayout(self._openai_key_row)'
+        root.addWidget(self._openai_key_row)
 
         # LibreTranslate settings
         self.lt_url = QLineEdit(self)
@@ -213,8 +213,28 @@ class SettingsDialog(QDialog):
             pass
 
     def _on_save(self):
-        from ..services import secret_store\n        key_text = self.api_key.text().strip()\n        if key_text:\n            secret_store.set_secret("OPENAI_API_KEY", key_text)\n        # Save LT key
-        lt_key = self.lt_api_key.text().strip()\n        if lt_key:\n            secret_store.set_secret("LIBRETRANSLATE_API_KEY", lt_key)
+        try:
+            from ..services import secret_store as secret_store_module
+        except Exception:
+            secret_store_module = None
+
+        secret_store = secret_store_module
+
+        key_text = self.api_key.text().strip()
+        if secret_store:
+            if key_text:
+                secret_store.set_secret("OPENAI_API_KEY", key_text)
+            else:
+                secret_store.delete_secret("OPENAI_API_KEY")
+        else:
+            self.cfg.api_key = key_text or None
+
+        lt_key = self.lt_api_key.text().strip()
+        if secret_store:
+            if lt_key:
+                secret_store.set_secret("LIBRETRANSLATE_API_KEY", lt_key)
+            else:
+                secret_store.delete_secret("LIBRETRANSLATE_API_KEY")
         self.cfg.target_language = self.lang.text().strip() or "English"
         # Persist translator provider
         try:
@@ -251,6 +271,13 @@ class SettingsDialog(QDialog):
         directory = QFileDialog.getExistingDirectory(self, "Select download directory", start_dir or "")
         if directory:
             self.sp_download_dir.setText(directory)
+
+    def _browse_preview_cache_dir(self):
+        from PySide6.QtWidgets import QFileDialog
+        start_dir = self.preview_cache_dir.text().strip() or (self.cfg.preview_cache_dir or "")
+        directory = QFileDialog.getExistingDirectory(self, "Select preview cache directory", start_dir or "")
+        if directory:
+            self.preview_cache_dir.setText(directory)
 
     def _on_send(self):
         # Update backend settings and cookies
@@ -313,6 +340,16 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, "Cookie Capture", "Cookies captured and sent to backend.")
         except Exception as exc:
             QMessageBox.warning(self, "Backend Error", f"Failed to send cookies: {exc}")
+
+    def _on_clear_api_key(self):
+        self.api_key.clear()
+        self.cfg.api_key = None
+        try:
+            from ..services import secret_store
+
+            secret_store.delete_secret("OPENAI_API_KEY")
+        except Exception:
+            pass
 
     def _on_clear_lt_key(self):
         try:

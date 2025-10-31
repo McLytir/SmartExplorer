@@ -12,9 +12,14 @@ from ..services.preview_cache import get_cached_thumbnail, save_thumbnail_for
 try:
     # Qt WebEngine is optional; gracefully degrade if unavailable
     from PySide6.QtWebEngineWidgets import QWebEngineView  # type: ignore
+    try:
+        from PySide6.QtWebEngineCore import QWebEngineSettings  # type: ignore
+    except Exception:
+        QWebEngineSettings = None  # type: ignore
     WEBENGINE_AVAILABLE = True
 except Exception:
     QWebEngineView = None  # type: ignore
+    QWebEngineSettings = None  # type: ignore
     WEBENGINE_AVAILABLE = False
 
 
@@ -122,6 +127,26 @@ class PreviewPane(QWidget):
             return
         file_url = QUrl.fromLocalFile(os.path.abspath(path))
         self._web = QWebEngineView(self)
+        # Ensure built-in PDF viewer is enabled (Qt defaults vary by platform)
+        if QWebEngineSettings is not None:
+            try:
+                settings = self._web.settings()
+                settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+                try:
+                    settings.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                default_settings = QWebEngineSettings.defaultSettings()
+                default_settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+                try:
+                    default_settings.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
         self._layout.insertWidget(1, self._web, 1)
         # Let chromium's built-in PDF viewer handle the PDF quickly
         self._web.load(file_url)

@@ -74,9 +74,9 @@ class MainWindow(QMainWindow):
 
         self._workspace_panes: Dict[str, WorkspacePane] = {}
         self._active_workspace_id: Optional[str] = None
-    # Preview pane is off by default; created on demand when user toggles it
-    self._preview_enabled: bool = False
-    self._preview_widget: Optional[PreviewPane] = None
+        # Preview pane is off by default; created on demand when user toggles it
+        self._preview_enabled: bool = False
+        self._preview_widget: Optional[PreviewPane] = None
         self._clipboard: Dict[str, dict] = {}
         self._selection_sync_block: set[str] = set()
         self._shortcuts: List[QShortcut] = []
@@ -201,13 +201,13 @@ class MainWindow(QMainWindow):
         settings.triggered.connect(self._open_settings)
         tb.addAction(settings)
 
-    # Toggle preview pane (off by default to avoid clutter)
-    toggle_preview = QAction("Preview Pane", self)
-    toggle_preview.setCheckable(True)
-    toggle_preview.setChecked(False)
-    toggle_preview.setToolTip("Show/Hide the optional preview pane")
-    toggle_preview.triggered.connect(self._toggle_preview_pane)
-    tb.addAction(toggle_preview)
+        # Toggle preview pane (off by default to avoid clutter)
+        toggle_preview = QAction("Preview Pane", self)
+        toggle_preview.setCheckable(True)
+        toggle_preview.setChecked(False)
+        toggle_preview.setToolTip("Show/Hide the optional preview pane")
+        toggle_preview.triggered.connect(self._toggle_preview_pane)
+        tb.addAction(toggle_preview)
 
         tb.addSeparator()
 
@@ -724,6 +724,13 @@ QLabel { color: #eee8d5; }
             for wid, pane in self._workspace_panes.items()
         }
 
+        # Clear layout container to avoid leftover splitters/panes
+        while self._workspace_layout.count():
+            item = self._workspace_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
         # Remove existing widgets
         for pane in self._workspace_panes.values():
             pane.setParent(None)
@@ -767,8 +774,18 @@ QLabel { color: #eee8d5; }
             return
 
         if self._pane_splitter:
-            self._workspace_layout.removeWidget(self._pane_splitter)
-            self._pane_splitter.deleteLater()
+            try:
+                self._pane_splitter.setParent(None)
+                self._pane_splitter.deleteLater()
+            except Exception:
+                pass
+            self._pane_splitter = None
+
+        if getattr(self, "_preview_widget", None):
+            try:
+                self._preview_widget.setParent(None)
+            except Exception:
+                pass
 
         self._pane_splitter = self._build_splitter_layout(panes_in_order)
         self._normalize_splitter(self._pane_splitter)

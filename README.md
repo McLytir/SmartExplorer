@@ -68,7 +68,7 @@ Shortcuts
 
 Settings & Config
 - Settings dialog covers: API key, model, target language, theme, backend URL, SharePoint site URL, optional library root, SharePoint download dir, ignore patterns.
-- A JSON config `smart_explorer_config.json` is stored in the working directory; settings persist automatically.
+- On first run the app writes `smart_explorer_config.json` next to the repo (git-ignored), so fresh clones start blank; copy `smart_explorer_config.example.json` if you need a template.
 - Environment variable `OPENAI_API_KEY` overrides the API key.
 
 Backend Endpoints (selected)

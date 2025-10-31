@@ -33,6 +33,12 @@ pids/
 .env.local
 .venv
 
+# App runtime state
+smart_explorer_config.json
+smart_explorer_cache.json
+sp_cookies.json
+preview_cache/
+
 #cache
 __pycache__
 

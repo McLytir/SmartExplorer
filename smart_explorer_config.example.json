@@ -1,0 +1,27 @@
+{
+  "api_key": null,
+  "model": "gpt-4o-mini",
+  "target_language": "English",
+  "translator_provider": "auto",
+  "theme": "light",
+  "root_path": null,
+  "ignore_patterns": [
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "*.tmp"
+  ],
+  "sp_base_url": null,
+  "sp_library_root": null,
+  "backend_url": null,
+  "last_source": "Local",
+  "workspaces": [],
+  "favorites": [],
+  "saved_layouts": [],
+  "favorites_bar_position": "left",
+  "favorites_bar_size": 200,
+  "sp_download_dir": null,
+  "preview_cache_dir": null,
+  "libretranslate_url": null
+}
