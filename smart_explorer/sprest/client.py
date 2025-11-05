@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -419,6 +419,82 @@ class SharePointClient:
             return resp.content
 
     # Fetch item metadata (file or folder) using SharePoint REST
+        # Check-out / Check-in / Versions
+    def checkout_file(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> None:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._ensure_digest(site_relative_url)
+        headers = {"X-RequestDigest": digest}
+        url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/CheckOut"
+        with self._http() as client:
+            resp = client.post(url, headers=headers)
+            resp.raise_for_status()
+
+    def checkin_file(self, server_relative_url: str, *, comment: str = "", checkin_type: int = 1,
+                      site_relative_url: Optional[str] = None) -> None:
+        # checkin_type: 0=Minor, 1=Major, 2=Overwrite
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._ensure_digest(site_relative_url)
+        headers = {"X-RequestDigest": digest}
+        # escape single quotes in comment
+        safe_comment = (comment or "").replace("'", "''")
+        url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/CheckIn(comment='{safe_comment}',checkintype={int(checkin_type)})"
+        with self._http() as client:
+            resp = client.post(url, headers=headers)
+            resp.raise_for_status()
+
+    def undo_checkout(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> None:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._ensure_digest(site_relative_url)
+        headers = {"X-RequestDigest": digest}
+        url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/UndoCheckOut"
+        with self._http() as client:
+            resp = client.post(url, headers=headers)
+            resp.raise_for_status()
+
+    def list_versions(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> List[dict]:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        select = "VersionLabel,Created,CreatedBy/Title,Size"
+        url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/Versions?$select={urllib.parse.quote(select)}&$expand=CreatedBy"
+        with self._http() as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        items = data.get("value") or data.get("d", {}).get("results", [])
+        versions: List[dict] = []
+        for it in items:
+            versions.append({
+                "label": it.get("VersionLabel") or it.get("ID") or "",
+                "created": it.get("Created"),
+                "author": (it.get("CreatedBy") or {}).get("Title"),
+                "size": it.get("Size"),
+            })
+        return versions
+
+    def restore_version(self, server_relative_url: str, label: str, *, site_relative_url: Optional[str] = None) -> None:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._ensure_digest(site_relative_url)
+        headers = {"X-RequestDigest": digest}
+        safe_label = (label or "").replace("'", "''")
+        url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/Versions/RestoreByLabel(versionlabel='{safe_label}')"
+        with self._http() as client:
+            resp = client.post(url, headers=headers)
+            resp.raise_for_status()
+
     def get_item_info(self, server_relative_url: str, *, is_folder: bool, site_relative_url: Optional[str] = None) -> dict:
         if not server_relative_url.startswith("/"):
             server_relative_url = "/" + server_relative_url

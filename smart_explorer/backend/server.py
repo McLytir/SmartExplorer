@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import fnmatch
@@ -605,6 +605,138 @@ def sp_default_doclib():
         raise HTTPException(status_code=500, detail=f"Failed to detect default library: {e}")
 
 
+
+class SPCheckoutRequest(BaseModel):
+    server_relative_url: str
+    site_relative_url: Optional[str] = None
+
+
+@app.post("/api/sp/checkout")
+def sp_checkout(req: SPCheckoutRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        sp_client.checkout_file(req.server_relative_url, site_relative_url=req.site_relative_url)
+        return {"ok": True}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Checkout failed: {e}")
+
+
+class SPCheckinRequest(BaseModel):
+    server_relative_url: str
+    comment: Optional[str] = ""
+    checkin_type: Optional[int] = 1
+    site_relative_url: Optional[str] = None
+
+
+@app.post("/api/sp/checkin")
+def sp_checkin(req: SPCheckinRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        sp_client.checkin_file(req.server_relative_url, comment=req.comment or "", checkin_type=int(req.checkin_type or 1), site_relative_url=req.site_relative_url)
+        return {"ok": True}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Check-in failed: {e}")
+
+
+@app.post("/api/sp/undo-checkout")
+def sp_undo_checkout(req: SPCheckoutRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        sp_client.undo_checkout(req.server_relative_url, site_relative_url=req.site_relative_url)
+        return {"ok": True}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Undo checkout failed: {e}")
+
+
+class SPVersionsResponse(BaseModel):
+    versions: List[dict]
+
+
+@app.get("/api/sp/versions", response_model=SPVersionsResponse)
+def sp_versions(site_relative_url: Optional[str] = Query(None), server_relative_url: str = Query(...)):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        items = sp_client.list_versions(server_relative_url, site_relative_url=site_relative_url)
+        return SPVersionsResponse(versions=items)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list versions: {e}")
+
+
+
+@app.get("/api/sp/download-version")
+def sp_download_version(server_relative_url: str = Query(...), label: str = Query(...), site_relative_url: Optional[str] = Query(None)):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        versions = sp_client.list_versions(server_relative_url, site_relative_url=site_relative_url)
+        version_id = None
+        for v in versions:
+            if str(v.get("label") or "") == str(label):
+                version_id = v.get("id")
+                break
+        if version_id is None:
+            import urllib.parse as _up
+            enc = _up.quote(server_relative_url if server_relative_url.startswith("/") else "/" + server_relative_url, safe="/")
+            site_base = sp_client._resolve_site(site_relative_url)  # type: ignore[attr-defined]
+            url = "%s/_api/web/GetFileByServerRelativeUrl('%s')/Versions?$select=ID,VersionLabel" % (site_base, enc)
+            with sp_client._http() as client:  # type: ignore[attr-defined]
+                r = client.get(url)
+                r.raise_for_status()
+                data = r.json()
+            items = data.get("value") or data.get("d", {}).get("results", [])
+            for it in items:
+                if str(it.get("VersionLabel") or "") == str(label):
+                    version_id = it.get("ID")
+                    break
+        if version_id is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        import urllib.parse as _up
+        enc = _up.quote(server_relative_url if server_relative_url.startswith("/") else "/" + server_relative_url, safe="/")
+        site_base = sp_client._resolve_site(site_relative_url)  # type: ignore[attr-defined]
+        ver_url = "%s/_api/web/GetFileByServerRelativeUrl('%s')/Versions(%s)/$value" % (site_base, enc, version_id)
+        with sp_client._http() as client:  # type: ignore[attr-defined]
+            resp = client.get(ver_url)
+            resp.raise_for_status()
+            content = resp.content
+        filename = server_relative_url.rsplit('/', 1)[-1] or "download"
+        return StreamingResponse(io.BytesIO(content), media_type="application/octet-stream", headers={
+            "Content-Disposition": "attachment; filename=\"%s\"" % filename
+        })
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="SharePoint error: %s" % e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to download version: %s" % e)
+
+class SPRestoreVersionRequest(BaseModel):
+    server_relative_url: str
+    label: str
+    site_relative_url: Optional[str] = None
+
+
+@app.post("/api/sp/restore-version")
+def sp_restore_version(req: SPRestoreVersionRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        sp_client.restore_version(req.server_relative_url, req.label, site_relative_url=req.site_relative_url)
+        return {"ok": True}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore version: {e}")
+
 class SPRenameRequest(BaseModel):
     server_relative_url: str
     new_name: str
@@ -749,3 +881,6 @@ def main(argv: Optional[list[str]] = None):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+
+
+

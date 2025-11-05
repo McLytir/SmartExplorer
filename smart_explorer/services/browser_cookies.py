@@ -43,6 +43,16 @@ def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
 
     required = {"fedauth": "FedAuth", "rtfa": "rtFa"}
     cookies: Dict[str, str] = {}
+
+    def _domain_matches(cookie_domain: str, host: str) -> bool:
+        d = (cookie_domain or "").lstrip(".").lower()
+        h = (host or "").lstrip(".").lower()
+        return d == h or d.endswith("." + h)
+
+    # Only accept FedAuth on the exact tenant host; accept rtFa on parent sharepoint domain.
+    tenant_host = netloc.lstrip(".")
+    parent_host = ".".join(parts[-2:]) if len(parts) > 2 else tenant_host
+
     for target in targets:
         for fn in collectors:
             if not fn:
@@ -52,13 +62,22 @@ def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
             except Exception:
                 continue
             for cookie in jar:
-                name = (cookie.name or "").strip()
-                if not name or not cookie.value:
+                name = (getattr(cookie, "name", "") or "").strip()
+                value = getattr(cookie, "value", None)
+                domain = (getattr(cookie, "domain", "") or "").strip()
+                if not name or not value:
                     continue
                 key = name.lower()
-                mapped = required.get(key)
-                if mapped and mapped not in cookies:
-                    cookies[mapped] = cookie.value
+                if key == "fedauth" and required["fedauth"] not in cookies:
+                    # Ensure FedAuth belongs to the tenant host (not the broad parent domain)
+                    if _domain_matches(domain, tenant_host):
+                        cookies[required["fedauth"]] = value
+                        continue
+                if key == "rtfa" and required["rtfa"] not in cookies:
+                    # rtFa is typically scoped to the parent .sharepoint.com domain
+                    if _domain_matches(domain, parent_host):
+                        cookies[required["rtfa"]] = value
+                        continue
             if all(k in cookies for k in required.values()):
                 break
         if all(k in cookies for k in required.values()):

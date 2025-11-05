@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import typing
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QProgressBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QProgressBar, QSlider
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 from ..services.preview_cache import get_cached_thumbnail, save_thumbnail_for
@@ -74,12 +74,31 @@ class PreviewPane(QWidget):
         self._open_btn.setEnabled(False)
         self._open_btn.clicked.connect(self._on_open)
         ctrl_row.addWidget(self._open_btn)
+        # Overlay controls (hidden by default)
+        self._overlay_btn = QPushButton("Overlay", self)
+        self._overlay_btn.setCheckable(True)
+        self._overlay_btn.setVisible(False)
+        self._overlay_btn.clicked.connect(self._on_toggle_overlay)
+        ctrl_row.addWidget(self._overlay_btn)
+        self._opacity_slider = QSlider(Qt.Horizontal, self)
+        self._opacity_slider.setRange(10, 100)
+        self._opacity_slider.setValue(60)
+        self._opacity_slider.setVisible(False)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        ctrl_row.addWidget(self._opacity_slider)
         self._layout.addLayout(ctrl_row)
 
         # wire cancel button to the signal
         self._cancel_btn.clicked.connect(self.cancel_requested.emit)
 
         self._current_path: str | None = None
+        self._current_widget: QWidget | None = None
+        self._overlay_label = QLabel(self)
+        self._overlay_label.setVisible(False)
+        self._overlay_label.setWordWrap(True)
+        self._overlay_label.setStyleSheet("background-color: rgba(0,0,0,0.6); color: #00ff99; font-weight: 600; padding: 8px;")
+        self._overlay_opacity = 0.6
+        self._translator = None
 
     def _clear_content_widgets(self) -> None:
         # Remove content widgets from layout, we'll add the desired one
@@ -90,6 +109,7 @@ class PreviewPane(QWidget):
                 pass
             if w is not None:
                 w.setParent(None)
+        self._current_widget = None
 
     def preview_paths(self, paths: list[str]) -> None:
         """Preview the first path from the list (if any)."""
@@ -148,16 +168,20 @@ class PreviewPane(QWidget):
             except Exception:
                 pass
         self._layout.insertWidget(1, self._web, 1)
+        self._current_widget = self._web
         # Let chromium's built-in PDF viewer handle the PDF quickly
         self._web.load(file_url)
         self._open_btn.setEnabled(True)
-        self._title.setText(f"Preview — {os.path.basename(path)}")
+        self._title.setText(f"Preview â€” {os.path.basename(path)}")
         # No progress for web view (handled by internal renderer), hide controls
         try:
             self._progress.setVisible(False)
             self._cancel_btn.setVisible(False)
         except Exception:
             pass
+        # Prepare overlay for PDFs (first-page translation text)
+        self._enable_overlay_controls(True)
+        self._prepare_pdf_overlay(path)
 
     def _show_image(self, path: str) -> None:
         self._clear_content_widgets()
@@ -178,11 +202,15 @@ class PreviewPane(QWidget):
             pix = pix.scaledToWidth(maxw, Qt.SmoothTransformation)
         self._image.setPixmap(pix)
         self._layout.insertWidget(1, self._image, 1)
+        self._current_widget = self._image
         try:
             self._open_btn.setEnabled(True)
-            self._title.setText(f"Preview — {os.path.basename(path)}")
+            self._title.setText(f"Preview â€” {os.path.basename(path)}")
         except Exception:
             pass
+        self._enable_overlay_controls(True)
+        self._overlay_label.setText("")
+        self._position_overlay()
 
         # Save a thumbnail for faster subsequent loads (only if none existed)
         try:
@@ -219,7 +247,65 @@ class PreviewPane(QWidget):
         self._layout.insertWidget(1, self._fallback, 1)
         self._open_btn.setEnabled(False)
         self._title.setText("Preview")
+        self._enable_overlay_controls(False)
+        self._overlay_label.setVisible(False)
 
     def _on_open(self) -> None:
         if self._current_path:
             self.open_requested.emit(self._current_path)
+
+    # --- overlay helpers ---
+    def set_translator(self, translator) -> None:
+        self._translator = translator
+
+    def _enable_overlay_controls(self, enable: bool) -> None:
+        self._overlay_btn.setVisible(bool(enable))
+        self._opacity_slider.setVisible(bool(enable))
+
+    def _on_toggle_overlay(self, checked: bool) -> None:
+        self._overlay_label.setVisible(bool(checked))
+        self._position_overlay()
+
+    def _on_opacity_changed(self, value: int) -> None:
+        try:
+            self._overlay_opacity = max(0.1, min(1.0, float(value) / 100.0))
+            self._overlay_label.setStyleSheet(f"background-color: rgba(0,0,0,{self._overlay_opacity}); color: #00ff99; font-weight: 600; padding: 8px;")
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_overlay()
+
+    def _position_overlay(self) -> None:
+        if not self._current_widget:
+            return
+        try:
+            cw = self._current_widget
+            g = cw.geometry()
+            top_left = cw.mapTo(self, g.topLeft())
+            self._overlay_label.setGeometry(top_left.x() + 8, top_left.y() + 8, max(200, g.width() - 16), max(24, g.height() - 16))
+            if self._overlay_label.isVisible():
+                self._overlay_label.raise_()
+        except Exception:
+            pass
+
+    def _prepare_pdf_overlay(self, path: str) -> None:
+        try:
+            from ..services import pdf_overlay as _pdfov
+            text = _pdfov.first_page_text(path)
+        except Exception:
+            text = ""
+        if not text:
+            self._overlay_label.setText("")
+            return
+        overlay_text = text
+        try:
+            if self._translator is not None and hasattr(self._translator, "translate"):
+                overlay_text = self._translator.translate(text)
+        except Exception:
+            pass
+        self._overlay_label.setText((overlay_text or "").strip())
+        if self._overlay_btn.isChecked():
+            self._overlay_label.setVisible(True)
+        self._position_overlay()

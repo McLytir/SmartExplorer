@@ -30,6 +30,8 @@ class AppConfig:
     # Directory to store SharePoint downloads when opening files.
     # If None, uses the OS temporary directory.
     sp_download_dir: Optional[str] = None
+    # If True, keep bulk downloads as .zip without auto-extracting
+    sp_keep_zip_downloads: bool = False
     # Preview cache directory (if None, use OS-appropriate cache/appdata)
     preview_cache_dir: Optional[str] = None
     # LibreTranslate settings

@@ -9,8 +9,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
+    QPushButton,
 )
 
 
@@ -22,10 +25,17 @@ class SharePointSelectorDialog(QDialog):
 
         self._sites_combo = QComboBox(self)
         self._libs_combo = QComboBox(self)
+        self._manual_site = QLineEdit(self)
+        self._manual_site.setPlaceholderText("https://tenant.sharepoint.com/sites/AnotherSite (optional)")
+        self._manual_load = QPushButton("Load", self)
 
         form = QFormLayout(self)
         form.addRow(QLabel("Site:"), self._sites_combo)
         form.addRow(QLabel("Library:"), self._libs_combo)
+        row = QHBoxLayout()
+        row.addWidget(self._manual_site)
+        row.addWidget(self._manual_load)
+        form.addRow(QLabel("Or enter Site URL:"), row)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
@@ -36,6 +46,7 @@ class SharePointSelectorDialog(QDialog):
         self._libraries = []
 
         self._sites_combo.currentIndexChanged.connect(self._on_site_changed)
+        self._manual_load.clicked.connect(self._on_manual_load)
         self._load_sites()
 
     def _load_sites(self) -> None:
@@ -62,6 +73,33 @@ class SharePointSelectorDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "SharePoint", f"Failed to fetch libraries: {exc}")
             libs = []
+        self._libraries = libs
+        self._libs_combo.clear()
+        for lib in libs:
+            path = (
+                lib.get("serverRelativeUrl")
+                or lib.get("server_relative_url")
+                or lib.get("path")
+                or ""
+            )
+            if not path or path == "/":
+                continue
+            title = lib.get("title") or lib.get("name") or path
+            self._libs_combo.addItem(title, lib)
+        if self._libs_combo.count() == 0:
+            QMessageBox.information(self, "SharePoint", "No document libraries with valid paths were found for this site.")
+
+    def _on_manual_load(self) -> None:
+        url = (self._manual_site.text() or "").strip()
+        if not url:
+            return
+        try:
+            parsed_rel = self._normalize_site_relative({"url": url})
+            resp = self.backend.sp_libraries(site_relative_url=parsed_rel if parsed_rel != "/" else None)
+            libs = resp.get("libraries", [])
+        except Exception as exc:
+            QMessageBox.critical(self, "SharePoint", f"Failed to fetch libraries for site: {exc}")
+            return
         self._libraries = libs
         self._libs_combo.clear()
         for lib in libs:

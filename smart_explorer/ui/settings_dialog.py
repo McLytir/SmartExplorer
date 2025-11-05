@@ -4,7 +4,7 @@ import webbrowser
 from urllib.parse import urlparse
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget, QMessageBox, QComboBox
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget, QMessageBox, QComboBox, QCheckBox
 )
 
 from ..api.backend_client import BackendClient
@@ -159,6 +159,14 @@ class SettingsDialog(QDialog):
         sdd.addWidget(self.sp_download_browse)
         root.addLayout(sdd)
 
+        # Keep bulk downloads as zip (security option)
+        self.sp_keep_zip = QCheckBox('Keep bulk downloads as zip (do not auto-extract)', self)
+        try:
+            self.sp_keep_zip.setChecked(bool(getattr(self.cfg, 'sp_keep_zip_downloads', False)))
+        except Exception:
+            self.sp_keep_zip.setChecked(False)
+        root.addWidget(self.sp_keep_zip)
+
         # Preview cache directory (optional). If empty, uses OS default location.
         self.preview_cache_dir = QLineEdit(self)
         try:
@@ -263,6 +271,10 @@ class SettingsDialog(QDialog):
             setattr(self.cfg, "libretranslate_url", self.lt_url.text().strip() or None)
         except Exception:
             pass
+        try:
+            self.cfg.sp_keep_zip_downloads = bool(self.sp_keep_zip.isChecked())
+        except Exception:
+            self.cfg.sp_keep_zip_downloads = False
         save_config(self.cfg)
 
     def _browse_sp_download_dir(self):
@@ -316,7 +328,7 @@ class SettingsDialog(QDialog):
         QMessageBox.information(
             self,
             "Sign In to SharePoint",
-            "Your default browser has been opened. Please complete the SharePoint sign-in, then return here and click OK to capture cookies.",
+            "Your default browser has been opened. Please complete the SharePoint sign-in in a normal (non-private) window, then return here and click OK to capture cookies.",
         )
 
         cookies = collect_sharepoint_cookies(parsed.netloc)
@@ -324,7 +336,7 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Cookie Capture",
-                "Could not locate SharePoint cookies. Ensure you are signed in using Edge, Chrome, or Firefox on this machine.",
+                "Could not locate SharePoint cookies. Ensure you are signed in using Edge, Chrome, or Firefox on this machine. Note: Incognito/Private windows do not persist cookies and cannot be captured.",
             )
             return
 

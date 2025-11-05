@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData, QItemSelectionModel, QEvent, QSize
+from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData, QItemSelectionModel, QEvent, QSize, QUrl
 from PySide6.QtGui import QDrag, QMouseEvent, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
+    QProgressDialog,
     QSizePolicy,
     QStackedLayout,
     QToolButton,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE, PATH_ROLE
 from ..models.translated_fs_model import TranslatedProxyModel
 from ..translation_cache import TranslationCache
+from ..services.preview_cache import cached_download_path, save_downloaded_file
 from ..translators.base import Translator, IdentityTranslator
 from ..workspaces import WorkspaceDefinition
 
@@ -64,6 +66,19 @@ class WorkspaceTreeView(QTreeView):
         else:
             event.ignore()
 
+
+class WorkspaceIconView(QListView):
+    def __init__(self, pane: "WorkspacePane") -> None:
+        super().__init__(pane)
+        self._pane = pane
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.viewport().setAcceptDrops(True)
+
+    def startDrag(self, supportedActions: Qt.DropAction) -> None:  # type: ignore[override]
+        self._pane._start_drag(supportedActions)
 
 class WorkspaceHeader(QLabel):
     reorder_requested = Signal(str, str)  # source_id, target_id
@@ -189,7 +204,7 @@ class WorkspacePane(QFrame):
         self.header.setText(definition.name)
 
         self._search = QLineEdit(self)
-        self._search.setPlaceholderText("Search…")
+        self._search.setPlaceholderText("Searchâ€¦")
 
         self._view = WorkspaceTreeView(self)
         self._view.setSortingEnabled(True)
@@ -202,7 +217,7 @@ class WorkspacePane(QFrame):
         self._view.expanded.connect(self._on_expanded)
         self._view.collapsed.connect(self._on_collapsed)
 
-        self._icon_view = QListView(self)
+        self._icon_view = WorkspaceIconView(self)
         self._icon_view.setViewMode(QListView.IconMode)
         self._icon_view.setIconSize(QSize(48, 48))
         self._icon_view.setResizeMode(QListView.Adjust)
@@ -239,7 +254,7 @@ class WorkspacePane(QFrame):
         try:
             self._link_btn.setVisible(self.definition.kind == "translation")
             self._link_btn.setChecked(getattr(self.definition, "follow_base", True))
-            self._link_btn.setText("🔗" if self._link_btn.isChecked() else "⛓")
+            self._link_btn.setText("ðŸ”—" if self._link_btn.isChecked() else "â›“")
             self._link_btn.setToolTip("Linked to base navigation" if self._link_btn.isChecked() else "Unlinked from base navigation")
         except Exception:
             self._link_btn.setVisible(False)
@@ -299,7 +314,7 @@ class WorkspacePane(QFrame):
             try:
                 self._link_btn.setVisible(self.definition.kind == "translation")
                 self._link_btn.setChecked(getattr(self.definition, "follow_base", True))
-                self._link_btn.setText("🔗" if self._link_btn.isChecked() else "⛓")
+                self._link_btn.setText("ðŸ”—" if self._link_btn.isChecked() else "â›“")
             except Exception:
                 pass
 
@@ -321,7 +336,7 @@ class WorkspacePane(QFrame):
             self.definition.follow_base = True if checked else False
         # update glyph
         try:
-            self._link_btn.setText("🔗" if checked else "⛓")
+            self._link_btn.setText("ðŸ”—" if checked else "â›“")
         except Exception:
             pass
         self.link_toggled.emit(self.definition.id, bool(checked))
@@ -428,25 +443,25 @@ class WorkspacePane(QFrame):
         bar.setSpacing(6)
 
         self._back_btn = QToolButton(self)
-        self._back_btn.setText("←")
+        self._back_btn.setText("â†")
         self._back_btn.setToolTip("Back")
         self._back_btn.setAutoRaise(True)
         self._back_btn.clicked.connect(lambda checked=False: self._navigate_history(-1))
 
         self._forward_btn = QToolButton(self)
-        self._forward_btn.setText("→")
+        self._forward_btn.setText("â†’")
         self._forward_btn.setToolTip("Forward")
         self._forward_btn.setAutoRaise(True)
         self._forward_btn.clicked.connect(lambda checked=False: self._navigate_history(1))
 
         self._up_btn = QToolButton(self)
-        self._up_btn.setText("↑")
+        self._up_btn.setText("â†‘")
         self._up_btn.setToolTip("Up one level")
         self._up_btn.setAutoRaise(True)
         self._up_btn.clicked.connect(lambda checked=False: self.navigate_up())
 
         self._view_mode_btn = QToolButton(self)
-        self._view_mode_btn.setText("☰")
+        self._view_mode_btn.setText("â˜°")
         self._view_mode_btn.setCheckable(True)
         self._view_mode_btn.setToolTip("Toggle icon view")
         self._view_mode_btn.setAutoRaise(True)
@@ -468,7 +483,7 @@ class WorkspacePane(QFrame):
 
         # Quick Go To
         self._goto_btn = QToolButton(self)
-        self._goto_btn.setText("Go…")
+        self._goto_btn.setText("Goâ€¦")
         self._goto_btn.setToolTip("Quick Go To palette")
         self._goto_btn.setAutoRaise(True)
         self._goto_btn.clicked.connect(self._open_go_to_palette)
@@ -529,7 +544,7 @@ class WorkspacePane(QFrame):
             return
         self._icon_mode = checked
         self._view_stack.setCurrentIndex(1 if checked else 0)
-        self._view_mode_btn.setText("🗂" if checked else "☰")
+        self._view_mode_btn.setText("ðŸ—‚" if checked else "â˜°")
         self._view_mode_btn.setToolTip("Show tree view" if checked else "Show icon view")
         self._sync_icon_model()
         if checked:
@@ -1120,6 +1135,138 @@ class WorkspacePane(QFrame):
         }
         mime = QMimeData()
         mime.setData(DRAG_MIME_TYPE, json.dumps(payload).encode("utf-8"))
+        # Also populate standard URLs for dragging to external apps (Explorer, browsers)
+        urls: List[QUrl] = []
+        file_urls: List[QUrl] = []  # local file URLs for Explorer
+        web_urls: List[QUrl] = []   # http(s) URLs for browsers
+        # Determine effective kind/site when in translation mode
+        effective_kind = self.definition.kind
+        effective_site = getattr(self.definition, "site_relative_url", None)
+        if self.definition.kind == "translation" and self.definition.base_workspace_id:
+            base = self._base_panes.get(self.definition.base_workspace_id)
+            if base:
+                effective_kind = base.definition.kind
+                effective_site = getattr(base.definition, "site_relative_url", None)
+
+            if effective_kind == "local":
+                # Provide local file:// URLs for files and folders
+                for it in items:
+                    p = it.get("path") or ""
+                    if p:
+                        file_urls.append(QUrl.fromLocalFile(p))
+            elif effective_kind == "sharepoint":
+                # Provide web URLs and prepare local downloads for files
+                link_texts: List[str] = []
+                files_needing_download: List[dict] = []
+                for it in items:
+                    p = it.get("path") or ""
+                    if not p:
+                        continue
+                    if not bool(it.get("is_dir", False)):
+                        try:
+                            exists = cached_download_path(p)
+                        except Exception:
+                            exists = None
+                        if not exists:
+                            files_needing_download.append(it)
+
+                total = len(files_needing_download)
+                progress = None
+                if total > 0:
+                    try:
+                        progress = QProgressDialog("Preparing files…", "Cancel", 0, total, self)
+                        progress.setWindowTitle("SmartExplorer")
+                        progress.setWindowModality(Qt.ApplicationModal)
+                        progress.setValue(0)
+                        progress.show()
+                        QApplication.processEvents()
+                    except Exception:
+                        progress = None
+
+                prepared_ok = True
+                completed = 0
+                for it in files_needing_download:
+                    if progress and progress.wasCanceled():
+                        prepared_ok = False
+                        break
+                    p = it.get("path") or ""
+                    try:
+                        # Decide whether to zip based on size (> 20 MB)
+                        size_bytes = None
+                        try:
+                            props = self._backend.sp_properties(p, is_folder=False, site_relative_url=effective_site)
+                            sz = props.get("size")
+                            if isinstance(sz, int):
+                                size_bytes = sz
+                        except Exception:
+                            size_bytes = None
+
+                        data = self._backend.sp_download(p, site_relative_url=effective_site)
+                        base_name = os.path.basename(p) or "download"
+
+                        # If large, wrap into a zip archive for export
+                        if size_bytes is not None and size_bytes > (20 * 1024 * 1024):
+                            try:
+                                import io as _io
+                                import zipfile as _zipfile
+                                bio = _io.BytesIO()
+                                compression = getattr(_zipfile, "ZIP_DEFLATED", getattr(_zipfile, "ZIP_STORED", 0))
+                                with _zipfile.ZipFile(bio, mode="w", compression=compression) as zf:
+                                    zf.writestr(base_name, data)
+                                zip_bytes = bio.getvalue()
+                                cached = save_downloaded_file(p, zip_bytes, suggested_name=base_name + ".zip")
+                            except Exception:
+                                cached = save_downloaded_file(p, data, suggested_name=base_name)
+                        else:
+                            cached = save_downloaded_file(p, data, suggested_name=base_name)
+                        if cached and os.path.exists(cached):
+                            file_urls.append(QUrl.fromLocalFile(cached))
+                    except Exception:
+                        prepared_ok = False
+                        break
+                    finally:
+                        completed += 1
+                        if progress:
+                            try:
+                                progress.setValue(completed)
+                                progress.setLabelText(f"Preparing {completed} of {total}…")
+                                QApplication.processEvents()
+                            except Exception:
+                                pass
+
+                if progress:
+                    try:
+                        progress.close()
+                    except Exception:
+                        pass
+                if not prepared_ok:
+                    return
+
+                for it in items:
+                    p = it.get("path") or ""
+                    if not p:
+                        continue
+                    try:
+                        resp = self.backend.sp_share_link(p, site_relative_url=effective_site)
+                        url = resp.get("url")
+                        if url:
+                            link_texts.append(url)
+                            web_urls.append(QUrl(url))
+                    except Exception:
+                        pass
+                if link_texts:
+                    try:
+                        mime.setText("\n".join(link_texts))
+                    except Exception:
+                        pass
+            pass
+        # Combine URLs: local files first to favor Explorer, then web URLs for browsers
+        urls = file_urls + web_urls
+        if urls:
+            try:
+                mime.setUrls(urls)
+            except Exception:
+                pass
         drag = QDrag(self)
         drag.setMimeData(mime)
         default_action = Qt.MoveAction

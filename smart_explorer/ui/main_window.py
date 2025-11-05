@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import colorsys
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QDialog,
     QTabBar,
+    QProgressDialog,
 )
 
 from ..api.backend_client import BackendClient
@@ -54,6 +55,7 @@ from .translation_dialog import TranslationWorkspaceDialog
 from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
+from ..services import edit_session
 
 
 class MainWindow(QMainWindow):
@@ -305,6 +307,11 @@ class MainWindow(QMainWindow):
             if self._preview_enabled and self._preview_widget is None:
                 try:
                     self._preview_widget = PreviewPane(self)
+                    try:
+                        if hasattr(self._preview_widget, 'set_translator'):
+                            self._preview_widget.set_translator(self._translator)
+                    except Exception:
+                        pass
                     # When user requests open from preview, reuse existing opening logic
                     self._preview_widget.open_requested.connect(lambda p: self._on_workspace_item_activated(self._active_workspace_id or "", p))
                 except Exception:
@@ -1394,6 +1401,7 @@ QLabel { color: #eee8d5; }
         add_action("Cut", lambda: self._clipboard_copy(True))
         add_action("Paste", self._clipboard_paste)
         add_action("Copy Path", self._copy_paths_to_clipboard)
+        add_action("Extract Zip Here", self._extract_zip_here)
         add_action("", separator=True)
         # Edit group
         add_action("Rename", self._rename_selected_item)
@@ -1405,7 +1413,10 @@ QLabel { color: #eee8d5; }
         add_action("", separator=True)
         # SharePoint group
         add_action("Copy Share Link", self._copy_share_link)
-        add_action("Open in SharePoint", self._open_in_sharepoint)
+        add_action("Download…", self._download_selected_items)
+        add_action("Check Out for Edit", self._sp_checkout_for_edit)
+        add_action("Upload Edited File(s)", self._sp_upload_edited)
+        add_action("Versions...", self._sp_versions)
         add_action("", separator=True)
         # Properties
         add_action("Properties", self._show_properties)
@@ -1880,6 +1891,463 @@ QLabel { color: #eee8d5; }
                     subprocess.Popen(parts + [p])
         except Exception as exc:
             QMessageBox.warning(self, "Open With", f"Failed: {exc}")
+
+    def _download_selected_items(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        # Determine effective kind and site for translation panes
+        effective_kind = pane.definition.kind
+        effective_site = pane.definition.site_relative_url
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            base = self._workspace_panes.get(pane.definition.base_workspace_id)
+            if base:
+                effective_kind = base.definition.kind
+                effective_site = base.definition.site_relative_url
+        if effective_kind != "sharepoint":
+            QMessageBox.information(self, "Download", "Download is available for SharePoint items.")
+            return
+
+        # Choose destination directory
+        try:
+            default_dir = getattr(self._cfg, "sp_download_dir", None) or os.path.expanduser("~")
+        except Exception:
+            default_dir = os.path.expanduser("~")
+        dest = QFileDialog.getExistingDirectory(self, "Choose download folder", default_dir)
+        if not dest:
+            return
+
+        # Helper: recursively enumerate files under a SharePoint folder
+        def _gather_files(folder_path: str) -> list[tuple[str, str]]:
+            collected: list[tuple[str, str]] = []
+            try:
+                resp = self._backend.sp_list(effective_site or "/", folder_path)
+            except Exception:
+                return collected
+            for it in resp.get("items", []):
+                p = it.get("path") or ""
+                name = it.get("name") or os.path.basename(p)
+                if not p:
+                    continue
+                if bool(it.get("isDir")):
+                    collected.extend(_gather_files(p))
+                else:
+                    # Store as (server_path, relative_path)
+                    rel = name
+                    collected.append((p, rel))
+            return collected
+
+        # Determine if bulk (multiple items or any dir)
+        bulk = len(items) > 1 or any(bool(it.get("is_dir")) for it in items)
+
+        if not bulk and len(items) == 1 and not items[0].get("is_dir"):
+            # Single file: stream download directly with progress
+            p = items[0].get("path") or ""
+            if not p:
+                return
+            name = os.path.basename(p) or "download"
+            target_path = os.path.join(dest, name)
+            try:
+                import httpx
+                url = self._backend.base_url.rstrip('/') + "/api/sp/download"
+                params = {"server_relative_url": p}
+                if effective_site:
+                    params["site_relative_url"] = effective_site
+                prog = QProgressDialog(f"Downloading {name}�", "Cancel", 0, 100, self)
+                prog.setWindowTitle("SmartExplorer")
+                prog.setWindowModality(Qt.ApplicationModal)
+                prog.setValue(0)
+                prog.show()
+                with httpx.Client(timeout=None) as client:
+                    with client.stream("GET", url, params=params) as r:
+                        r.raise_for_status()
+                        total = None
+                        try:
+                            total = int(r.headers.get("content-length"))
+                        except Exception:
+                            total = None
+                        downloaded = 0
+                        chunk_size = 64 * 1024
+                        with open(target_path, "wb") as f:
+                            for chunk in r.iter_bytes(chunk_size=chunk_size):
+                                if prog.wasCanceled():
+                                    try:
+                                        f.close()
+                                        os.remove(target_path)
+                                    except Exception:
+                                        pass
+                                    prog.close()
+                                    QMessageBox.information(self, "Download", "Canceled.")
+                                    return
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total:
+                                    pct = int(downloaded / total * 100)
+                                    prog.setValue(pct)
+                                    QApplication.processEvents()
+                prog.close()
+                QMessageBox.information(self, "Download", f"Saved to: {target_path}")
+            except Exception as exc:
+                QMessageBox.warning(self, "Download", f"Failed: {exc}")
+            return
+
+        # Bulk download: zip selection
+        # Build file list with relative paths
+        file_entries: list[tuple[str, str]] = []
+        for it in items:
+            server_path = it.get("path") or ""
+            if not server_path:
+                continue
+            name = it.get("display") or os.path.basename(server_path)
+            if it.get("is_dir"):
+                # Gather recursively and prefix with folder name
+                subfiles = _gather_files(server_path)
+                for sp, rel in subfiles:
+                    file_entries.append((sp, os.path.join(name, rel)))
+            else:
+                file_entries.append((server_path, name))
+        if not file_entries:
+            QMessageBox.information(self, "Download", "Nothing to download.")
+            return
+
+        # Choose zip name
+        if len(items) == 1 and items[0].get("is_dir"):
+            base_name = (items[0].get("display") or os.path.basename(items[0].get("path") or "folder")).strip() or "folder"
+            zip_name = base_name + ".zip"
+        else:
+            zip_name = "Selection.zip"
+        zip_path = os.path.join(dest, zip_name)
+
+        # Build sizes for byte-level progress
+        total_bytes = 0
+        sizes: dict[str, int] = {}
+        for sp, _rel in file_entries:
+            try:
+                props = self._backend.sp_properties(sp, is_folder=False, site_relative_url=effective_site)
+                sz = props.get("size")
+                if isinstance(sz, int):
+                    sizes[sp] = sz
+                    total_bytes += sz
+            except Exception:
+                pass
+        use_byte_progress = total_bytes > 0 and len(sizes) == len(file_entries)
+        # Progress dialog (byte-based when sizes known; else file-count based)
+        prog_max = total_bytes if use_byte_progress else len(file_entries)
+        prog = QProgressDialog("Downloading…", "Cancel", 0, prog_max, self)
+        prog.setWindowTitle("SmartExplorer")
+        prog.setWindowModality(Qt.ApplicationModal)
+        prog.setValue(0)
+        prog.show()
+
+        import zipfile, io, httpx
+        bio = io.BytesIO()
+        try:
+            with zipfile.ZipFile(bio, mode="w", compression=getattr(zipfile, "ZIP_DEFLATED", getattr(zipfile, "ZIP_STORED", 0))) as zf:
+                downloaded_total = 0
+                files_done = 0
+                for sp, rel in file_entries:
+                    if prog.wasCanceled():
+                        QMessageBox.information(self, "Download", "Canceled.")
+                        return
+                    # Stream this file into zip entry
+                    url = self._backend.base_url.rstrip('/') + "/api/sp/download"
+                    params = {"server_relative_url": sp}
+                    if effective_site:
+                        params["site_relative_url"] = effective_site
+                    try:
+                        with httpx.Client(timeout=None) as client:
+                            with client.stream("GET", url, params=params) as r:
+                                r.raise_for_status()
+                                entry = zf.open(rel.replace("\\", "/"), mode='w')
+                                with entry as zentry:
+                                    for chunk in r.iter_bytes(chunk_size=64*1024):
+                                        if prog.wasCanceled():
+                                            QMessageBox.information(self, "Download", "Canceled.")
+                                            return
+                                        zentry.write(chunk)
+                                        if use_byte_progress:
+                                            downloaded_total += len(chunk)
+                                            prog.setValue(min(downloaded_total, prog_max))
+                                        prog.setLabelText(f"Downloading {rel}…")
+                                        QApplication.processEvents()
+                    except Exception as exc:
+                        QMessageBox.warning(self, "Download", f"Failed to download {rel}: {exc}")
+                        return
+                    if not use_byte_progress:
+                        files_done += 1
+                        prog.setValue(files_done)
+            # Write zip to disk
+            with open(zip_path, "wb") as f:
+                f.write(bio.getvalue())
+        finally:
+            try:
+                prog.close()
+            except Exception:
+                pass        # Auto-extract unless user opted to keep zips
+        keep_zip = bool(getattr(self._cfg, "sp_keep_zip_downloads", False))
+        if not keep_zip:
+            try:
+                # Extract into a folder alongside the zip, then delete the zip
+                dest_dir = os.path.join(dest, os.path.splitext(os.path.basename(zip_path))[0])
+                os.makedirs(dest_dir, exist_ok=True)
+                import zipfile
+                with zipfile.ZipFile(zip_path) as zf:
+                    # safe extract
+                    for m in zf.infolist():
+                        name = m.filename.replace("\\", "/")
+                        if name.startswith("/") or ".." in name.split("/"):
+                            continue
+                        out_path = os.path.normpath(os.path.join(dest_dir, name))
+                        if m.is_dir():
+                            os.makedirs(out_path, exist_ok=True)
+                        else:
+                            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                            with zf.open(m) as src, open(out_path, "wb") as dst:
+                                dst.write(src.read())
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+                QMessageBox.information(self, "Download", f"Extracted to: {dest_dir}")
+            except Exception as exc:
+                QMessageBox.warning(self, "Download", f"Failed to extract zip: {exc}")
+        else:
+            QMessageBox.information(self, "Download", f"Saved archive: {zip_path}")
+        
+    def _extract_zip_here(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        # Determine effective kind/site for translation panes
+        effective_kind = pane.definition.kind
+        effective_site = pane.definition.site_relative_url
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            base = self._workspace_panes.get(pane.definition.base_workspace_id)
+            if base:
+                effective_kind = base.definition.kind
+                effective_site = base.definition.site_relative_url
+
+        # Gather .zip files
+        zips: List[str] = []
+        for it in items:
+            if it.get("is_dir"):
+                continue
+            p = it.get("path") or ""
+            if not p:
+                continue
+            if os.path.splitext(p)[1].lower() == ".zip":
+                zips.append(p)
+        if not zips:
+            QMessageBox.information(self, "Extract", "Select one or more .zip files to extract.")
+            return
+
+        def _safe_extract(zippath: str, dest_dir: str) -> bool:
+            try:
+                import zipfile
+                with zipfile.ZipFile(zippath) as zf:
+                    members = zf.infolist()
+                    total = len(members)
+                    prog = QProgressDialog(f"Extracting {os.path.basename(zippath)}…", "Cancel", 0, total, self)
+                    prog.setWindowTitle("SmartExplorer")
+                    prog.setWindowModality(Qt.ApplicationModal)
+                    prog.setValue(0)
+                    prog.show()
+                    count = 0
+                    for m in members:
+                        if prog.wasCanceled():
+                            prog.close()
+                            return False
+                        name = m.filename.replace("\\", "/")
+                        if name.startswith("/") or ".." in name.split("/"):
+                            count += 1
+                            prog.setValue(count)
+                            QApplication.processEvents()
+                            continue
+                        target_path = os.path.normpath(os.path.join(dest_dir, name))
+                        if m.is_dir():
+                            os.makedirs(target_path, exist_ok=True)
+                        else:
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                            with zf.open(m) as src, open(target_path, "wb") as dst:
+                                dst.write(src.read())
+                        count += 1
+                        prog.setValue(count)
+                        QApplication.processEvents()
+                    prog.close()
+                return True
+            except Exception as exc:
+                QMessageBox.warning(self, "Extract", f"Failed to extract: {exc}")
+                return False
+
+        for p in zips:
+            try:
+                if effective_kind == "local":
+                    local_zip = p
+                    if not os.path.exists(local_zip):
+                        QMessageBox.warning(self, "Extract", f"File not found: {local_zip}")
+                        continue
+                    base_dir = os.path.dirname(local_zip)
+                    base_name = os.path.splitext(os.path.basename(local_zip))[0]
+                    dest_dir = os.path.join(base_dir, base_name)
+                    os.makedirs(dest_dir, exist_ok=True)
+                    ok = _safe_extract(local_zip, dest_dir)
+                    if ok:
+                        pane.refresh()
+                elif effective_kind == "sharepoint":
+                    # Download to configured SharePoint download dir (or temp), then extract there
+                    try:
+                        data = self._backend.sp_download(p, site_relative_url=effective_site)
+                    except Exception as exc:
+                        QMessageBox.warning(self, "Extract", f"Download failed: {exc}")
+                        continue
+                    base_name = os.path.basename(p) or "archive.zip"
+                    target_dir = getattr(self._cfg, "sp_download_dir", None)
+                    if not target_dir:
+                        import tempfile
+                        target_dir = tempfile.gettempdir()
+                    try:
+                        os.makedirs(target_dir, exist_ok=True)
+                    except Exception:
+                        pass
+                    local_zip = os.path.join(target_dir, base_name)
+                    try:
+                        with open(local_zip, "wb") as f:
+                            f.write(data)
+                    except Exception as exc:
+                        QMessageBox.warning(self, "Extract", f"Failed to save zip: {exc}")
+                        continue
+                    dest_dir = os.path.join(target_dir, os.path.splitext(base_name)[0])
+                    os.makedirs(dest_dir, exist_ok=True)
+                    _safe_extract(local_zip, dest_dir)
+            except Exception:
+                continue
+
+    def _sp_checkout_for_edit(self) -> None:
+            pane = self._active_pane()
+            if not pane:
+                return
+            items = pane.current_items()
+            if not items:
+                return
+            # Determine effective kind/site
+            effective_kind = pane.definition.kind
+            effective_site = pane.definition.site_relative_url
+            if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+                base = self._workspace_panes.get(pane.definition.base_workspace_id)
+                if base:
+                    effective_kind = base.definition.kind
+                    effective_site = base.definition.site_relative_url
+            if effective_kind != "sharepoint":
+                QMessageBox.information(self, "Check Out", "This action is for SharePoint items.")
+                return
+            # Choose destination dir
+            try:
+                default_dir = getattr(self._cfg, "sp_download_dir", None) or os.path.expanduser("~")
+            except Exception:
+                default_dir = os.path.expanduser("~")
+            dest = default_dir
+            # Download each selected file (skip folders)
+            for it in items:
+                if it.get("is_dir"):
+                    continue
+                sp_path = it.get("path") or ""
+                if not sp_path:
+                    continue
+                name = it.get("display") or os.path.basename(sp_path)
+                target_path = os.path.join(dest, name)
+                try:
+                    try:
+                        self._backend.sp_checkout(sp_path, site_relative_url=effective_site)
+                    except Exception:
+                        pass  # not all libraries require checkout
+                    data = self._backend.sp_download(sp_path, site_relative_url=effective_site)
+                    with open(target_path, "wb") as f:
+                        f.write(data)
+                    edit_session.set_session(sp_path, target_path, effective_site)
+                except Exception as exc:
+                    QMessageBox.warning(self, "Check Out", f"Failed to download {name}: {exc}")
+            QMessageBox.information(self, "Check Out", "Files are ready for editing in your download folder.")
+
+    def _sp_upload_edited(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        # Determine effective kind/site
+        effective_kind = pane.definition.kind
+        effective_site = pane.definition.site_relative_url
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            base = self._workspace_panes.get(pane.definition.base_workspace_id)
+            if base:
+                effective_kind = base.definition.kind
+                effective_site = base.definition.site_relative_url
+        if effective_kind != "sharepoint":
+            QMessageBox.information(self, "Upload", "This action is for SharePoint items.")
+            return
+        import base64 as _b64
+        any_failed = False
+        for it in items:
+            if it.get("is_dir"):
+                continue
+            sp_path = it.get("path") or ""
+            if not sp_path:
+                continue
+            local_path = edit_session.get_session(sp_path, effective_site)
+            if not local_path or not os.path.exists(local_path):
+                any_failed = True
+                continue
+            try:
+                with open(local_path, "rb") as f:
+                    data = f.read()
+                content_b64 = _b64.b64encode(data).decode("ascii")
+                parent = sp_path.rsplit('/', 1)[0]
+                name = os.path.basename(sp_path)
+                self._backend.sp_upload(parent, name, content_b64, site_relative_url=effective_site, overwrite=True)
+                try:
+                    self._backend.sp_checkin(sp_path, comment="Edited in SmartExplorer", checkin_type=1, site_relative_url=effective_site)
+                except Exception:
+                    pass
+                edit_session.clear_session(sp_path, effective_site)
+            except Exception as exc:
+                any_failed = True
+                QMessageBox.warning(self, "Upload", f"Failed to upload {os.path.basename(sp_path)}: {exc}")
+        if any_failed:
+            QMessageBox.information(self, "Upload", "Some files failed to upload. Others completed.")
+        else:
+            QMessageBox.information(self, "Upload", "All edited files uploaded.")
+
+    def _sp_versions(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        items = pane.current_items()
+        if not items:
+            return
+        it = items[0]
+        sp_path = it.get("path") or ""
+        if not sp_path or it.get("is_dir"):
+            QMessageBox.information(self, "Versions", "Select a single file.")
+            return
+        # Determine effective site for translation panes
+        effective_site = pane.definition.site_relative_url
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            base = self._workspace_panes.get(pane.definition.base_workspace_id)
+            if base:
+                effective_site = base.definition.site_relative_url
+        try:
+            from .sp_versions_dialog import SPVersionsDialog
+            dlg = SPVersionsDialog(self._backend, sp_path, effective_site, self)
+            dlg.exec()
+        except Exception as exc:
+            QMessageBox.warning(self, "Versions", f"Failed to open versions: {exc}")
 
     def _rename_selected_item(self) -> None:
         pane = self._active_pane()

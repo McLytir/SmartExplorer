@@ -1,11 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Optional, Dict
 import httpx
+import os
 
 
 class BackendClient:
     def __init__(self, base_url: str = "http://127.0.0.1:5001") -> None:
+        try:
+            env_url = os.getenv("SMX_BACKEND_URL") or os.getenv("SMART_EXPLORER_BACKEND_URL")
+            if env_url and base_url == "http://127.0.0.1:5001":
+                base_url = env_url
+        except Exception:
+            pass
         self.base_url = base_url.rstrip("/")
 
     def get(self, path: str, params: Optional[dict] = None) -> dict:
@@ -134,5 +141,42 @@ class BackendClient:
             params["site_relative_url"] = site_relative_url
         with httpx.Client(timeout=60.0) as c:
             r = c.get(self.base_url + "/api/sp/download", params=params)
+            r.raise_for_status()
+            return r.content
+
+    # Check-out / Check-in / Versions
+    def sp_checkout(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> dict:
+        payload = {"server_relative_url": server_relative_url, "site_relative_url": site_relative_url}
+        return self.post("/api/sp/checkout", json=payload)
+
+    def sp_checkin(self, server_relative_url: str, *, comment: str = "", checkin_type: int = 1, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "server_relative_url": server_relative_url,
+            "comment": comment,
+            "checkin_type": checkin_type,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/checkin", json=payload)
+
+    def sp_undo_checkout(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> dict:
+        payload = {"server_relative_url": server_relative_url, "site_relative_url": site_relative_url}
+        return self.post("/api/sp/undo-checkout", json=payload)
+
+    def sp_versions(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> dict:
+        params = {"server_relative_url": server_relative_url}
+        if site_relative_url:
+            params["site_relative_url"] = site_relative_url
+        return self.get("/api/sp/versions", params=params)
+
+    def sp_restore_version(self, server_relative_url: str, label: str, *, site_relative_url: Optional[str] = None) -> dict:
+        payload = {"server_relative_url": server_relative_url, "label": label, "site_relative_url": site_relative_url}
+        return self.post("/api/sp/restore-version", json=payload)
+
+    def sp_download_version(self, server_relative_url: str, label: str, *, site_relative_url: Optional[str] = None) -> bytes:
+        params = {"server_relative_url": server_relative_url, "label": label}
+        if site_relative_url:
+            params["site_relative_url"] = site_relative_url
+        with httpx.Client(timeout=60.0) as c:
+            r = c.get(self.base_url + "/api/sp/download-version", params=params)
             r.raise_for_status()
             return r.content
