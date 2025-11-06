@@ -18,6 +18,13 @@ class Translator(ABC):
         """
         return [self.translate_title(t, target_language) for t in titles]
 
+    def translate_texts(self, texts: List[str], target_language: str) -> List[str]:
+        """
+        Optional general-purpose translation. Default implementation returns original text.
+        Implementations may override when available.
+        """
+        return list(texts)
+
     def cache_namespace(self) -> str:
         """
         Identifier for translation cache separation.
@@ -33,6 +40,9 @@ class IdentityTranslator(Translator):
 
     def translate_titles(self, titles: List[str], target_language: str) -> List[Optional[str]]:
         return list(titles)
+
+    def translate_texts(self, texts: List[str], target_language: str) -> List[str]:
+        return list(texts)
 
     def cache_namespace(self) -> str:
         return "identity"

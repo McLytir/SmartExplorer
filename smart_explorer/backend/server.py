@@ -3,9 +3,12 @@
 import base64
 import fnmatch
 import io
+import logging
 import os
 import sys
 import time
+import unicodedata
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import List, Optional, Dict, Tuple
@@ -68,6 +71,14 @@ class TranslateRequest(BaseModel):
 
 
 class TranslateResponse(BaseModel):
+    translations: List[str]
+
+class TranslateTextRequest(BaseModel):
+    language: Optional[str] = None
+    texts: List[str]
+
+
+class TranslateTextResponse(BaseModel):
     translations: List[str]
 
 
@@ -527,9 +538,13 @@ def sp_download(site_relative_url: Optional[str] = Query(None), server_relative_
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download failed: {e}")
     filename = server_relative_url.rsplit('/', 1)[-1] or "download"
-    return StreamingResponse(io.BytesIO(content), media_type="application/octet-stream", headers={
-        "Content-Disposition": f"attachment; filename=\"{filename}\""
-    })
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": _build_content_disposition(filename),
+        },
+    )
 
 
 @app.post("/api/sp/share-link", response_model=SPShareLinkResponse)
@@ -546,6 +561,20 @@ def sp_share_link(req: SPPathRequest):
 class SPListResponse(BaseModel):
     path: str
     items: List[ListItem]
+
+
+def _build_content_disposition(filename: str) -> str:
+    ascii_name = (
+        unicodedata.normalize("NFKD", filename)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    ascii_name = "".join(
+        ch if 32 <= ord(ch) < 127 and ch not in {'"', '\\'} else "_"
+        for ch in ascii_name
+    ).strip() or "download"
+    utf8_name = quote(filename, safe="")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
 
 
 @app.get("/api/sp/list", response_model=SPListResponse)
@@ -839,6 +868,29 @@ def translate(req: TranslateRequest):
     return TranslateResponse(translations=out)
 
 
+@app.post("/api/translate/text", response_model=TranslateTextResponse)
+def translate_text(req: TranslateTextRequest):
+    language = req.language or cfg.target_language or "English"
+    texts = req.texts or []
+    if not texts:
+        return TranslateTextResponse(translations=[])
+    try:
+        results = translator.translate_texts(texts, language)
+    except Exception as exc:
+        logging.exception("translate_text failed: %s", exc)
+        results = list(texts)
+
+    normalized: List[str] = []
+    for original, translated in zip(texts, results or []):
+        if isinstance(translated, str) and translated.strip():
+            normalized.append(translated.strip())
+        else:
+            normalized.append(original)
+    if len(normalized) < len(texts):
+        normalized.extend(texts[len(normalized):])
+    return TranslateTextResponse(translations=normalized)
+
+
 # Removed warmup endpoints that depended on local filesystem
 
 
@@ -881,6 +933,3 @@ def main(argv: Optional[list[str]] = None):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-
-
-

@@ -129,3 +129,67 @@ class OpenAITranslator(Translator):
             return out
         except Exception:
             return [None] * len(stems)
+
+    def translate_texts(self, texts: List[str], target_language: str) -> List[str]:
+        if not texts:
+            return []
+
+        system_prompt = (
+            "You are a professional translator. Translate user provided text into the requested language. "
+            "Preserve meaning and formatting. Return only the translated text."
+        )
+        request_payload = {
+            "instruction": (
+                "Translate each entry in the provided list into "
+                f"{target_language}. Return a JSON object with a key 'translations' "
+                "containing an array of translated strings aligned with the input order."
+            ),
+            "texts": texts,
+        }
+        user_prompt = json.dumps(request_payload, ensure_ascii=False)
+
+        try:
+            try:
+                resp = self.client.responses.create(
+                    model=self.model,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                content = resp.output_text.strip()
+            except Exception:
+                chat = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
+                )
+                content = chat.choices[0].message.content.strip()
+
+            translated: List[str] = list(texts)
+            try:
+                data = json.loads(content)
+                items = data.get("translations") if isinstance(data, dict) else None
+                if isinstance(items, list) and len(items) == len(texts):
+                    translated = [
+                        (item or "").strip() if isinstance(item, str) and (item or "").strip() else orig
+                        for item, orig in zip(items, texts)
+                    ]
+                    return translated
+            except Exception:
+                pass
+
+            # Fallback: attempt to split lines
+            lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+            if len(lines) >= len(texts):
+                translated = [
+                    lines[i] if lines[i] else orig
+                    for i, orig in enumerate(texts)
+                ]
+            return translated
+        except Exception:
+            return list(texts)

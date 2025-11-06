@@ -42,3 +42,19 @@ class BackendTranslator(Translator):
 
     def cache_namespace(self) -> str:
         return f"backend:{self._base_url}"
+
+    def translate_texts(self, texts: List[str], target_language: str) -> List[str]:
+        try:
+            resp = self.client.post(
+                "/api/translate/text",
+                json={"language": target_language, "texts": texts},
+            )
+            arr = resp.get("translations", []) if isinstance(resp, dict) else []
+            if isinstance(arr, list) and len(arr) == len(texts):
+                return [
+                    item.strip() if isinstance(item, str) and item.strip() else orig
+                    for item, orig in zip(arr, texts)
+                ]
+            return list(texts)
+        except Exception:
+            return list(texts)

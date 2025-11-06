@@ -312,6 +312,15 @@ class MainWindow(QMainWindow):
                             self._preview_widget.set_translator(self._translator)
                     except Exception:
                         pass
+                    try:
+                        if hasattr(self._preview_widget, 'set_overlay_language'):
+                            self._preview_widget.set_overlay_language(self._cfg.target_language or "English")
+                    except Exception:
+                        pass
+                    try:
+                        self._preview_widget.overlay_language_changed.connect(self._on_preview_overlay_language_changed)
+                    except Exception:
+                        pass
                     # When user requests open from preview, reuse existing opening logic
                     self._preview_widget.open_requested.connect(lambda p: self._on_workspace_item_activated(self._active_workspace_id or "", p))
                 except Exception:
@@ -320,6 +329,11 @@ class MainWindow(QMainWindow):
             self._rebuild_workspace_area(focus_workspace_id=self._active_workspace_id)
         except Exception:
             pass
+
+    def _on_preview_overlay_language_changed(self, language: str) -> None:
+        lang = (language or "").strip() or "English"
+        self._cfg.target_language = lang
+        save_config(self._cfg)
 
     def _navigate_active_pane(self, action: str) -> None:
         pane = self._active_pane()
@@ -3096,6 +3110,11 @@ QLabel { color: #eee8d5; }
         self._apply_theme()
         for pane in self._workspace_panes.values():
             pane.set_translator(self._translator)
+        if self._preview_widget and hasattr(self._preview_widget, 'set_overlay_language'):
+            try:
+                self._preview_widget.set_overlay_language(self._cfg.target_language or "English")
+            except Exception:
+                pass
 
     # ---------------------------------------------------------------- misc ---
     def closeEvent(self, event) -> None:  # noqa: N802

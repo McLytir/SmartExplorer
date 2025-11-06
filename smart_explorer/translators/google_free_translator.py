@@ -97,3 +97,29 @@ class GoogleFreeTranslator(Translator):
         except Exception:
             return [None] * len(stems)
 
+    def translate_texts(self, texts: List[str], target_language: str) -> List[str]:
+        if not texts:
+            return []
+        out: List[str] = list(texts)
+        try:
+            if _DGTranslator is None:
+                return out
+            translator = _DGTranslator(source=self.source_language, target=target_language)
+            try:
+                batch = translator.translate_batch(texts)
+                if isinstance(batch, list) and len(batch) == len(texts):
+                    return [
+                        item.strip() if isinstance(item, str) and item.strip() else orig
+                        for item, orig in zip(batch, texts)
+                    ]
+            except Exception:
+                pass
+            for idx, txt in enumerate(texts):
+                try:
+                    res = translator.translate(txt)
+                    out[idx] = res.strip() if isinstance(res, str) and res.strip() else txt
+                except Exception:
+                    out[idx] = txt
+            return out
+        except Exception:
+            return list(texts)

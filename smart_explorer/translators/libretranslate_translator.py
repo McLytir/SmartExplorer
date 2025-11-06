@@ -114,3 +114,33 @@ class LibreTranslateTranslator(Translator):
                 out[i] = out[i] + (exts[i] or "")
         return out
 
+    def translate_texts(self, texts: List[str], target_language: str) -> List[str]:
+        if not texts:
+            return []
+
+        body = {
+            "q": texts,
+            "source": self.source_language,
+            "target": target_language,
+            "format": "text",
+        }
+        if self.api_key:
+            body["api_key"] = self.api_key
+
+        data = self._post("/translate", body)
+        out: List[str] = list(texts)
+        if isinstance(data, list):
+            for idx, item in enumerate(data[: len(texts)]):
+                txt = item.get("translatedText") if isinstance(item, dict) else None
+                if isinstance(txt, str) and txt.strip():
+                    out[idx] = txt.strip()
+            return out
+        if isinstance(data, dict) and isinstance(data.get("translatedText"), str) and len(texts) == 1:
+            txt = data["translatedText"].strip()
+            return [txt or texts[0]]
+
+        # Fallback per-item
+        for idx, txt in enumerate(texts):
+            translated = self._translate_stem(txt, target_language)
+            out[idx] = translated if isinstance(translated, str) and translated else txt
+        return out
