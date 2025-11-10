@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
+import logging
 import os
 import typing
 
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
+import time
 
 from PySide6.QtCore import Qt, QUrl, Signal, QPoint, QTimer
 from PySide6.QtWidgets import (
@@ -18,9 +20,17 @@ from PySide6.QtWidgets import (
     QComboBox,
     QScrollArea,
     QStackedLayout,
+    QPlainTextEdit,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+from ..services.ai_summary import (
+    AISummarizer,
+    SUMMARY_PRESETS,
+    SUMMARY_TONES,
+    SummaryError,
+    SummaryResult,
+)
 from ..services.preview_cache import get_cached_thumbnail, save_thumbnail_for
 
 try:
@@ -37,6 +47,7 @@ except Exception:
     WEBENGINE_AVAILABLE = False
 
 _OVERLAY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 
 class PreviewPane(QWidget):
@@ -128,6 +139,54 @@ class PreviewPane(QWidget):
         ctrl_row.addWidget(self._language_combo)
         self._layout.addLayout(ctrl_row)
 
+        # AI summary controls
+        self._summary_container = QWidget(self)
+        self._summary_layout = QVBoxLayout(self._summary_container)
+        self._summary_layout.setContentsMargins(0, 4, 0, 0)
+        self._summary_layout.setSpacing(4)
+
+        summary_controls = QHBoxLayout()
+        summary_label = QLabel("AI Summary", self)
+        summary_controls.addWidget(summary_label)
+
+        self._summary_preset = QComboBox(self)
+        for key, data in SUMMARY_PRESETS.items():
+            self._summary_preset.addItem(data["label"], key)
+        summary_controls.addWidget(self._summary_preset)
+
+        self._summary_tone = QComboBox(self)
+        for key, data in SUMMARY_TONES.items():
+            self._summary_tone.addItem(data["label"], key)
+        summary_controls.addWidget(self._summary_tone)
+
+        self._summary_run_btn = QPushButton("Summarize", self)
+        self._summary_run_btn.clicked.connect(self._on_summary_clicked)
+        summary_controls.addWidget(self._summary_run_btn)
+        summary_controls.addStretch(1)
+        self._summary_layout.addLayout(summary_controls)
+
+        self._summary_status = QLabel("Add an OpenAI key in Settings to enable summaries.", self)
+        self._summary_status.setWordWrap(True)
+        self._summary_layout.addWidget(self._summary_status)
+
+        self._summary_placeholder = QLabel("No summary yet.", self)
+        self._summary_placeholder.setWordWrap(True)
+        self._summary_placeholder.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._summary_placeholder.setMargin(4)
+
+        self._summary_output = QPlainTextEdit(self)
+        self._summary_output.setReadOnly(True)
+        self._summary_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._summary_output.setMaximumHeight(220)
+        self._summary_output.setMinimumHeight(140)
+        self._summary_output.hide()
+
+        self._summary_stack = QStackedLayout()
+        self._summary_stack.addWidget(self._summary_placeholder)
+        self._summary_stack.addWidget(self._summary_output)
+        self._summary_layout.addLayout(self._summary_stack)
+        self._layout.addWidget(self._summary_container)
+
         # wire cancel button to the signal
         self._cancel_btn.clicked.connect(self.cancel_requested.emit)
 
@@ -149,6 +208,14 @@ class PreviewPane(QWidget):
         self._overlay_prepared: bool = False
         self._overlay_future: Future | None = None
         self._overlay_future_path: str | None = None
+        self._summarizer: AISummarizer | None = None
+        self._summary_future: Future | None = None
+        self._summary_generation = 0
+        self._summary_loading = False
+        self._summary_status_override: str | None = None
+        self._summary_timeout_timer: QTimer | None = None
+
+        self._update_summary_controls()
 
     def _clear_content_widgets(self) -> None:
         # Remove content widgets from layout, we'll add the desired one
@@ -161,14 +228,208 @@ class PreviewPane(QWidget):
                 w.setParent(None)
         self._current_widget = None
 
+    def set_summarizer(self, summarizer: typing.Optional[AISummarizer]) -> None:
+        self._summarizer = summarizer
+        self._reset_summary_state("AI summary unavailable." if not summarizer else "Select a document to summarize.")
+
+    def _reset_summary_state(self, placeholder: str | None = None) -> None:
+        self._summary_generation += 1
+        self._cancel_summary_future()
+        self._stop_summary_timeout()
+        self._summary_loading = False
+        self._summary_status_override = None
+        if placeholder:
+            self._summary_placeholder.setText(placeholder)
+        else:
+            self._summary_placeholder.setText("No summary yet.")
+        self._summary_output.clear()
+        self._summary_stack.setCurrentWidget(self._summary_placeholder)
+        self._update_summary_controls()
+
+    def _cancel_summary_future(self) -> None:
+        fut = self._summary_future
+        if fut and not fut.done():
+            fut.cancel()
+        self._summary_future = None
+        self._stop_summary_timeout()
+
+    def _start_summary_timeout(self, generation: int, milliseconds: int = 45000) -> None:
+        self._stop_summary_timeout()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda gen=generation: self._on_summary_timeout(gen))
+        timer.start(max(1000, milliseconds))
+        self._summary_timeout_timer = timer
+
+    def _stop_summary_timeout(self) -> None:
+        if self._summary_timeout_timer:
+            try:
+                self._summary_timeout_timer.stop()
+            except Exception:
+                pass
+            try:
+                self._summary_timeout_timer.deleteLater()
+            except Exception:
+                pass
+            self._summary_timeout_timer = None
+
+    def _on_summary_timeout(self, generation: int) -> None:
+        if generation != self._summary_generation or not self._summary_loading:
+            return
+        self._summary_loading = False
+        self._cancel_summary_future()
+        self._summary_placeholder.setText("Summary timed out. Check your network or try again.")
+        self._summary_stack.setCurrentWidget(self._summary_placeholder)
+        self._set_summary_status_override("Summary timed out before the AI responded.")
+        self._update_summary_controls()
+
+    def _update_summary_controls(self) -> None:
+        has_file = bool(self._current_path and os.path.isfile(self._current_path or ""))
+        enabled = bool(self._summarizer and has_file and not self._summary_loading)
+        try:
+            self._summary_run_btn.setEnabled(enabled)
+        except Exception:
+            pass
+        self._apply_summary_status_text()
+
+    def _apply_summary_status_text(self) -> None:
+        if not self._summary_status:
+            return
+        if self._summary_status_override:
+            self._summary_status.setText(self._summary_status_override)
+            return
+        if not self._summarizer:
+            self._summary_status.setText("Add an OpenAI key in Settings to enable summaries.")
+            return
+        if not self._current_path or not os.path.isfile(self._current_path):
+            self._summary_status.setText("Select a supported document to summarize.")
+            return
+        if self._summary_loading:
+            self._summary_status.setText("Summarizing…")
+            return
+        self._summary_status.setText("Choose a preset and press Summarize.")
+
+    def _set_summary_status_override(self, text: str) -> None:
+        self._summary_status_override = text
+        self._apply_summary_status_text()
+
+    def _clear_summary_status_override(self) -> None:
+        self._summary_status_override = None
+        self._apply_summary_status_text()
+
+    def _on_summary_clicked(self) -> None:
+        if not self._summarizer or not self._current_path or not os.path.isfile(self._current_path):
+            return
+        self._summary_generation += 1
+        generation = self._summary_generation
+        preset = self._summary_preset.currentData() or "paragraph"
+        tone = self._summary_tone.currentData() or "neutral"
+        self._summary_loading = True
+        self._clear_summary_status_override()
+        self._update_summary_controls()
+        self._summary_placeholder.setText("Summarizing…")
+        self._summary_stack.setCurrentWidget(self._summary_placeholder)
+        self._summary_future = _SUMMARY_EXECUTOR.submit(
+            self._run_summary_job,
+            self._summarizer,
+            self._current_path,
+            preset,
+            tone,
+        )
+        self._start_summary_timeout(generation)
+
+        def _done(fut: Future) -> None:
+            QTimer.singleShot(0, lambda: self._on_summary_future_done(generation, fut))
+
+        self._summary_future.add_done_callback(_done)
+
+    @staticmethod
+    def _run_summary_job(
+        summarizer: AISummarizer,
+        path: str,
+        preset: str,
+        tone: str,
+    ) -> tuple[typing.Optional[SummaryResult], typing.Optional[str]]:
+        label = os.path.basename(path) if path else "<unknown>"
+        log_prefix = f"AI summary ({preset}/{tone}) for {label}"
+        logging.info("%s: started", log_prefix)
+        started = time.monotonic()
+        try:
+            result = summarizer.summarize_file(path, preset=preset, tone=tone)
+            elapsed = time.monotonic() - started
+            logging.info("%s: completed in %.1fs", log_prefix, elapsed)
+            return result, None
+        except SummaryError as exc:
+            elapsed = time.monotonic() - started
+            logging.warning("%s: SummaryError after %.1fs → %s", log_prefix, elapsed, exc)
+            return None, str(exc)
+        except Exception as exc:  # pragma: no cover - best effort
+            elapsed = time.monotonic() - started
+            logging.error("%s: Unexpected error after %.1fs → %s", log_prefix, elapsed, exc)
+            return None, str(exc)
+
+    def _on_summary_future_done(self, generation: int, future: Future) -> None:
+        if generation != self._summary_generation:
+            return
+        self._stop_summary_timeout()
+        self._summary_loading = False
+        if self._summary_future is future:
+            self._summary_future = None
+        if future.cancelled():
+            self._set_summary_status_override("Summary request was cancelled.")
+            self._update_summary_controls()
+            return
+        try:
+            result, error = future.result()
+        except Exception as exc:
+            result, error = None, str(exc)
+        if generation != self._summary_generation:
+            return
+        if error:
+            self._summary_placeholder.setText(error)
+            self._summary_stack.setCurrentWidget(self._summary_placeholder)
+            self._set_summary_status_override("Unable to summarize this file.")
+            self._update_summary_controls()
+            return
+        if result:
+            self._render_summary_result(result)
+            preset_label = SUMMARY_PRESETS.get(result.preset, {}).get("label", result.preset.title())
+            tone_label = SUMMARY_TONES.get(result.tone, {}).get("label", result.tone.title())
+            self._set_summary_status_override(f"{preset_label} • {tone_label}")
+        self._update_summary_controls()
+
+    def _render_summary_result(self, result: SummaryResult) -> None:
+        lines: list[str] = []
+        summary = (result.summary or "").strip()
+        if summary:
+            lines.append(summary)
+        if result.key_risks:
+            lines.append("")
+            lines.append("Key Risks:")
+            for item in result.key_risks:
+                lines.append(f"- {item}")
+        if result.action_items:
+            lines.append("")
+            lines.append("Action Items:")
+            for item in result.action_items:
+                lines.append(f"- {item}")
+        if not lines:
+            lines.append("No summary content returned.")
+        self._summary_output.setPlainText("\n".join(lines))
+        self._summary_stack.setCurrentWidget(self._summary_output)
+
     def preview_paths(self, paths: list[str]) -> None:
         """Preview the first path from the list (if any)."""
         if not paths:
+            self._current_path = None
+            self._reset_summary_state("Select a document to summarize.")
             self._show_fallback("No selection")
             return
         path = paths[0]
         self._current_path = path
         self._current_kind = "other"
+        name = os.path.basename(path) or os.path.basename(os.path.dirname(path)) or path
+        self._reset_summary_state(f"No summary yet for {name}.")
         self._close_overlay_window()
         self._overlay_prepared = False
         self._cancel_overlay_future()

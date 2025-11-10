@@ -7,6 +7,7 @@ Overview
 
 Key Features
 - Translation preview pane: shows natural translations of file/folder names in your target language without changing disk names.
+- AI PDF summaries: generate tweet/paragraph/executive briefs with selectable tone plus risk & action callouts from the preview pane (requires OpenAI key).
 - Bulk Rename Preview + Undo: review conflicts, edit names inline, apply in one shot, and undo the last batch.
 - Open files from the app: double-click opens with the system default app (SharePoint items download to a configurable folder first).
 - Reveal and Copy Path: “Reveal in Explorer/Finder/Files” and “Copy Path” from the context menu.
@@ -88,6 +89,14 @@ Notes & Tips
 - You can run without an API key; translation pane will show original names (identity mode).
 
 Troubleshooting
+Logging & Debugging
+- SmartExplorer now logs to both the terminal and a rotating log file. Default file locations:
+  - Windows: %LOCALAPPDATA%/SmartExplorer/Logs/smart_explorer.log
+  - macOS: ~/Library/Logs/SmartExplorer/smart_explorer.log
+  - Linux: ~/.local/state/smart_explorer/smart_explorer.log (or $XDG_STATE_HOME/smart_explorer).
+- Override the log directory with `SMART_EXPLORER_LOG_DIR=/path/to/logs`.
+- Tune verbosity via `SMART_EXPLORER_CONSOLE_LEVEL` and `SMART_EXPLORER_FILE_LEVEL` (e.g., DEBUG, INFO).
+
 - If you hit rate limits or see many pending items, collapse folders or navigate a bit slower.
 - On Linux, install `xdg-utils` for reliable “open”/“reveal”.
 - SharePoint errors often stem from expired cookies — recapture or resend cookies in Settings.

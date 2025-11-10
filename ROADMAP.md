@@ -8,7 +8,7 @@
 - [ ] Page thumbnails and mini-map for quick navigation.
 
 ## AI-Powered Tools
-- [ ] Smart summaries with length/tone presets (tweet, paragraph, executive brief); include key risks/action items.
+- [x] Smart summaries with length/tone presets (tweet, paragraph, executive brief); include key risks/action items.
 - [ ] Q&A over document with page citations; retrieval-chunking for long PDFs.
 - [ ] Translation modes (identity/MT/post-edit) with confidence and “needs review” flags.
 - [ ] Rewrite helpers: simplify language, bulletify, translate and adapt for client X.
@@ -43,4 +43,3 @@
 ## Runner & DevX
 - [x] One-shot runner to start backend + app in one command.
 - [ ] Packaging/distribution scripts for Windows/macOS/Linux.
-

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from ..api.backend_client import BackendClient
 from ..services.rename_service import apply_rename, safe_new_name
+from ..services.ai_summary import AISummarizer
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
@@ -56,6 +57,7 @@ from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
 from ..services import edit_session
+from ..logging_setup import get_log_file_path
 
 
 class MainWindow(QMainWindow):
@@ -71,6 +73,7 @@ class MainWindow(QMainWindow):
         self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
 
         self._translator: Translator = self._create_translator()
+        self._summarizer: Optional[AISummarizer] = self._create_summarizer()
         self._translation_cache = TranslationCache()
         self._ignore_patterns = self._cfg.ignore_patterns or []
 
@@ -132,7 +135,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._container)
         self._refresh_favorites_panel()
         self._rebuild_workspace_area()
-        self.statusBar().showMessage("Ready")
+        log_path = get_log_file_path()
+        if log_path:
+            self.statusBar().showMessage(f"Ready — Logging to {log_path}")
+        else:
+            self.statusBar().showMessage("Ready")
         self._setup_shortcuts()
         self._refresh_layout_tabs()
 
@@ -310,6 +317,11 @@ class MainWindow(QMainWindow):
                     try:
                         if hasattr(self._preview_widget, 'set_translator'):
                             self._preview_widget.set_translator(self._translator)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self._preview_widget, 'set_summarizer'):
+                            self._preview_widget.set_summarizer(self._summarizer)
                     except Exception:
                         pass
                     try:
@@ -3035,6 +3047,24 @@ QLabel { color: #eee8d5; }
             QMessageBox.warning(self, "Open in SharePoint", f"Failed to open item: {exc}")
 
     # ------------------------------------------------------------- settings --
+    def _create_summarizer(self) -> Optional[AISummarizer]:
+        key = (self._cfg.api_key or "").strip()
+        try:
+            from ..services import secret_store
+        except Exception:
+            secret_store = None  # type: ignore
+        if not key and secret_store:
+            try:
+                key = secret_store.get_secret("OPENAI_API_KEY") or ""
+            except Exception:
+                key = ""
+        if not key:
+            return None
+        try:
+            return AISummarizer(api_key=key, model=self._cfg.model, timeout=45.0)
+        except Exception:
+            return None
+
     def _create_translator(self) -> Translator:
         provider = getattr(self._cfg, "translator_provider", "auto") or "auto"
         # Secrets
@@ -3106,10 +3136,16 @@ QLabel { color: #eee8d5; }
         self._cfg = load_config()
         self._backend = BackendClient(getattr(self._cfg, "backend_url", None) or "http://127.0.0.1:5001")
         self._translator = self._create_translator()
+        self._summarizer = self._create_summarizer()
         self._ignore_patterns = self._cfg.ignore_patterns or []
         self._apply_theme()
         for pane in self._workspace_panes.values():
             pane.set_translator(self._translator)
+        if self._preview_widget and hasattr(self._preview_widget, 'set_summarizer'):
+            try:
+                self._preview_widget.set_summarizer(self._summarizer)
+            except Exception:
+                pass
         if self._preview_widget and hasattr(self._preview_widget, 'set_overlay_language'):
             try:
                 self._preview_widget.set_overlay_language(self._cfg.target_language or "English")
