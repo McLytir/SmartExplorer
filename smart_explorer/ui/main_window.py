@@ -1720,6 +1720,19 @@ QLabel { color: #eee8d5; }
                 self._cancel_event.set()
                 _LOG.info("SharePoint preview download cancelled request: %s", self.server_path)
 
+            def _post(self, func) -> None:
+                from PySide6.QtCore import QTimer
+
+                target = getattr(self.outer, "_preview_widget", None) or self.outer
+
+                def wrapper():
+                    try:
+                        func()
+                    except Exception:
+                        _LOG.exception("SharePoint preview callback failed.")
+
+                QTimer.singleShot(0, target, wrapper)
+
             def _cleanup(self) -> None:
                 try:
                     table = getattr(self.outer, "_active_downloads", None)
@@ -1771,20 +1784,15 @@ QLabel { color: #eee8d5; }
                     if cached and os.path.exists(cached):
                         final_path = cached
                         # schedule show
-                        from PySide6.QtCore import QTimer
-
                         def show():
-                            try:
-                                widget = getattr(self.outer, "_preview_widget", None)
-                                if widget:
-                                    widget.set_sharepoint_download_result(self.server_path, final_path)
-                                    widget.preview_paths([final_path])
-                                    widget.update_sharepoint_progress(100)
-                                    _LOG.info("SharePoint preview served from cache: %s", self.server_path)
-                            except Exception:
-                                pass
+                            widget = getattr(self.outer, "_preview_widget", None)
+                            if widget:
+                                widget.set_sharepoint_download_result(self.server_path, final_path)
+                                widget.preview_paths([final_path])
+                                widget.update_sharepoint_progress(100)
+                            _LOG.info("SharePoint preview served from cache: %s", self.server_path)
 
-                        QTimer.singleShot(0, show)
+                        self._post(show)
                         self._cleanup()
                         return
 
@@ -1824,16 +1832,13 @@ QLabel { color: #eee8d5; }
                                             os.remove(temp_path)
                                         except Exception:
                                             pass
-                                        # notify UI to hide progress
-                                        from PySide6.QtCore import QTimer
-
-                                        widget = getattr(self.outer, "_preview_widget", None)
 
                                         def _cancel_notice():
+                                            widget = getattr(self.outer, "_preview_widget", None)
                                             if widget:
                                                 widget.notify_sharepoint_download_error(self.server_path, "Download cancelled.")
 
-                                        QTimer.singleShot(0, _cancel_notice)
+                                        self._post(_cancel_notice)
                                         self._cleanup()
                                         return
                                     tf.write(chunk)
@@ -1854,23 +1859,17 @@ QLabel { color: #eee8d5; }
                         final_cached = temp_path
 
                     # schedule UI update to show the cached file
-                    from PySide6.QtCore import QTimer
-
                     def show_final():
-                        try:
-                            widget = getattr(self.outer, "_preview_widget", None)
-                            if widget:
-                                widget.set_sharepoint_download_result(self.server_path, final_cached)
-                                widget.preview_paths([final_cached])
-                                widget.update_sharepoint_progress(100)
-                                _LOG.info("SharePoint preview downloaded: %s", self.server_path)
-                        except Exception:
-                            pass
+                        widget = getattr(self.outer, "_preview_widget", None)
+                        if widget:
+                            widget.set_sharepoint_download_result(self.server_path, final_cached)
+                            widget.preview_paths([final_cached])
+                            widget.update_sharepoint_progress(100)
+                        _LOG.info("SharePoint preview downloaded: %s", self.server_path)
 
-                    QTimer.singleShot(0, show_final)
+                    self._post(show_final)
                     self._cleanup()
                 except Exception as exc:
-                    from PySide6.QtCore import QTimer
                     from PySide6.QtWidgets import QMessageBox
 
                     def warn():
@@ -1882,7 +1881,7 @@ QLabel { color: #eee8d5; }
                         except Exception:
                             pass
 
-                    QTimer.singleShot(0, warn)
+                    self._post(warn)
                     _LOG.warning("SharePoint preview download failed: %s (%s)", self.server_path, exc)
                     self._cleanup()
 

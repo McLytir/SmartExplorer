@@ -75,6 +75,7 @@ class SettingsDialog(QDialog):
         self.btn_api_clear.clicked.connect(self._on_clear_api_key)
         akx.addWidget(self.btn_api_clear)
         root.addWidget(self._openai_key_row)
+        self._load_saved_api_keys()
 
         # LibreTranslate settings
         self.lt_url = QLineEdit(self)
@@ -103,6 +104,7 @@ class SettingsDialog(QDialog):
         self.btn_lt_clear.clicked.connect(self._on_clear_lt_key)
         ltk.addWidget(self.btn_lt_clear)
         root.addWidget(self._lt_key_row)
+        self._load_saved_lt_key()
 
         # Target language
         self.lang = QLineEdit(self)
@@ -219,6 +221,7 @@ class SettingsDialog(QDialog):
             self._update_provider_visibility()
         except Exception:
             pass
+        self._apply_api_key_mask()
 
     def _on_save(self):
         try:
@@ -358,7 +361,6 @@ class SettingsDialog(QDialog):
         self.cfg.api_key = None
         try:
             from ..services import secret_store
-
             secret_store.delete_secret("OPENAI_API_KEY")
         except Exception:
             pass
@@ -378,6 +380,47 @@ class SettingsDialog(QDialog):
         # Toggle visibility of provider-specific fields
         try:
             self._update_provider_visibility()
+        except Exception:
+            pass
+
+    def _load_saved_api_keys(self) -> None:
+        key_value = None
+        try:
+            from ..services import secret_store as secret_store_module
+        except Exception:
+            secret_store_module = None
+        secret_store = secret_store_module
+        if secret_store:
+            try:
+                key_value = secret_store.get_secret("OPENAI_API_KEY") or None
+            except Exception:
+                key_value = None
+        if not key_value:
+            key_value = getattr(self.cfg, "api_key", None)
+        if key_value:
+            self.api_key.setText(key_value)
+
+    def _load_saved_lt_key(self) -> None:
+        lt_value = None
+        try:
+            from ..services import secret_store as secret_store_module
+        except Exception:
+            secret_store_module = None
+        secret_store = secret_store_module
+        if secret_store:
+            try:
+                lt_value = secret_store.get_secret("LIBRETRANSLATE_API_KEY") or None
+            except Exception:
+                lt_value = None
+        if lt_value:
+            self.lt_api_key.setText(lt_value)
+
+    def _apply_api_key_mask(self) -> None:
+        try:
+            self.api_key.setEchoMode(QLineEdit.Password)
+            self.lt_api_key.setEchoMode(QLineEdit.Password)
+        except Exception:
+            pass
         except Exception:
             pass
         if data == "libretranslate" and not self._lt_help_shown:

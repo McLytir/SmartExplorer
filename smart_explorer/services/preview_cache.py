@@ -127,11 +127,21 @@ def save_thumbnail_for(original_path: str, image_bytes: bytes) -> str:
 
 
 def user_visible_base_dir() -> Path:
-    custom = os.getenv("SMART_EXPLORER_PREVIEW_DIR")
-    if custom:
-        path = Path(custom).expanduser()
+    env_dir = os.getenv("SMART_EXPLORER_PREVIEW_DIR")
+    if env_dir:
+        base = Path(env_dir).expanduser()
     else:
-        path = Path.home() / "Downloads" / "SmartExplorerPreviews"
+        base = None
+        try:
+            cfg = load_config()
+            custom = getattr(cfg, "sp_download_dir", None)
+            if custom:
+                base = Path(custom).expanduser()
+        except Exception:
+            base = None
+        if base is None:
+            base = Path.home() / "Downloads"
+    path = base / "SmartExplorerPreviews"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

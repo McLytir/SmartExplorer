@@ -376,6 +376,8 @@ class PreviewPane(QWidget):
         self._sharepoint_auto_opened = False
         if not os.path.exists(local_path):
             _LOG.warning("SharePoint local path is missing: %s", local_path)
+            return
+        self.preview_paths([local_path])
 
     def _on_sharepoint_download_clicked(self) -> None:
         if not self._sharepoint_server_path:
