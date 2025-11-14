@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import sys
+import shutil
+from pathlib import Path
 from typing import Optional
 from ..settings import load_config
 
@@ -66,9 +68,10 @@ def cached_download_path(original_path: str) -> Optional[str]:
         try:
             with open(meta, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            p = data.get("cached_path")
-            if p and os.path.exists(p):
-                return p
+            for field in ("user_path", "cached_path"):
+                p = data.get(field)
+                if p and os.path.exists(p):
+                    return p
         except Exception:
             return None
     return None
@@ -82,13 +85,9 @@ def save_downloaded_file(original_path: str, data: bytes, suggested_name: Option
     cached = os.path.join(downloads_dir(), f"{key}{ext}")
     with open(cached, "wb") as f:
         f.write(data)
-    meta = os.path.join(downloads_dir(), f"{key}.json")
-    try:
-        with open(meta, "w", encoding="utf-8") as f:
-            json.dump({"original_path": original_path, "cached_path": cached}, f)
-    except Exception:
-        pass
-    return cached
+    user_path = _ensure_user_visible_copy(original_path, cached)
+    _write_meta(original_path, cached, user_path, key)
+    return user_path
 
 
 def save_existing_file(original_path: str, src_path: str) -> str:
@@ -101,16 +100,13 @@ def save_existing_file(original_path: str, src_path: str) -> str:
         try:
             os.replace(src_path, cached)
         except Exception:
-            import shutil
-
             shutil.copy2(src_path, cached)
-        meta = os.path.join(downloads_dir(), f"{key}.json")
-        with open(meta, "w", encoding="utf-8") as f:
-            json.dump({"original_path": original_path, "cached_path": cached}, f)
+        user_path = _ensure_user_visible_copy(original_path, cached)
+        _write_meta(original_path, cached, user_path, key)
     except Exception:
         # If something went wrong, ensure we return a path (may not exist)
         return src_path
-    return cached
+    return user_path
 
 
 def thumbnail_path_for(original_path: str) -> str:
@@ -128,3 +124,60 @@ def save_thumbnail_for(original_path: str, image_bytes: bytes) -> str:
     with open(p, "wb") as f:
         f.write(image_bytes)
     return p
+
+
+def user_visible_base_dir() -> Path:
+    custom = os.getenv("SMART_EXPLORER_PREVIEW_DIR")
+    if custom:
+        path = Path(custom).expanduser()
+    else:
+        path = Path.home() / "Downloads" / "SmartExplorerPreviews"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _sanitize_component(name: str) -> str:
+    cleaned = name.strip().replace("..", "_")
+    return "".join("_" if ch in '<>:"|?*' else ch for ch in cleaned)
+
+
+def _user_path_for(original_path: str, cache_path: str) -> Path:
+    rel_parts = [part for part in Path(original_path).parts if part not in ("/", "")]
+    if not rel_parts:
+        rel_parts = [os.path.basename(cache_path)]
+    rel_parts = [_sanitize_component(part) for part in rel_parts]
+    base_name = rel_parts[-1]
+    if "." not in base_name:
+        ext = Path(cache_path).suffix
+        if ext:
+            rel_parts[-1] = f"{base_name}{ext}"
+    target = user_visible_base_dir()
+    for part in rel_parts[:-1]:
+        target = target / part
+    target.mkdir(parents=True, exist_ok=True)
+    return target / rel_parts[-1]
+
+
+def _ensure_user_visible_copy(original_path: str, cache_path: str) -> str:
+    target = _user_path_for(original_path, cache_path)
+    try:
+        shutil.copy2(cache_path, target)
+    except Exception:
+        return cache_path
+    return str(target)
+
+
+def _write_meta(original_path: str, cache_path: str, user_path: str, key: str) -> None:
+    meta = os.path.join(downloads_dir(), f"{key}.json")
+    try:
+        with open(meta, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "original_path": original_path,
+                    "cached_path": cache_path,
+                    "user_path": user_path,
+                },
+                f,
+            )
+    except Exception:
+        pass

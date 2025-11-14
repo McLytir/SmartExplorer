@@ -7,6 +7,7 @@ import typing
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 import time
+import shutil
 
 from PySide6.QtCore import Qt, QUrl, Signal, QPoint, QTimer
 from PySide6.QtWidgets import (
@@ -21,6 +22,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QStackedLayout,
     QPlainTextEdit,
+    QFileDialog,
+    QMessageBox,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
@@ -48,6 +51,7 @@ except Exception:
 
 _OVERLAY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 _SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_LOG = logging.getLogger(__name__)
 
 
 class PreviewPane(QWidget):
@@ -62,6 +66,8 @@ class PreviewPane(QWidget):
     open_requested = Signal(str)
     cancel_requested = Signal()
     overlay_language_changed = Signal(str)
+    sharepoint_download_requested = Signal(str, object)
+    _summary_ready = Signal(int, object)
 
     def __init__(self, parent: typing.Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -139,6 +145,29 @@ class PreviewPane(QWidget):
         ctrl_row.addWidget(self._language_combo)
         self._layout.addLayout(ctrl_row)
 
+        # SharePoint preview prompt (hidden unless needed)
+        self._sp_prompt_box = QWidget(self)
+        sp_layout = QHBoxLayout(self._sp_prompt_box)
+        sp_layout.setContentsMargins(0, 0, 0, 0)
+        sp_layout.setSpacing(6)
+        self._sp_prompt_label = QLabel("", self)
+        self._sp_prompt_label.setWordWrap(True)
+        sp_layout.addWidget(self._sp_prompt_label, 1)
+        self._sp_download_btn = QPushButton("Download Preview", self)
+        self._sp_download_btn.clicked.connect(self._on_sharepoint_download_clicked)
+        sp_layout.addWidget(self._sp_download_btn)
+        self._sp_open_btn = QPushButton("Open Externally", self)
+        self._sp_open_btn.clicked.connect(self._on_sharepoint_open_clicked)
+        sp_layout.addWidget(self._sp_open_btn)
+        self._sp_save_btn = QPushButton("Save File As...", self)
+        self._sp_save_btn.clicked.connect(self._on_sharepoint_save_clicked)
+        sp_layout.addWidget(self._sp_save_btn)
+        sp_layout.addStretch(0)
+        self._layout.addWidget(self._sp_prompt_box)
+        self._sp_prompt_box.hide()
+        self._sp_open_btn.hide()
+        self._sp_save_btn.hide()
+
         # AI summary controls
         self._summary_container = QWidget(self)
         self._summary_layout = QVBoxLayout(self._summary_container)
@@ -214,7 +243,15 @@ class PreviewPane(QWidget):
         self._summary_loading = False
         self._summary_status_override: str | None = None
         self._summary_timeout_timer: QTimer | None = None
+        self._sharepoint_server_path: str | None = None
+        self._sharepoint_site: str | None = None
+        self._sharepoint_display_name: str | None = None
+        self._sharepoint_local_path: str | None = None
+        self._sharepoint_downloading: bool = False
+        self._sharepoint_auto_opened: bool = False
+        self._pending_web_path: str | None = None
 
+        self._summary_ready.connect(self._on_summary_future_done)
         self._update_summary_controls()
 
     def _clear_content_widgets(self) -> None:
@@ -227,6 +264,139 @@ class PreviewPane(QWidget):
             if w is not None:
                 w.setParent(None)
         self._current_widget = None
+
+    def prepare_sharepoint_preview(self, server_path: str, site: str | None, display_name: str) -> None:
+        _LOG.info("SharePoint preview requested: server=%s display=%s", server_path, display_name)
+        self._sharepoint_server_path = server_path
+        self._sharepoint_site = site
+        self._sharepoint_display_name = display_name
+        self._sharepoint_local_path = None
+        self._sp_prompt_label.setText(
+            f"{display_name} is stored in SharePoint. Download a temporary copy to preview it."
+        )
+        self._sp_download_btn.setText("Download Preview")
+        self._sp_download_btn.setEnabled(True)
+        self._sp_save_btn.hide()
+        self._sp_open_btn.hide()
+        self._sp_prompt_box.show()
+        self._sharepoint_downloading = False
+        self._sharepoint_auto_opened = False
+        self._pending_web_path = None
+        self._current_path = None
+        self._reset_summary_state(f"No summary yet for {display_name}.")
+        self._show_fallback("SharePoint preview not downloaded yet.")
+
+    def clear_sharepoint_prompt(self) -> None:
+        self._sharepoint_server_path = None
+        self._sharepoint_site = None
+        self._sharepoint_display_name = None
+        self._sharepoint_local_path = None
+        self._sp_prompt_box.hide()
+        self._sp_save_btn.hide()
+        self._sp_open_btn.hide()
+        self._sp_download_btn.setEnabled(True)
+        self._sp_download_btn.setText("Download Preview")
+        self._sharepoint_downloading = False
+
+    def notify_sharepoint_download_started(self, server_path: str) -> None:
+        if server_path != self._sharepoint_server_path:
+            return
+        self._sp_prompt_box.show()
+        self._sp_download_btn.setEnabled(False)
+        self._sp_download_btn.setText("Downloading…")
+        self._sp_prompt_label.setText("Downloading preview… 0%")
+        self._sharepoint_downloading = True
+
+    def notify_sharepoint_download_error(self, server_path: str, message: str) -> None:
+        if server_path != self._sharepoint_server_path:
+            return
+        self._sp_prompt_box.show()
+        self._sp_download_btn.setEnabled(True)
+        self._sp_download_btn.setText("Download Preview")
+        self._sharepoint_downloading = False
+        if message:
+            self._sp_prompt_label.setText(
+                f"{self._sharepoint_display_name or 'Document'}: {message}"
+            )
+
+    def set_sharepoint_download_result(self, server_path: str, local_path: str) -> None:
+        _LOG.info("SharePoint download completed: server=%s local=%s", server_path, local_path)
+        if server_path != self._sharepoint_server_path:
+            # Update to latest request
+            self._sharepoint_server_path = server_path
+        self._sharepoint_local_path = local_path
+        self._pending_web_path = local_path
+        self._sp_prompt_box.show()
+        self._sp_prompt_label.setText(
+            f"Temporary copy ready at:\n{local_path}\nUse 'Open Externally' or 'Save File As...'."
+        )
+        self._sp_download_btn.setEnabled(True)
+        self._sp_download_btn.setText("Re-download Preview")
+        self._sp_save_btn.show()
+        self._sp_save_btn.setEnabled(os.path.exists(local_path))
+        self._sp_open_btn.show()
+        self._sp_open_btn.setEnabled(os.path.exists(local_path))
+        self._sharepoint_downloading = False
+        self._sharepoint_auto_opened = False
+        if not os.path.exists(local_path):
+            _LOG.warning("SharePoint local path is missing: %s", local_path)
+
+    def _on_sharepoint_download_clicked(self) -> None:
+        if not self._sharepoint_server_path:
+            return
+        self._sp_download_btn.setEnabled(False)
+        self._sp_download_btn.setText("Downloading…")
+        self.sharepoint_download_requested.emit(self._sharepoint_server_path, self._sharepoint_site)
+
+    def _on_sharepoint_save_clicked(self) -> None:
+        local_path = self._sharepoint_local_path
+        if not local_path or not os.path.exists(local_path):
+            QMessageBox.warning(self, "Save File", "No downloaded file is available to save.")
+            return
+        suggested = self._sharepoint_display_name or os.path.basename(local_path)
+        dest, _ = QFileDialog.getSaveFileName(self, "Save File As...", suggested or "")
+        if not dest:
+            return
+        try:
+            shutil.copy2(local_path, dest)
+            QMessageBox.information(self, "Save File", f"File saved to:\n{dest}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save File", f"Failed to save file: {exc}")
+
+    def _on_sharepoint_open_clicked(self) -> None:
+        _LOG.info("SharePoint open externally clicked for %s", self._sharepoint_local_path)
+        self._open_sharepoint_file_external()
+
+    def update_sharepoint_progress(self, percent: int) -> None:
+        if not self._sharepoint_downloading:
+            return
+        self._sp_prompt_label.setText("Downloading preview…")
+
+    def _open_sharepoint_file_external(self) -> None:
+        local_path = self._sharepoint_local_path
+        if not local_path or not os.path.exists(local_path):
+            QMessageBox.warning(self, "Open File", "No downloaded file is available to open.")
+            return
+        _LOG.info("Opening SharePoint file externally: %s", local_path)
+        self._sp_prompt_label.setText("Opened in your default PDF viewer.")
+        self.open_requested.emit(local_path)
+
+    def _maybe_auto_open_sharepoint_file(self, use_webview: bool = False) -> None:
+        if self._sharepoint_auto_opened:
+            return
+        if not self._sharepoint_local_path or not os.path.exists(self._sharepoint_local_path):
+            _LOG.warning("Auto-open skipped; local file missing.")
+            return
+        self._sharepoint_auto_opened = True
+        if use_webview:
+            _LOG.info("Attempting in-app preview for %s", self._sharepoint_local_path)
+            self._current_path = self._sharepoint_local_path
+            self._current_kind = "pdf" if self._sharepoint_local_path.lower().endswith(".pdf") else "other"
+            self._reset_summary_state(f"No summary yet for {os.path.basename(self._sharepoint_local_path)}.")
+            self._show_web(self._sharepoint_local_path, is_pdf=True)
+        else:
+            _LOG.info("Auto-opening externally: %s", self._sharepoint_local_path)
+            self._open_sharepoint_file_external()
 
     def set_summarizer(self, summarizer: typing.Optional[AISummarizer]) -> None:
         self._summarizer = summarizer
@@ -339,7 +509,11 @@ class PreviewPane(QWidget):
         self._start_summary_timeout(generation)
 
         def _done(fut: Future) -> None:
-            QTimer.singleShot(0, lambda: self._on_summary_future_done(generation, fut))
+            try:
+                self._summary_ready.emit(generation, fut)
+            except RuntimeError:
+                # Widget destroyed; ignore results
+                pass
 
         self._summary_future.add_done_callback(_done)
 
@@ -369,7 +543,14 @@ class PreviewPane(QWidget):
             return None, str(exc)
 
     def _on_summary_future_done(self, generation: int, future: Future) -> None:
+        _LOG.debug(
+            "Summary future finished (gen=%s current=%s loading=%s)",
+            generation,
+            self._summary_generation,
+            self._summary_loading,
+        )
         if generation != self._summary_generation:
+            _LOG.debug("Ignoring stale summary result for generation %s", generation)
             return
         self._stop_summary_timeout()
         self._summary_loading = False
@@ -386,6 +567,7 @@ class PreviewPane(QWidget):
         if generation != self._summary_generation:
             return
         if error:
+            _LOG.warning("Summary failed: %s", error)
             self._summary_placeholder.setText(error)
             self._summary_stack.setCurrentWidget(self._summary_placeholder)
             self._set_summary_status_override("Unable to summarize this file.")
@@ -396,36 +578,33 @@ class PreviewPane(QWidget):
             preset_label = SUMMARY_PRESETS.get(result.preset, {}).get("label", result.preset.title())
             tone_label = SUMMARY_TONES.get(result.tone, {}).get("label", result.tone.title())
             self._set_summary_status_override(f"{preset_label} • {tone_label}")
+            _LOG.info(
+                "Rendered summary for %s (%s/%s)",
+                os.path.basename(self._current_path or "") or "<unknown>",
+                result.preset,
+                result.tone,
+            )
         self._update_summary_controls()
 
     def _render_summary_result(self, result: SummaryResult) -> None:
-        lines: list[str] = []
         summary = (result.summary or "").strip()
-        if summary:
-            lines.append(summary)
-        if result.key_risks:
-            lines.append("")
-            lines.append("Key Risks:")
-            for item in result.key_risks:
-                lines.append(f"- {item}")
-        if result.action_items:
-            lines.append("")
-            lines.append("Action Items:")
-            for item in result.action_items:
-                lines.append(f"- {item}")
-        if not lines:
-            lines.append("No summary content returned.")
-        self._summary_output.setPlainText("\n".join(lines))
+        if not summary:
+            summary = "No summary content returned."
+        self._summary_output.setPlainText(summary)
         self._summary_stack.setCurrentWidget(self._summary_output)
 
     def preview_paths(self, paths: list[str]) -> None:
         """Preview the first path from the list (if any)."""
         if not paths:
+            self.clear_sharepoint_prompt()
             self._current_path = None
             self._reset_summary_state("Select a document to summarize.")
             self._show_fallback("No selection")
             return
         path = paths[0]
+        _LOG.info("preview_paths invoked with %s (exists=%s)", path, os.path.exists(path))
+        if not self._sharepoint_server_path:
+            self.clear_sharepoint_prompt()
         self._current_path = path
         self._current_kind = "other"
         name = os.path.basename(path) or os.path.basename(os.path.dirname(path)) or path
@@ -491,6 +670,15 @@ class PreviewPane(QWidget):
         self._layout.insertWidget(1, self._web, 1)
         self._current_widget = self._web
         # Let chromium's built-in PDF viewer handle the PDF quickly
+        try:
+            self._web.loadFinished.disconnect()
+        except Exception:
+            pass
+        abs_path = os.path.abspath(path)
+        try:
+            self._web.loadFinished.connect(lambda ok, p=abs_path: self._on_web_load_finished(ok, p))
+        except Exception:
+            pass
         self._web.load(file_url)
         self._open_btn.setEnabled(True)
         self._title.setText(f"Preview â€” {os.path.basename(path)}")
@@ -547,19 +735,11 @@ class PreviewPane(QWidget):
             pass
 
     def show_progress(self, percent: int) -> None:
-        try:
-            self._progress.setVisible(True)
-            self._progress.setValue(int(percent))
-            self._cancel_btn.setVisible(True)
-        except Exception:
-            pass
+        # Progress visualization removed to avoid hanging UI; keep method for compatibility.
+        return
 
     def hide_progress(self) -> None:
-        try:
-            self._progress.setVisible(False)
-            self._cancel_btn.setVisible(False)
-        except Exception:
-            pass
+        return
 
     def _show_fallback(self, text: str) -> None:
         self._clear_content_widgets()
@@ -568,6 +748,16 @@ class PreviewPane(QWidget):
         self._layout.insertWidget(1, self._fallback, 1)
         self._open_btn.setEnabled(False)
         self._title.setText("Preview")
+
+    def _on_web_load_finished(self, ok: bool, path: str) -> None:
+        if ok:
+            _LOG.info("Web preview loaded successfully: %s", path)
+            return
+        _LOG.warning("Web preview failed for %s; falling back to external viewer.", path)
+        self._show_fallback("Preview failed in-app. Opening external viewer...")
+        self._sharepoint_auto_opened = False
+        self._sharepoint_local_path = path
+        self._open_sharepoint_file_external()
         self._enable_overlay_controls(False)
 
     def _on_open(self) -> None:

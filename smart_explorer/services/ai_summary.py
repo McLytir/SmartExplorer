@@ -26,37 +26,30 @@ class SummaryResult:
     preset: str
     tone: str
     summary: str
-    key_risks: List[str]
-    action_items: List[str]
 
 
 SUMMARY_PRESETS: Dict[str, Dict[str, str]] = {
-    "tweet": {
-        "label": "Tweet (<=280 chars)",
+    "short": {
+        "label": "Short Summary",
         "instruction": (
-            "Write a single snappy statement no longer than 280 characters. "
-            "Prefer plain language over jargon."
+            "Answer “What is this document?” in 2-3 concise sentences and highlight the key content "
+            "or sections the reader should review first."
         ),
     },
-    "paragraph": {
-        "label": "Paragraph (~120 words)",
+    "long": {
+        "label": "Long Summary (bullets)",
         "instruction": (
-            "Write one well-structured paragraph (80-140 words) that captures the core points, "
-            "audience, and outcome."
-        ),
-    },
-    "executive": {
-        "label": "Executive Brief (bullets)",
-        "instruction": (
-            "Provide 3-4 bullet sentences covering purpose, current status, and next milestones."
+            "Return a markdown bullet list. Begin with a bullet that states what the document is, then "
+            "list each important fact, decision, figure, or requirement with concrete, specific details."
         ),
     },
 }
 
 SUMMARY_TONES: Dict[str, Dict[str, str]] = {
-    "neutral": {"label": "Neutral", "instruction": "Maintain an objective, matter-of-fact voice."},
-    "friendly": {"label": "Friendly", "instruction": "Sound encouraging and collaborative."},
-    "urgent": {"label": "Urgent", "instruction": "Highlight deadlines and consequences succinctly."},
+    "neutral": {
+        "label": "Standard Tone",
+        "instruction": "Use a clear, professional, matter-of-fact voice without marketing language.",
+    },
 }
 
 TEXT_LIKE_EXTENSIONS = {
@@ -127,7 +120,7 @@ class AISummarizer:
         return self._summarize_text(text, os.path.basename(path), preset, tone)
 
     def _summarize_text(self, text: str, filename: str, preset: str, tone: str) -> SummaryResult:
-        preset_key = preset if preset in SUMMARY_PRESETS else "paragraph"
+        preset_key = preset if preset in SUMMARY_PRESETS else "short"
         tone_key = tone if tone in SUMMARY_TONES else "neutral"
 
         preset_instruction = SUMMARY_PRESETS[preset_key]["instruction"]
@@ -139,24 +132,23 @@ class AISummarizer:
             "tone_instruction": tone_instruction,
             "text_excerpt": text,
             "requested_format": {
-                "summary": "string",
-                "key_risks": "array of up to 3 concise bullet sentences highlighting risks/unknowns.",
-                "action_items": "array of up to 3 bullet sentences describing next steps.",
+                "summary": (
+                    "single string containing the final summary in markdown. "
+                    "Do not include risk or action sections."
+                ),
             },
         }
         system_prompt = (
             "You condense long documents for busy professionals. "
-            "Always respond with valid JSON using the schema provided by the user."
+            "Always respond with valid JSON containing only the requested keys."
         )
 
         raw = self._call_openai(system_prompt, payload)
-        summary, risks, actions = _parse_summary_payload(raw)
+        summary = _parse_summary_payload(raw)
         return SummaryResult(
             preset=preset_key,
             tone=tone_key,
             summary=summary,
-            key_risks=risks,
-            action_items=actions,
         )
 
     def _call_openai(self, system_prompt: str, payload: dict) -> str:
@@ -255,26 +247,37 @@ def _normalize_excerpt(text: str, limit: int) -> str:
     return snippet[:limit].strip()
 
 
-def _parse_summary_payload(payload: str) -> Tuple[str, List[str], List[str]]:
+def _clean_model_payload(payload: str) -> str:
+    data = (payload or "").strip()
+    if not data:
+        return ""
+    if data.startswith("```"):
+        parts = data.split("```")
+        if len(parts) >= 3:
+            data = parts[1]
+            if data.strip().startswith("json"):
+                data = data.split("\n", 1)[1] if "\n" in data else ""
+        data = data.strip("` \n")
+    first = data.find("{")
+    last = data.rfind("}")
+    if first != -1 and last != -1 and last >= first:
+        data = data[first : last + 1]
+    return data.strip()
+
+
+def _parse_summary_payload(payload: str) -> str:
+    cleaned = _clean_model_payload(payload)
     summary = ""
-    risks: List[str] = []
-    actions: List[str] = []
     try:
-        data = json.loads(payload)
+        data = json.loads(cleaned)
     except Exception as exc:
         raise SummaryError(f"Invalid JSON returned by the model: {exc}") from exc
 
     if isinstance(data, dict):
         summary = str(data.get("summary") or "").strip()
-        risks_data = data.get("key_risks")
-        actions_data = data.get("action_items")
-        if isinstance(risks_data, list):
-            risks = [str(item).strip() for item in risks_data if str(item).strip()]
-        if isinstance(actions_data, list):
-            actions = [str(item).strip() for item in actions_data if str(item).strip()]
     if not summary:
         raise SummaryError("Model returned an empty summary.")
-    return summary, risks[:3], actions[:3]
+    return summary
 
 
 __all__ = [

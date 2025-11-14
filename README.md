@@ -7,7 +7,7 @@ Overview
 
 Key Features
 - Translation preview pane: shows natural translations of file/folder names in your target language without changing disk names.
-- AI PDF summaries: generate tweet/paragraph/executive briefs with selectable tone plus risk & action callouts from the preview pane (requires OpenAI key).
+- AI PDF summaries: choose Short (what & highlights) or Long (detailed bullet list) summaries directly from the preview pane (requires OpenAI key).
 - Bulk Rename Preview + Undo: review conflicts, edit names inline, apply in one shot, and undo the last batch.
 - Open files from the app: double-click opens with the system default app (SharePoint items download to a configurable folder first).
 - Reveal and Copy Path: “Reveal in Explorer/Finder/Files” and “Copy Path” from the context menu.
@@ -51,6 +51,7 @@ Using the App
 - Add panes:
   - Local: choose a folder.
   - SharePoint: pick a site/library.
+    - SharePoint previews are opt-in: when you select a SharePoint file the preview pane offers a Download Preview button so you only fetch a temp copy when you actually want it (and you can Save File As... afterward).
   - Translation: pick a base pane and a language.
 - Translate & rename:
   - The right (translation) pane mirrors the base pane location automatically.
@@ -100,3 +101,4 @@ Logging & Debugging
 - If you hit rate limits or see many pending items, collapse folders or navigate a bit slower.
 - On Linux, install `xdg-utils` for reliable “open”/“reveal”.
 - SharePoint errors often stem from expired cookies — recapture or resend cookies in Settings.
+- SharePoint previews download to ~/Downloads/SmartExplorerPreviews (mirroring the SharePoint path) so you can open the cached file directly even if the in-app renderer fails.

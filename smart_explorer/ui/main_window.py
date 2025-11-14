@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QProgressDialog,
 )
 
+import logging
+
 from ..api.backend_client import BackendClient
 from ..services.rename_service import apply_rename, safe_new_name
 from ..services.ai_summary import AISummarizer
@@ -58,6 +60,9 @@ from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
 from ..services import edit_session
 from ..logging_setup import get_log_file_path
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -327,6 +332,10 @@ class MainWindow(QMainWindow):
                     try:
                         if hasattr(self._preview_widget, 'set_overlay_language'):
                             self._preview_widget.set_overlay_language(self._cfg.target_language or "English")
+                    except Exception:
+                        pass
+                    try:
+                        self._preview_widget.sharepoint_download_requested.connect(self._on_preview_sharepoint_download_requested)
                     except Exception:
                         pass
                     try:
@@ -1615,6 +1624,10 @@ QLabel { color: #eee8d5; }
                 paths = [it.get("path") for it in selected if it.get("path")]
                 paths = [p for p in paths if p]
                 if not paths:
+                    try:
+                        self._preview_widget.clear_sharepoint_prompt()
+                    except Exception:
+                        pass
                     self._preview_widget.preview_paths([])
                 else:
                     # If this pane (or its base) is SharePoint, download file in background then preview
@@ -1628,14 +1641,19 @@ QLabel { color: #eee8d5; }
 
                     first = paths[0]
                     if effective_kind == "sharepoint":
-                        # download asynchronously and preview when ready
+                        display_name = selected[0].get("name") if selected and isinstance(selected[0], dict) else None
+                        if not display_name:
+                            display_name = os.path.basename(first.rstrip("/")) or "Document"
                         try:
-                            self._download_and_preview(first, effective_site)
+                            self._preview_widget.prepare_sharepoint_preview(first, effective_site, display_name)
                         except Exception:
-                            # fallback: show no preview
                             self._preview_widget.preview_paths([])
                     else:
                         # local file: preview directly
+                        try:
+                            self._preview_widget.clear_sharepoint_prompt()
+                        except Exception:
+                            pass
                         self._preview_widget.preview_paths(paths[:10])
         except Exception:
             pass
@@ -1645,8 +1663,25 @@ QLabel { color: #eee8d5; }
 
         Writes to the OS temp dir and schedules the preview on the Qt main thread.
         """
-        if not getattr(self, "_preview_widget", None):
+        preview_widget = getattr(self, "_preview_widget", None)
+        if not preview_widget:
             return
+
+        try:
+            preview_widget.notify_sharepoint_download_started(path)
+        except Exception:
+            pass
+
+        if not getattr(self, "_active_downloads", None):
+            self._active_downloads = {}
+        # cancel older download for the same path
+        existing = self._active_downloads.get(path)
+        if existing:
+            try:
+                existing.cancel()
+            except Exception:
+                pass
+        _LOG.info("SharePoint preview download requested: %s", path)
 
         # If an existing download is running, cancel it
         try:
@@ -1669,6 +1704,47 @@ QLabel { color: #eee8d5; }
 
             def cancel(self) -> None:
                 self._cancel_event.set()
+                _LOG.info("SharePoint preview download cancelled request: %s", self.server_path)
+
+            def _cleanup(self) -> None:
+                try:
+                    table = getattr(self.outer, "_active_downloads", None)
+                    if table:
+                        table.pop(self.server_path, None)
+                except Exception:
+                    pass
+
+            def _fallback_download(self) -> str:
+                from ..services.preview_cache import downloads_dir
+                import httpx
+                import tempfile
+
+                url = self.outer._backend.base_url + "/api/sp/download"
+                params = {"server_relative_url": self.server_path}
+                if self.site_rel:
+                    params["site_relative_url"] = self.site_rel
+                temp_dir = downloads_dir()
+                suffix = os.path.splitext(self.server_path)[1] or ".tmp"
+                tf = tempfile.NamedTemporaryFile(delete=False, dir=temp_dir, suffix=suffix)
+                temp_path = tf.name
+                downloaded = 0
+                chunk_size = 64 * 1024
+                with httpx.Client(timeout=None) as client:
+                    with client.stream("GET", url, params=params) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_bytes(chunk_size=chunk_size):
+                            if self._cancel_event.is_set():
+                                tf.close()
+                                os.remove(temp_path)
+                                raise RuntimeError("Download cancelled")
+                            tf.write(chunk)
+                            downloaded += len(chunk)
+                tf.close()
+                return temp_path
+
+            def _update_progress(self, pct: int) -> None:
+                # Progress tracking removed to keep UI snappy.
+                return
 
             def run(self) -> None:
                 try:
@@ -1685,92 +1761,121 @@ QLabel { color: #eee8d5; }
 
                         def show():
                             try:
-                                if getattr(self.outer, "_preview_widget", None):
-                                    self.outer._preview_widget.preview_paths([final_path])
-                                    self.outer._preview_widget.hide_progress()
+                                widget = getattr(self.outer, "_preview_widget", None)
+                                if widget:
+                                    widget.set_sharepoint_download_result(self.server_path, final_path)
+                                    widget.preview_paths([final_path])
+                                    widget.update_sharepoint_progress(100)
+                                    _LOG.info("SharePoint preview served from cache: %s", self.server_path)
                             except Exception:
                                 pass
 
-                        QTimer.singleShot(0, show)
+                        QTimer.singleShot(0, widget, show)
+                        self._cleanup()
                         return
 
                     url = self.outer._backend.base_url + "/api/sp/download"
                     params = {"server_relative_url": self.server_path}
                     if self.site_rel:
                         params["site_relative_url"] = self.site_rel
+                    _LOG.info("SharePoint preview download starting: %s", self.server_path)
 
                     # Stream the response
-                    with httpx.Client(timeout=None) as client:
-                        with client.stream("GET", url, params=params) as r:
-                            r.raise_for_status()
-                            total = None
-                            try:
-                                total = int(r.headers.get("content-length"))
-                            except Exception:
+                    try:
+                        with httpx.Client(timeout=30.0) as client:
+                            with client.stream("GET", url, params=params) as r:
+                                r.raise_for_status()
                                 total = None
-                            # write to a temp file
-                            tf = tempfile.NamedTemporaryFile(delete=False)
-                            temp_path = tf.name
-                            downloaded = 0
-                            chunk_size = 64 * 1024
-                            for chunk in r.iter_bytes(chunk_size=chunk_size):
-                                if self._cancel_event.is_set():
-                                    try:
-                                        tf.close()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        os.remove(temp_path)
-                                    except Exception:
-                                        pass
-                                    # notify UI to hide progress
-                                    from PySide6.QtCore import QTimer
+                                try:
+                                    total = int(r.headers.get("content-length"))
+                                except Exception:
+                                    total = None
+                                _LOG.info(
+                                    "SharePoint preview response headers: %s (content-length=%s)",
+                                    self.server_path,
+                                    total,
+                                )
+                                # write to a temp file
+                                tf = tempfile.NamedTemporaryFile(delete=False)
+                                temp_path = tf.name
+                                downloaded = 0
+                                chunk_size = 64 * 1024
+                                for chunk in r.iter_bytes(chunk_size=chunk_size):
+                                    if self._cancel_event.is_set():
+                                        try:
+                                            tf.close()
+                                        except Exception:
+                                            pass
+                                        try:
+                                            os.remove(temp_path)
+                                        except Exception:
+                                            pass
+                                        # notify UI to hide progress
+                                        from PySide6.QtCore import QTimer
 
-                                    QTimer.singleShot(0, lambda: getattr(self.outer, "_preview_widget", None).hide_progress() if getattr(self.outer, "_preview_widget", None) else None)
-                                    return
-                                tf.write(chunk)
-                                downloaded += len(chunk)
-                                # report progress (0-100) if total known
-                                if total:
-                                    pct = int(downloaded / total * 100)
-                                else:
-                                    pct = 0
-                                from PySide6.QtCore import QTimer
+                                        widget = getattr(self.outer, "_preview_widget", None)
 
-                                QTimer.singleShot(0, lambda p=pct: getattr(self.outer, "_preview_widget", None).show_progress(p) if getattr(self.outer, "_preview_widget", None) else None)
-                            try:
-                                tf.close()
-                            except Exception:
-                                pass
+                                        def _cancel_notice():
+                                            if widget:
+                                                widget.notify_sharepoint_download_error(self.server_path, "Download cancelled.")
+
+                                        if widget:
+                                            QTimer.singleShot(0, widget, _cancel_notice)
+                                        self._cleanup()
+                                        return
+                                    tf.write(chunk)
+                                    downloaded += len(chunk)
+                                try:
+                                    tf.close()
+                                except Exception:
+                                    pass
+                    except Exception as stream_exc:
+                        _LOG.warning("Primary stream download failed (%s); retrying via fallback", stream_exc)
+                        temp_path = self._fallback_download()
 
                     # Move temp file into cache
-                    final_cached = save_existing_file(self.server_path, temp_path)
+                    try:
+                        final_cached = save_existing_file(self.server_path, temp_path)
+                    except Exception as cache_exc:
+                        _LOG.warning("Failed to move temp preview into cache (%s); using temp path", cache_exc)
+                        final_cached = temp_path
 
                     # schedule UI update to show the cached file
                     from PySide6.QtCore import QTimer
 
                     def show_final():
                         try:
-                            if getattr(self.outer, "_preview_widget", None):
-                                self.outer._preview_widget.preview_paths([final_cached])
-                                self.outer._preview_widget.hide_progress()
+                            widget = getattr(self.outer, "_preview_widget", None)
+                            if widget:
+                                widget.set_sharepoint_download_result(self.server_path, final_cached)
+                                widget.preview_paths([final_cached])
+                                widget.update_sharepoint_progress(100)
+                                _LOG.info("SharePoint preview downloaded: %s", self.server_path)
                         except Exception:
                             pass
 
-                    QTimer.singleShot(0, show_final)
+                    widget = getattr(self.outer, "_preview_widget", None)
+                    if widget:
+                        QTimer.singleShot(0, widget, show_final)
+                    self._cleanup()
                 except Exception as exc:
                     from PySide6.QtCore import QTimer
                     from PySide6.QtWidgets import QMessageBox
 
                     def warn():
                         try:
-                            if getattr(self.outer, "_preview_widget", None):
-                                self.outer._preview_widget.hide_progress()
+                            widget = getattr(self.outer, "_preview_widget", None)
+                            if widget:
+                                widget.notify_sharepoint_download_error(self.server_path, "Download failed.")
                             QMessageBox.warning(self.outer, "Preview", f"Download failed: {exc}")
                         except Exception:
                             pass
 
-                    QTimer.singleShot(0, warn)
+                    widget = getattr(self.outer, "_preview_widget", None)
+                    if widget:
+                        QTimer.singleShot(0, widget, warn)
+                    _LOG.warning("SharePoint preview download failed: %s (%s)", self.server_path, exc)
+                    self._cleanup()
 
         import threading
 
@@ -1778,17 +1883,18 @@ QLabel { color: #eee8d5; }
         t = threading.Thread(target=worker.run, daemon=True)
         # store active worker so it can be cancelled
         self._active_download_worker = worker
+        if not getattr(self, "_active_downloads", None):
+            self._active_downloads = {}
+        self._active_downloads[path] = worker
         # when preview cancel requested, stop the worker
         try:
             self._preview_widget.cancel_requested.connect(lambda: worker.cancel())
         except Exception:
             pass
-        # show initial progress UI
-        try:
-            self._preview_widget.show_progress(0)
-        except Exception:
-            pass
         t.start()
+
+    def _on_preview_sharepoint_download_requested(self, server_path: str, site: Optional[str]) -> None:
+        self._download_and_preview(server_path, site)
 
     def _on_pane_clicked(self, workspace_id: str) -> None:
         self._focus_workspace(workspace_id)
@@ -1821,6 +1927,11 @@ QLabel { color: #eee8d5; }
             pass
 
     def _on_workspace_item_activated(self, workspace_id: str, path: str) -> None:
+        # If we were given a real local path (e.g., from preview auto-open), open it directly.
+        if path and os.path.isabs(path) and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            return
+
         pane = self._workspace_panes.get(workspace_id)
         if not pane:
             return
