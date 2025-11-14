@@ -8,7 +8,7 @@ import subprocess
 import uuid
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QUrl, QMetaObject
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPalette, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +32,7 @@ import logging
 
 from ..api.backend_client import BackendClient
 from ..services.rename_service import apply_rename, safe_new_name
+from ..services.tag_store import TagStore
 from ..services.ai_summary import AISummarizer
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
         self._workspace_manager: WorkspaceManager = ensure_workspaces(self._cfg)
         self._favorites_manager: FavoritesManager = ensure_favorites(self._cfg)
         self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
+        self._tag_store = TagStore()
 
         self._translator: Translator = self._create_translator()
         self._summarizer: Optional[AISummarizer] = self._create_summarizer()
@@ -130,6 +132,8 @@ class MainWindow(QMainWindow):
         self._favorites_panel.layout_rename_requested.connect(self._on_rename_layout)
         self._favorites_panel.layout_move_requested.connect(self._on_move_layout)
         self._favorites_panel.position_changed.connect(self._change_favorites_position)
+        self._favorites_panel.tag_apply_requested.connect(self._apply_tags_from_panel)
+        self._favorites_panel.tag_filter_requested.connect(self._filter_tags_from_panel)
 
         self._main_splitter: Optional[QSplitter] = None
         self._favorites_index = 0
@@ -139,6 +143,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self._container)
         self._refresh_favorites_panel()
+        self._refresh_tag_suggestions()
         self._rebuild_workspace_area()
         log_path = get_log_file_path()
         if log_path:
@@ -1038,6 +1043,12 @@ QLabel { color: #eee8d5; }
     def _refresh_favorites_panel(self) -> None:
         self._favorites_panel.set_favorites([fav.to_config() for fav in self._favorites_manager.all()])
         self._favorites_panel.set_layouts([layout.to_config() for layout in self._layouts_manager.all()])
+        self._refresh_tag_suggestions()
+
+    def _refresh_tag_suggestions(self) -> None:
+        if getattr(self, "_favorites_panel", None):
+            tags = self._tag_store.all_tags("local")
+            self._favorites_panel.set_tag_suggestions(tags)
 
     # ------------------------------------------------------------- favorites/layouts
     def _on_favorite_selected(self, favorite_id: str) -> None:
@@ -1374,6 +1385,7 @@ QLabel { color: #eee8d5; }
             base_panes=base_panes,
             header_color=header_color,
             header_active_color=header_active_color,
+            tag_store=self._tag_store,
         )
         pane.activated.connect(self._on_workspace_item_activated)
         pane.drop_request.connect(self._on_workspace_drop_request)
@@ -1456,6 +1468,9 @@ QLabel { color: #eee8d5; }
         add_action("Rename", self._rename_selected_item)
         add_action("New Folder", self._new_folder)
         add_action("Delete", self._delete_selected_items)
+        tag_action = add_action("Edit Tags...", lambda: self._edit_tags_for_pane(pane))
+        if pane.definition.kind != "local":
+            tag_action.setEnabled(False)
         add_action("", separator=True)
         # Translation group
         add_action("Apply Translation Rename", self._apply_translated_rename)
@@ -1485,6 +1500,56 @@ QLabel { color: #eee8d5; }
         sp_reveal = QAction("Reveal in SharePoint (Web)", pane)
         sp_reveal.triggered.connect(self._open_in_sharepoint)
         pane.addAction(sp_reveal)
+
+    def _edit_tags_for_pane(self, pane: WorkspacePane) -> None:
+        if pane.definition.kind != "local":
+            QMessageBox.information(self, "Tags", "Tag editing is currently available for local workspaces only.")
+            return
+        items = pane.current_items()
+        if not items:
+            QMessageBox.information(self, "Tags", "Select at least one file or folder to tag.")
+            return
+        paths = [os.path.abspath(it.get("path")) for it in items if it.get("path")]
+        if not paths:
+            return
+        existing = self._tag_store.get_tags("local", paths[0])
+        dialog = TagEditorDialog(existing, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        tags = dialog.tags()
+        for path in paths:
+            self._tag_store.set_tags("local", path, tags)
+        pane.refresh_filters()
+        self._refresh_tag_suggestions()
+
+    def _apply_tags_from_panel(self, text: str) -> None:
+        pane = self._active_pane()
+        if not pane or pane.definition.kind != "local":
+            QMessageBox.information(self, "Tags", "Select a local workspace to apply tags.")
+            return
+        items = pane.current_items()
+        if not items:
+            QMessageBox.information(self, "Tags", "Select at least one file or folder to tag.")
+            return
+        tags = [segment.strip().lstrip("#") for segment in text.split(",") if segment.strip()]
+        if not tags:
+            return
+        for item in items:
+            path = os.path.abspath(item.get("path"))
+            existing = self._tag_store.get_tags("local", path)
+            combined = sorted({*(tag.lower() for tag in existing), *(tag.lower() for tag in tags)})
+            self._tag_store.set_tags("local", path, combined)
+        pane.refresh_filters()
+        self._refresh_tag_suggestions()
+
+    def _filter_tags_from_panel(self, text: str) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        try:
+            pane._tag_filter.setText(text)
+        except Exception:
+            pass
 
     def _on_workspace_drop_request(self, target_workspace_id: str, payload: dict, target_path: str, move: bool, site: Optional[str]) -> None:
         source_workspace_id = payload.get("source_workspace")

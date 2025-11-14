@@ -8,6 +8,7 @@ Overview
 Key Features
 - Translation preview pane: shows natural translations of file/folder names in your target language without changing disk names.
 - AI PDF summaries: choose Short (what & highlights) or Long (detailed bullet list) summaries directly from the preview pane (requires OpenAI key).
+- Tag your local files and filter by tags directly in each workspace (requires local workspace).
 - Document Q&A: ask custom questions about the previewed file and get grounded answers (requires OpenAI key).
 - Bulk Rename Preview + Undo: review conflicts, edit names inline, apply in one shot, and undo the last batch.
 - Open files from the app: double-click opens with the system default app (SharePoint items download to a configurable folder first).

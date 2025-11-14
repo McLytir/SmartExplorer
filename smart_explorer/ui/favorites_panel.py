@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtCore import Qt, Signal, QPoint, QStringListModel
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QLineEdit,
+    QCompleter,
 )
 
 from .workspace_pane import PANE_DRAG_MIME
@@ -64,6 +66,8 @@ class FavoritesPanel(QWidget):
     layout_move_requested = Signal(str, int)
 
     position_changed = Signal(str)
+    tag_apply_requested = Signal(str)
+    tag_filter_requested = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -78,9 +82,11 @@ class FavoritesPanel(QWidget):
         root.setSpacing(12)
 
         fav_frame = self._build_favorites_section()
+        tags_frame = self._build_tags_section()
         layouts_frame = self._build_layouts_section()
 
         root.addWidget(fav_frame)
+        root.addWidget(tags_frame)
         root.addWidget(layouts_frame)
         root.addStretch(1)
 
@@ -136,6 +142,43 @@ class FavoritesPanel(QWidget):
         layout.addLayout(self._build_button_grid(fav_buttons, prefix="fav", columns=2))
         self._favorites_list.currentRowChanged.connect(self._update_favorite_buttons)
         self._update_favorite_buttons()
+        return frame
+
+    def _build_tags_section(self) -> QWidget:
+        frame = QFrame(self)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        label = QLabel("Tags", self)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.addWidget(label)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        self._tag_input = QLineEdit(self)
+        self._tag_input.setPlaceholderText("Add or filter tags (comma separated)")
+        self._tag_model = QStringListModel([], self)
+        self._tag_completer = QCompleter(self._tag_model, self)
+        self._tag_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._tag_input.setCompleter(self._tag_completer)
+        self._tag_input.returnPressed.connect(self._emit_tag_apply)
+        layout.addWidget(self._tag_input)
+
+        btn_row = QHBoxLayout()
+        apply_btn = QPushButton("Apply to Selection", self)
+        apply_btn.clicked.connect(self._emit_tag_apply)
+        btn_row.addWidget(apply_btn)
+        filter_btn = QPushButton("Filter", self)
+        filter_btn.clicked.connect(self._emit_tag_filter)
+        btn_row.addWidget(filter_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        hint = QLabel("Existing tags appear as suggestions.", self)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         return frame
 
     def _build_layouts_section(self) -> QWidget:
@@ -220,6 +263,19 @@ class FavoritesPanel(QWidget):
             self._layouts_index[lid] = item
             self._layouts_list.addItem(item)
         self._update_layout_buttons()
+
+    def set_tag_suggestions(self, tags: Iterable[str]) -> None:
+        unique = sorted({tag.strip() for tag in tags if tag.strip()})
+        self._tag_model.setStringList(unique)
+
+    def _emit_tag_apply(self) -> None:
+        text = self._tag_input.text().strip()
+        if text:
+            self.tag_apply_requested.emit(text)
+
+    def _emit_tag_filter(self) -> None:
+        text = self._tag_input.text().strip()
+        self.tag_filter_requested.emit(text)
 
     def select_favorite(self, favorite_id: str) -> None:
         item = self._favorites_index.get(favorite_id)

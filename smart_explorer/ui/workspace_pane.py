@@ -4,7 +4,7 @@ import json
 import os
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QModelIndex, Qt, QSortFilterProxyModel, Signal, QMimeData, QItemSelectionModel, QEvent, QSize, QUrl
+from PySide6.QtCore import QModelIndex, Qt, Signal, QMimeData, QItemSelectionModel, QEvent, QSize, QUrl
 from PySide6.QtGui import QDrag, QMouseEvent, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,8 +27,10 @@ from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE, PAT
 from ..models.translated_fs_model import TranslatedProxyModel
 from ..translation_cache import TranslationCache
 from ..services.preview_cache import cached_download_path, save_downloaded_file
+from ..services.tag_store import TagStore
 from ..translators.base import Translator, IdentityTranslator
 from ..workspaces import WorkspaceDefinition
+from .workspace_filter_proxy import WorkspaceFilterProxyModel
 
 
 DRAG_MIME_TYPE = "application/x-smartexplorer-items"
@@ -174,6 +176,7 @@ class WorkspacePane(QFrame):
         base_panes: Dict[str, "WorkspacePane"],
         header_color: str,
         header_active_color: str,
+        tag_store: TagStore,
     ) -> None:
         super().__init__()
         self.definition = definition
@@ -189,6 +192,7 @@ class WorkspacePane(QFrame):
         self._suspend_history = False
         self._base_root_path: str = ""
         self._sharepoint_mode = definition.kind == "sharepoint"
+        self.tag_store = tag_store
         if definition.kind == "translation" and definition.base_workspace_id:
             base = base_panes.get(definition.base_workspace_id)
             if base is not None:
@@ -205,6 +209,11 @@ class WorkspacePane(QFrame):
 
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search...")
+        self._search.textChanged.connect(self._on_search_text_changed)
+
+        self._tag_filter = QLineEdit(self)
+        self._tag_filter.setPlaceholderText("Filter by tags (comma separated)")
+        self._tag_filter.textChanged.connect(self._on_tag_filter_changed)
 
         self._view = WorkspaceTreeView(self)
         self._view.setSortingEnabled(True)
@@ -263,6 +272,10 @@ class WorkspacePane(QFrame):
         layout.addWidget(_hdr_row)
         layout.addLayout(self._build_nav_bar())
         layout.addWidget(self._search)
+        layout.addWidget(self._tag_filter)
+        if self.definition.kind != "local":
+            self._tag_filter.setEnabled(False)
+            self._tag_filter.setPlaceholderText("Tag filtering available for local workspaces only")
         layout.addWidget(self._view_container, 1)
 
         self.installEventFilter(self)
@@ -272,7 +285,7 @@ class WorkspacePane(QFrame):
         self._search.installEventFilter(self)
 
         self._source_model = None
-        self._filter_model: Optional[QSortFilterProxyModel] = None
+        self._filter_model: Optional[WorkspaceFilterProxyModel] = None
         self._translated_model: Optional[TranslatedProxyModel] = None
         self._root_source_index: Optional[QModelIndex] = None
         self._root_view_index: Optional[QModelIndex] = None
@@ -282,7 +295,6 @@ class WorkspacePane(QFrame):
         self._build_models()
         self._base_root_path = self._determine_base_root()
         self._initialize_history()
-        self._search.textChanged.connect(self._on_search_text_changed)
         self._update_style(False)
 
     # --- properties ---------------------------------------------------------
@@ -363,10 +375,8 @@ class WorkspacePane(QFrame):
         root = self.definition.root_path or ""
         fs_model.setRootPath(root)
         self._source_model = fs_model
-        proxy = QSortFilterProxyModel(self)
+        proxy = WorkspaceFilterProxyModel(self)
         proxy.setSourceModel(fs_model)
-        proxy.setRecursiveFilteringEnabled(True)
-        proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self._filter_model = proxy
         self._view.setModel(proxy)
         idx = fs_model.index(root) if root else fs_model.index("/")
@@ -387,10 +397,8 @@ class WorkspacePane(QFrame):
             self,
         )
         self._source_model = sp_model
-        proxy = QSortFilterProxyModel(self)
+        proxy = WorkspaceFilterProxyModel(self)
         proxy.setSourceModel(sp_model)
-        proxy.setRecursiveFilteringEnabled(True)
-        proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self._filter_model = proxy
         self._view.setModel(proxy)
         self._set_root_indexes(None, QModelIndex())
@@ -417,10 +425,8 @@ class WorkspacePane(QFrame):
         )
         translated.setSourceModel(source)
         self._translated_model = translated
-        proxy = QSortFilterProxyModel(self)
+        proxy = WorkspaceFilterProxyModel(self)
         proxy.setSourceModel(translated)
-        proxy.setRecursiveFilteringEnabled(True)
-        proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self._filter_model = proxy
         self._view.setModel(proxy)
         self._source_model = source
@@ -899,8 +905,13 @@ class WorkspacePane(QFrame):
 
     # --- helpers ------------------------------------------------------------
     def _on_search_text_changed(self, text: str) -> None:
-        if self._filter_model:
-            self._filter_model.setFilterFixedString(text)
+        if isinstance(self._filter_model, WorkspaceFilterProxyModel):
+            self._filter_model.set_search_text(text)
+
+    def _on_tag_filter_changed(self, text: str) -> None:
+        tags = [segment.strip().lstrip("#") for segment in text.split(",")]
+        if isinstance(self._filter_model, WorkspaceFilterProxyModel):
+            self._filter_model.set_tag_query(tags)
 
     def _connect_selection(self) -> None:
         sel_model = self._view.selectionModel()
@@ -908,6 +919,10 @@ class WorkspacePane(QFrame):
             sel_model.selectionChanged.connect(self._on_selection_changed)
         if self._icon_view.model() is not None and self._view.selectionModel() is not None:
             self._icon_view.setSelectionModel(self._view.selectionModel())
+
+    def refresh_filters(self) -> None:
+        if self._filter_model:
+            self._filter_model.invalidateFilter()
 
     def _sync_icon_model(self) -> None:
         if not self._supports_icon_mode:

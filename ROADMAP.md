@@ -28,6 +28,7 @@
 - [ ] Saved searches and smart folders (e.g., modified last 7 days; has French content).
 
 ## Search & Navigation
+- [x] Tag filtering and tag search for local workspaces.
 - [ ] Full-text search inside preview (original + translated) with page hits and filters.
 - [ ] Cross-document search scoped to current SharePoint folder.
 
