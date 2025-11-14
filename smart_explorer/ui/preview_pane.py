@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QStackedLayout,
     QPlainTextEdit,
+    QLineEdit,
     QFileDialog,
     QMessageBox,
 )
@@ -68,6 +69,7 @@ class PreviewPane(QWidget):
     overlay_language_changed = Signal(str)
     sharepoint_download_requested = Signal(str, object)
     _summary_ready = Signal(int, object)
+    _qa_ready = Signal(object)
 
     def __init__(self, parent: typing.Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -216,6 +218,36 @@ class PreviewPane(QWidget):
         self._summary_layout.addLayout(self._summary_stack)
         self._layout.addWidget(self._summary_container)
 
+        # Document Q&A controls
+        self._qa_container = QWidget(self)
+        self._qa_layout = QVBoxLayout(self._qa_container)
+        self._qa_layout.setContentsMargins(0, 4, 0, 0)
+        self._qa_layout.setSpacing(4)
+
+        qa_label = QLabel("Ask the Document", self)
+        self._qa_layout.addWidget(qa_label)
+
+        qa_row = QHBoxLayout()
+        self._qa_input = QLineEdit(self)
+        self._qa_input.setPlaceholderText("Enter a question about this document...")
+        qa_row.addWidget(self._qa_input, 1)
+        self._qa_run_btn = QPushButton("Ask", self)
+        self._qa_run_btn.clicked.connect(self._on_qa_clicked)
+        qa_row.addWidget(self._qa_run_btn)
+        self._qa_layout.addLayout(qa_row)
+
+        self._qa_status = QLabel("Type a question and press Ask.", self)
+        self._qa_status.setWordWrap(True)
+        self._qa_layout.addWidget(self._qa_status)
+
+        self._qa_output = QPlainTextEdit(self)
+        self._qa_output.setReadOnly(True)
+        self._qa_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._qa_output.setMaximumHeight(220)
+        self._qa_output.hide()
+        self._qa_layout.addWidget(self._qa_output)
+        self._layout.addWidget(self._qa_container)
+
         # wire cancel button to the signal
         self._cancel_btn.clicked.connect(self.cancel_requested.emit)
 
@@ -250,9 +282,13 @@ class PreviewPane(QWidget):
         self._sharepoint_downloading: bool = False
         self._sharepoint_auto_opened: bool = False
         self._pending_web_path: str | None = None
+        self._qa_future: Future | None = None
+        self._qa_loading: bool = False
 
         self._summary_ready.connect(self._on_summary_future_done)
+        self._qa_ready.connect(self._on_qa_future_done)
         self._update_summary_controls()
+        self._update_qa_controls()
 
     def _clear_content_widgets(self) -> None:
         # Remove content widgets from layout, we'll add the desired one
@@ -303,8 +339,8 @@ class PreviewPane(QWidget):
             return
         self._sp_prompt_box.show()
         self._sp_download_btn.setEnabled(False)
-        self._sp_download_btn.setText("Downloading…")
-        self._sp_prompt_label.setText("Downloading preview… 0%")
+        self._sp_download_btn.setText("Downloading...")
+        self._sp_prompt_label.setText("Downloading preview... 0%")
         self._sharepoint_downloading = True
 
     def notify_sharepoint_download_error(self, server_path: str, message: str) -> None:
@@ -345,7 +381,7 @@ class PreviewPane(QWidget):
         if not self._sharepoint_server_path:
             return
         self._sp_download_btn.setEnabled(False)
-        self._sp_download_btn.setText("Downloading…")
+        self._sp_download_btn.setText("Downloading...")
         self.sharepoint_download_requested.emit(self._sharepoint_server_path, self._sharepoint_site)
 
     def _on_sharepoint_save_clicked(self) -> None:
@@ -370,7 +406,7 @@ class PreviewPane(QWidget):
     def update_sharepoint_progress(self, percent: int) -> None:
         if not self._sharepoint_downloading:
             return
-        self._sp_prompt_label.setText("Downloading preview…")
+        self._sp_prompt_label.setText("Downloading preview...")
 
     def _open_sharepoint_file_external(self) -> None:
         local_path = self._sharepoint_local_path
@@ -415,6 +451,15 @@ class PreviewPane(QWidget):
         self._summary_output.clear()
         self._summary_stack.setCurrentWidget(self._summary_placeholder)
         self._update_summary_controls()
+        self._reset_qa_state()
+
+    def _reset_qa_state(self) -> None:
+        self._cancel_qa_future()
+        self._qa_loading = False
+        self._apply_qa_status_text()
+        self._qa_output.clear()
+        self._qa_output.hide()
+        self._update_qa_controls()
 
     def _cancel_summary_future(self) -> None:
         fut = self._summary_future
@@ -422,6 +467,12 @@ class PreviewPane(QWidget):
             fut.cancel()
         self._summary_future = None
         self._stop_summary_timeout()
+
+    def _cancel_qa_future(self) -> None:
+        fut = self._qa_future
+        if fut and not fut.done():
+            fut.cancel()
+        self._qa_future = None
 
     def _start_summary_timeout(self, generation: int, milliseconds: int = 45000) -> None:
         self._stop_summary_timeout()
@@ -461,6 +512,7 @@ class PreviewPane(QWidget):
         except Exception:
             pass
         self._apply_summary_status_text()
+        self._update_qa_controls()
 
     def _apply_summary_status_text(self) -> None:
         if not self._summary_status:
@@ -475,7 +527,7 @@ class PreviewPane(QWidget):
             self._summary_status.setText("Select a supported document to summarize.")
             return
         if self._summary_loading:
-            self._summary_status.setText("Summarizing…")
+            self._summary_status.setText("Summarizing...")
             return
         self._summary_status.setText("Choose a preset and press Summarize.")
 
@@ -486,6 +538,91 @@ class PreviewPane(QWidget):
     def _clear_summary_status_override(self) -> None:
         self._summary_status_override = None
         self._apply_summary_status_text()
+        self._update_qa_controls()
+
+    def _on_qa_clicked(self) -> None:
+        if not self._summarizer:
+            self._qa_status.setText("Add an OpenAI key in Settings to enable Q&A.")
+            return
+        question = (self._qa_input.text() or "").strip()
+        if not question:
+            self._qa_status.setText("Enter a question first.")
+            return
+        if not self._current_path or not os.path.isfile(self._current_path):
+            self._qa_status.setText("Select a local document before asking a question.")
+            return
+        self._qa_loading = True
+        _LOG.info("QA request started for %s question=%s", self._current_path, question)
+        self._qa_output.hide()
+        self._apply_qa_status_text()
+        self._update_qa_controls()
+        path = self._current_path
+        self._qa_future = _SUMMARY_EXECUTOR.submit(self._run_qa_job, self._summarizer, path, question)
+
+        def _done(fut: Future) -> None:
+            try:
+                self._qa_ready.emit(fut)
+            except RuntimeError:
+                pass
+
+        self._qa_future.add_done_callback(_done)
+
+    @staticmethod
+    def _run_qa_job(summarizer: AISummarizer, path: str, question: str) -> tuple[typing.Optional[str], typing.Optional[str]]:
+        try:
+            answer = summarizer.ask_question(path, question)
+            return answer, None
+        except SummaryError as exc:
+            return None, str(exc)
+        except Exception as exc:
+            return None, str(exc)
+
+    def _on_qa_future_done(self, future: Future) -> None:
+        if self._qa_future is future:
+            self._qa_future = None
+        self._qa_loading = False
+        try:
+            answer, error = future.result()
+            _LOG.info("QA future completed. Answer=%s Error=%s", bool(answer), error)
+        except Exception as exc:
+            answer, error = None, str(exc)
+            _LOG.error("QA future exception: %s", exc)
+        if error:
+            self._qa_status.setText(error)
+            self._qa_output.clear()
+            self._qa_output.hide()
+        else:
+            self._qa_output.setPlainText(answer or "No answer returned.")
+            _LOG.info("QA answer ready with %d characters.", len(answer or ""))
+            self._qa_output.show()
+            self._apply_summary_status_text()
+            self._qa_status.setText("Answer ready.")
+        self._update_qa_controls()
+
+    def _apply_qa_status_text(self) -> None:
+        if not self._qa_status:
+            return
+        if not self._summarizer:
+            self._qa_status.setText("Add an OpenAI key in Settings to enable Q&A.")
+            return
+        if not self._current_path or not os.path.isfile(self._current_path):
+            self._qa_status.setText("Select a local document before asking a question.")
+            return
+        if self._qa_loading:
+            self._qa_status.setText("Thinking about your question...")
+            return
+        self._qa_status.setText("Type a question and press Ask.")
+
+    def _update_qa_controls(self) -> None:
+        has_file = bool(self._current_path and os.path.isfile(self._current_path or ""))
+        enabled = bool(self._summarizer and has_file and not self._qa_loading)
+        try:
+            self._qa_run_btn.setEnabled(enabled)
+            self._qa_input.setEnabled(not self._qa_loading)
+        except Exception:
+            pass
+        self._apply_qa_status_text()
+
 
     def _on_summary_clicked(self) -> None:
         if not self._summarizer or not self._current_path or not os.path.isfile(self._current_path):
@@ -497,7 +634,7 @@ class PreviewPane(QWidget):
         self._summary_loading = True
         self._clear_summary_status_override()
         self._update_summary_controls()
-        self._summary_placeholder.setText("Summarizing…")
+        self._summary_placeholder.setText("Summarizing...")
         self._summary_stack.setCurrentWidget(self._summary_placeholder)
         self._summary_future = _SUMMARY_EXECUTOR.submit(
             self._run_summary_job,
@@ -681,7 +818,7 @@ class PreviewPane(QWidget):
             pass
         self._web.load(file_url)
         self._open_btn.setEnabled(True)
-        self._title.setText(f"Preview â€” {os.path.basename(path)}")
+        self._title.setText(f"Preview - {os.path.basename(path)}")
         # No progress for web view (handled by internal renderer), hide controls
         try:
             self._progress.setVisible(False)
@@ -716,7 +853,7 @@ class PreviewPane(QWidget):
         self._current_widget = self._image
         try:
             self._open_btn.setEnabled(True)
-            self._title.setText(f"Preview â€” {os.path.basename(path)}")
+            self._title.setText(f"Preview - {os.path.basename(path)}")
         except Exception:
             pass
         self._enable_overlay_controls(True)
@@ -966,7 +1103,7 @@ class PreviewPane(QWidget):
         except Exception:
             pass
         if not self._overlay_prepared and not self._overlay_future:
-            win.show_message("Preparing overlay…")
+            win.show_message("Preparing overlay...")
 
     def _close_overlay_window(self) -> None:
         if not self._overlay_window:
@@ -1021,7 +1158,7 @@ class PreviewPane(QWidget):
         self._overlay_btn.setEnabled(False)
         win = self._overlay_window
         if win:
-            win.show_message("Preparing overlay…")
+            win.show_message("Preparing overlay...")
         self._overlay_future_path = path
 
         def _done(fut: Future) -> None:
@@ -1126,7 +1263,7 @@ class PdfOverlayWindow(QWidget):
         self._fallback_area.setWidget(self._fallback_label)
         self._stack.addWidget(self._fallback_area)
 
-        self._message_label = QLabel("Preparing overlay…", self)
+        self._message_label = QLabel("Preparing overlay...", self)
         self._message_label.setAlignment(Qt.AlignCenter)
         self._message_label.setMargin(12)
         self._stack.addWidget(self._message_label)

@@ -5,11 +5,12 @@
 - [ ] Live page summaries: per-page TL;DR and full document outline; clickable to jump.
 - [ ] Inline glossary highlights: underline terms; hover shows preferred translation/notes.
 - [ ] Annotations: add highlights/notes in preview; export/import as JSON or XFDF.
+- [x] SharePoint previews pull from downloaded local copies and auto-open externally when needed.
 - [ ] Page thumbnails and mini-map for quick navigation.
 
 ## AI-Powered Tools
 - [x] Smart summaries with length/tone presets (tweet, paragraph, executive brief); include key risks/action items.
-- [ ] Q&A over document with page citations; retrieval-chunking for long PDFs.
+- [x] Document Q&A prompt (custom questions with grounded answers).
 - [ ] Translation modes (identity/MT/post-edit) with confidence and “needs review” flags.
 - [ ] Rewrite helpers: simplify language, bulletify, translate and adapt for client X.
 

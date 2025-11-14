@@ -204,7 +204,7 @@ class WorkspacePane(QFrame):
         self.header.setText(definition.name)
 
         self._search = QLineEdit(self)
-        self._search.setPlaceholderText("Searchâ€¦")
+        self._search.setPlaceholderText("Search...")
 
         self._view = WorkspaceTreeView(self)
         self._view.setSortingEnabled(True)
@@ -254,8 +254,8 @@ class WorkspacePane(QFrame):
         try:
             self._link_btn.setVisible(self.definition.kind == "translation")
             self._link_btn.setChecked(getattr(self.definition, "follow_base", True))
-            self._link_btn.setText("ðŸ”—" if self._link_btn.isChecked() else "â›“")
-            self._link_btn.setToolTip("Linked to base navigation" if self._link_btn.isChecked() else "Unlinked from base navigation")
+            self._link_btn.setText("Link" if self._link_btn.isChecked() else "Follow")
+            self._link_btn.setToolTip("Linked to base navigation" if self._link_btn.isChecked() else "Follow base navigation")
         except Exception:
             self._link_btn.setVisible(False)
         _hdr_layout.addStretch(1)
@@ -314,7 +314,7 @@ class WorkspacePane(QFrame):
             try:
                 self._link_btn.setVisible(self.definition.kind == "translation")
                 self._link_btn.setChecked(getattr(self.definition, "follow_base", True))
-                self._link_btn.setText("ðŸ”—" if self._link_btn.isChecked() else "â›“")
+                self._link_btn.setText("Link" if self._link_btn.isChecked() else "Follow")
             except Exception:
                 pass
 
@@ -336,7 +336,7 @@ class WorkspacePane(QFrame):
             self.definition.follow_base = True if checked else False
         # update glyph
         try:
-            self._link_btn.setText("ðŸ”—" if checked else "â›“")
+            self._link_btn.setText("Link" if checked else "Follow")
         except Exception:
             pass
         self.link_toggled.emit(self.definition.id, bool(checked))
@@ -443,25 +443,25 @@ class WorkspacePane(QFrame):
         bar.setSpacing(6)
 
         self._back_btn = QToolButton(self)
-        self._back_btn.setText("â†")
+        self._back_btn.setText("<")
         self._back_btn.setToolTip("Back")
         self._back_btn.setAutoRaise(True)
         self._back_btn.clicked.connect(lambda checked=False: self._navigate_history(-1))
 
         self._forward_btn = QToolButton(self)
-        self._forward_btn.setText("â†’")
+        self._forward_btn.setText(">")
         self._forward_btn.setToolTip("Forward")
         self._forward_btn.setAutoRaise(True)
         self._forward_btn.clicked.connect(lambda checked=False: self._navigate_history(1))
 
         self._up_btn = QToolButton(self)
-        self._up_btn.setText("â†‘")
+        self._up_btn.setText("^")
         self._up_btn.setToolTip("Up one level")
         self._up_btn.setAutoRaise(True)
         self._up_btn.clicked.connect(lambda checked=False: self.navigate_up())
 
         self._view_mode_btn = QToolButton(self)
-        self._view_mode_btn.setText("â˜°")
+        self._view_mode_btn.setText("List")
         self._view_mode_btn.setCheckable(True)
         self._view_mode_btn.setToolTip("Toggle icon view")
         self._view_mode_btn.setAutoRaise(True)
@@ -483,7 +483,7 @@ class WorkspacePane(QFrame):
 
         # Quick Go To
         self._goto_btn = QToolButton(self)
-        self._goto_btn.setText("Goâ€¦")
+        self._goto_btn.setText("Go...")
         self._goto_btn.setToolTip("Quick Go To palette")
         self._goto_btn.setAutoRaise(True)
         self._goto_btn.clicked.connect(self._open_go_to_palette)
@@ -544,7 +544,7 @@ class WorkspacePane(QFrame):
             return
         self._icon_mode = checked
         self._view_stack.setCurrentIndex(1 if checked else 0)
-        self._view_mode_btn.setText("ðŸ—‚" if checked else "â˜°")
+        self._view_mode_btn.setText("Grid" if checked else "List")
         self._view_mode_btn.setToolTip("Show tree view" if checked else "Show icon view")
         self._sync_icon_model()
         if checked:
@@ -1174,7 +1174,7 @@ class WorkspacePane(QFrame):
                 progress = None
                 if total > 0:
                     try:
-                        progress = QProgressDialog("Preparing files…", "Cancel", 0, total, self)
+                        progress = QProgressDialog("Preparing files...", "Cancel", 0, total, self)
                         progress.setWindowTitle("SmartExplorer")
                         progress.setWindowModality(Qt.ApplicationModal)
                         progress.setValue(0)
@@ -1229,7 +1229,7 @@ class WorkspacePane(QFrame):
                         if progress:
                             try:
                                 progress.setValue(completed)
-                                progress.setLabelText(f"Preparing {completed} of {total}…")
+                                progress.setLabelText(f"Preparing {completed} of {total}...")
                                 QApplication.processEvents()
                             except Exception:
                                 pass

@@ -8,6 +8,7 @@ Overview
 Key Features
 - Translation preview pane: shows natural translations of file/folder names in your target language without changing disk names.
 - AI PDF summaries: choose Short (what & highlights) or Long (detailed bullet list) summaries directly from the preview pane (requires OpenAI key).
+- Document Q&A: ask custom questions about the previewed file and get grounded answers (requires OpenAI key).
 - Bulk Rename Preview + Undo: review conflicts, edit names inline, apply in one shot, and undo the last batch.
 - Open files from the app: double-click opens with the system default app (SharePoint items download to a configurable folder first).
 - Reveal and Copy Path: “Reveal in Explorer/Finder/Files” and “Copy Path” from the context menu.
@@ -53,6 +54,7 @@ Using the App
   - SharePoint: pick a site/library.
     - SharePoint previews are opt-in: when you select a SharePoint file the preview pane offers a Download Preview button so you only fetch a temp copy when you actually want it (and you can Save File As... afterward).
   - Translation: pick a base pane and a language.
+  - Document Q&A: download a preview, type a question, and press Ask to get an answer grounded in the current file.
 - Translate & rename:
   - The right (translation) pane mirrors the base pane location automatically.
   - Use “Apply Translation Rename” to review and apply changes; use “Undo Last Rename” if needed.

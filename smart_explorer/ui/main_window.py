@@ -8,7 +8,7 @@ import subprocess
 import uuid
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QMetaObject
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPalette, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -153,15 +153,15 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Workspaces", self)
         tb.setMovable(False)
 
-        add_local = QAction("Add Local Pane…", self)
+        add_local = QAction("Add Local Pane...", self)
         add_local.triggered.connect(self._add_local_workspace)
         tb.addAction(add_local)
 
-        add_sharepoint = QAction("Add SharePoint Pane…", self)
+        add_sharepoint = QAction("Add SharePoint Pane...", self)
         add_sharepoint.triggered.connect(self._add_sharepoint_workspace)
         tb.addAction(add_sharepoint)
 
-        add_translation = QAction("Add Translation Pane…", self)
+        add_translation = QAction("Add Translation Pane...", self)
         add_translation.triggered.connect(self._add_translation_workspace)
         tb.addAction(add_translation)
 
@@ -211,7 +211,7 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        settings = QAction("Settings…", self)
+        settings = QAction("Settings...", self)
         settings.triggered.connect(self._open_settings)
         tb.addAction(settings)
 
@@ -225,7 +225,7 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        goto_action = QAction("Go To…", self)
+        goto_action = QAction("Go To...", self)
         goto_action.setShortcut(QKeySequence("Ctrl+K"))
         goto_action.triggered.connect(self._open_go_to_palette)
         tb.addAction(goto_action)
@@ -427,6 +427,13 @@ class MainWindow(QMainWindow):
             else:
                 for dep in self._translation_dependents(workspace_id):
                     dep.set_title(self._display_name_for_pane(dep))
+
+            if pane.definition.kind == "sharepoint":
+                normalized = path or "/"
+                if normalized != pane.definition.last_path:
+                    pane.definition.last_path = normalized
+                    self._workspace_manager.update(pane.definition)
+                    self._persist_state(save_workspaces=True)
 
     def _display_name_for_pane(self, pane: WorkspacePane) -> str:
         try:
@@ -850,6 +857,13 @@ QLabel { color: #eee8d5; }
         # Restore state where possible
         for wid, pane in self._workspace_panes.items():
             pane.restore_state(prev_states.get(wid, {}))
+            try:
+                persisted = getattr(pane.definition, "last_path", None)
+                if pane.definition.kind == "sharepoint" and persisted:
+                    if not pane.go_to_path(persisted, record=False, emit=False):
+                        pane.go_to_path(pane.definition.server_relative_url or "/", record=False, emit=False)
+            except Exception:
+                pass
             try:
                 pane.set_title(self._display_name_for_pane(pane))
             except Exception:
@@ -1428,7 +1442,7 @@ QLabel { color: #eee8d5; }
 
         # Open group
         add_action("Open", self._open_selected_items)
-        add_action("Open With…", self._open_with_selected_items)
+        add_action("Open With...", self._open_with_selected_items)
         add_action("Reveal in File Manager", self._reveal_in_file_manager)
         add_action("", separator=True)
         # Clipboard group
@@ -1448,7 +1462,7 @@ QLabel { color: #eee8d5; }
         add_action("", separator=True)
         # SharePoint group
         add_action("Copy Share Link", self._copy_share_link)
-        add_action("Download…", self._download_selected_items)
+        add_action("Download...", self._download_selected_items)
         add_action("Check Out for Edit", self._sp_checkout_for_edit)
         add_action("Upload Edited File(s)", self._sp_upload_edited)
         add_action("Versions...", self._sp_versions)
@@ -1536,12 +1550,12 @@ QLabel { color: #eee8d5; }
         if not pane or not definition:
             return
         menu = QMenu(self)
-        local_action = menu.addAction("Switch to Local…")
-        sharepoint_action = menu.addAction("Switch to SharePoint…")
-        translation_label = "Configure Translation…" if definition.kind == "translation" else "Switch to Translation…"
+        local_action = menu.addAction("Switch to Local...")
+        sharepoint_action = menu.addAction("Switch to SharePoint...")
+        translation_label = "Configure Translation..." if definition.kind == "translation" else "Switch to Translation..."
         translation_action = menu.addAction(translation_label)
         menu.addSeparator()
-        rename_action = menu.addAction("Rename Pane…")
+        rename_action = menu.addAction("Rename Pane...")
         reset_title_action = menu.addAction("Reset Auto Title")
         if definition.kind == "local":
             local_action.setEnabled(False)
@@ -1770,7 +1784,7 @@ QLabel { color: #eee8d5; }
                             except Exception:
                                 pass
 
-                        QTimer.singleShot(0, widget, show)
+                        QTimer.singleShot(0, show)
                         self._cleanup()
                         return
 
@@ -1819,8 +1833,7 @@ QLabel { color: #eee8d5; }
                                             if widget:
                                                 widget.notify_sharepoint_download_error(self.server_path, "Download cancelled.")
 
-                                        if widget:
-                                            QTimer.singleShot(0, widget, _cancel_notice)
+                                        QTimer.singleShot(0, _cancel_notice)
                                         self._cleanup()
                                         return
                                     tf.write(chunk)
@@ -1854,9 +1867,7 @@ QLabel { color: #eee8d5; }
                         except Exception:
                             pass
 
-                    widget = getattr(self.outer, "_preview_widget", None)
-                    if widget:
-                        QTimer.singleShot(0, widget, show_final)
+                    QTimer.singleShot(0, show_final)
                     self._cleanup()
                 except Exception as exc:
                     from PySide6.QtCore import QTimer
@@ -1871,9 +1882,7 @@ QLabel { color: #eee8d5; }
                         except Exception:
                             pass
 
-                    widget = getattr(self.outer, "_preview_widget", None)
-                    if widget:
-                        QTimer.singleShot(0, widget, warn)
+                    QTimer.singleShot(0, warn)
                     _LOG.warning("SharePoint preview download failed: %s (%s)", self.server_path, exc)
                     self._cleanup()
 
@@ -2173,7 +2182,7 @@ QLabel { color: #eee8d5; }
         use_byte_progress = total_bytes > 0 and len(sizes) == len(file_entries)
         # Progress dialog (byte-based when sizes known; else file-count based)
         prog_max = total_bytes if use_byte_progress else len(file_entries)
-        prog = QProgressDialog("Downloading…", "Cancel", 0, prog_max, self)
+        prog = QProgressDialog("Downloading...", "Cancel", 0, prog_max, self)
         prog.setWindowTitle("SmartExplorer")
         prog.setWindowModality(Qt.ApplicationModal)
         prog.setValue(0)
@@ -2208,7 +2217,7 @@ QLabel { color: #eee8d5; }
                                         if use_byte_progress:
                                             downloaded_total += len(chunk)
                                             prog.setValue(min(downloaded_total, prog_max))
-                                        prog.setLabelText(f"Downloading {rel}…")
+                                        prog.setLabelText(f"Downloading {rel}...")
                                         QApplication.processEvents()
                     except Exception as exc:
                         QMessageBox.warning(self, "Download", f"Failed to download {rel}: {exc}")
@@ -2290,7 +2299,7 @@ QLabel { color: #eee8d5; }
                 with zipfile.ZipFile(zippath) as zf:
                     members = zf.infolist()
                     total = len(members)
-                    prog = QProgressDialog(f"Extracting {os.path.basename(zippath)}…", "Cancel", 0, total, self)
+                    prog = QProgressDialog(f"Extracting {os.path.basename(zippath)}...", "Cancel", 0, total, self)
                     prog.setWindowTitle("SmartExplorer")
                     prog.setWindowModality(Qt.ApplicationModal)
                     prog.setValue(0)
@@ -2776,7 +2785,7 @@ QLabel { color: #eee8d5; }
         # Apply in batch and record for undo
         undo_batch: List[dict] = []
         errors = 0
-        self.statusBar().showMessage("Renaming items…", 3000)
+        self.statusBar().showMessage("Renaming items...", 3000)
         if base_pane.definition.kind == "local":
             for old_path, new_name, is_dir in ops:
                 try:

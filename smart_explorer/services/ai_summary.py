@@ -119,6 +119,14 @@ class AISummarizer:
             raise SummaryError("Unable to extract readable text from the selected file.")
         return self._summarize_text(text, os.path.basename(path), preset, tone)
 
+    def ask_question(self, path: str, question: str) -> str:
+        if not question.strip():
+            raise SummaryError("Please enter a question to ask the document.")
+        text = extract_text_snippet(path, limit=self._max_chars)
+        if not text.strip():
+            raise SummaryError("Unable to extract readable text from the selected file.")
+        return self._answer_question(text, os.path.basename(path), question)
+
     def _summarize_text(self, text: str, filename: str, preset: str, tone: str) -> SummaryResult:
         preset_key = preset if preset in SUMMARY_PRESETS else "short"
         tone_key = tone if tone in SUMMARY_TONES else "neutral"
@@ -150,6 +158,23 @@ class AISummarizer:
             tone=tone_key,
             summary=summary,
         )
+
+    def _answer_question(self, text: str, filename: str, question: str) -> str:
+        payload = {
+            "document_name": filename,
+            "question": question,
+            "text_excerpt": text,
+            "requested_format": {
+                "answer": "Concise plain-text answer grounded in the provided excerpt. If the excerpt lacks the information, reply with 'Unable to find the answer in the provided pages.'"
+            },
+        }
+        system_prompt = (
+            "You answer questions about the provided document excerpt."
+            " Only use information from the excerpt; if unsure, say you don't know."
+            " Respond with valid JSON matching the user's schema."
+        )
+        raw = self._call_openai(system_prompt, payload)
+        return _parse_answer_payload(raw)
 
     def _call_openai(self, system_prompt: str, payload: dict) -> str:
         body = json.dumps(payload, ensure_ascii=False)
@@ -278,6 +303,18 @@ def _parse_summary_payload(payload: str) -> str:
     if not summary:
         raise SummaryError("Model returned an empty summary.")
     return summary
+
+
+def _parse_answer_payload(payload: str) -> str:
+    cleaned = _clean_model_payload(payload)
+    try:
+        data = json.loads(cleaned)
+    except Exception as exc:
+        raise SummaryError(f"Invalid JSON returned by the model: {exc}") from exc
+    answer = str(data.get("answer") or "").strip() if isinstance(data, dict) else ""
+    if not answer:
+        raise SummaryError("Model returned an empty answer.")
+    return answer
 
 
 __all__ = [

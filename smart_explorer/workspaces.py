@@ -27,6 +27,7 @@ class WorkspaceDefinition:
     base_workspace_id: Optional[str] = None
     language: Optional[str] = None
     auto_sync: bool = True
+    last_path: Optional[str] = None
 
     def to_config(self) -> dict:
         data = asdict(self)
