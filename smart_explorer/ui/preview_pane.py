@@ -8,6 +8,8 @@ import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 import time
 import shutil
+import tempfile
+import sys
 
 from PySide6.QtCore import Qt, QUrl, Signal, QPoint, QTimer
 from PySide6.QtWidgets import (
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+import html
 from ..services.ai_summary import (
     AISummarizer,
     SUMMARY_PRESETS,
@@ -48,7 +51,55 @@ try:
 except Exception:
     QWebEngineView = None  # type: ignore
     QWebEngineSettings = None  # type: ignore
-    WEBENGINE_AVAILABLE = False
+WEBENGINE_AVAILABLE = False
+
+HTML_VIDEO_ELEMENT_ID = "se-video-player"
+
+_VIDEO_SUPPORT_REASON = "Qt Multimedia components unavailable"
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QMultimedia  # type: ignore
+    from PySide6.QtMultimediaWidgets import QVideoWidget  # type: ignore
+
+    VIDEO_AVAILABLE = True
+    _VIDEO_SUPPORT_REASON = None
+    try:
+        support_enum = getattr(QMultimedia, "SupportEstimate", None)
+        positive_statuses = {
+            getattr(support_enum, name, None)
+            for name in ("Supported", "ProbablySupported", "MaybeSupported")
+        }
+        positive_statuses.discard(None)
+        mime_candidates = ("video/mp4", "video/quicktime", "video/x-matroska", "video/webm")
+        if hasattr(QMediaPlayer, "hasSupport") and support_enum is not None:
+            any_supported = False
+            for mime in mime_candidates:
+                try:
+                    status = QMediaPlayer.hasSupport(mime)
+                except Exception:
+                    status = None
+                if status in positive_statuses:
+                    any_supported = True
+                    break
+            if not any_supported:
+                VIDEO_AVAILABLE = False
+                _VIDEO_SUPPORT_REASON = "Qt Multimedia backend missing video support"
+    except Exception:
+        VIDEO_AVAILABLE = False
+        _VIDEO_SUPPORT_REASON = "Qt Multimedia backend probe failed"
+except Exception:
+    QAudioOutput = None  # type: ignore
+    QMediaPlayer = None  # type: ignore
+    QVideoWidget = None  # type: ignore
+    VIDEO_AVAILABLE = False
+    _VIDEO_SUPPORT_REASON = "Qt Multimedia modules not importable"
+
+try:
+    import vlc  # type: ignore
+
+    VLC_AVAILABLE = True
+except Exception:
+    vlc = None  # type: ignore
+    VLC_AVAILABLE = False
 
 _OVERLAY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 _SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
@@ -90,6 +141,9 @@ class PreviewPane(QWidget):
         self._image = QLabel(self)
         self._image.setAlignment(Qt.AlignCenter)
         self._image.setScaledContents(False)
+        self._video_widget: QVideoWidget | None = None
+        self._media_player: QMediaPlayer | None = None
+        self._audio_output: QAudioOutput | None = None
         self._fallback = QLabel("No preview available")
         self._fallback.setAlignment(Qt.AlignCenter)
 
@@ -110,6 +164,28 @@ class PreviewPane(QWidget):
         self._open_btn.setEnabled(False)
         self._open_btn.clicked.connect(self._on_open)
         ctrl_row.addWidget(self._open_btn)
+        self._video_slider = QSlider(Qt.Horizontal, self)
+        self._video_slider.setRange(0, 1000)
+        self._video_slider.setVisible(False)
+        self._video_slider.setEnabled(False)
+        self._video_slider.sliderPressed.connect(self._on_video_slider_pressed)
+        self._video_slider.sliderReleased.connect(self._on_video_slider_released)
+        ctrl_row.addWidget(self._video_slider, 1)
+        self._play_btn = QPushButton("Play", self)
+        self._play_btn.setVisible(False)
+        self._play_btn.setEnabled(False)
+        self._play_btn.clicked.connect(self._on_video_play)
+        ctrl_row.addWidget(self._play_btn)
+        self._pause_btn = QPushButton("Pause", self)
+        self._pause_btn.setVisible(False)
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.clicked.connect(self._on_video_pause)
+        ctrl_row.addWidget(self._pause_btn)
+        self._stop_btn = QPushButton("Stop", self)
+        self._stop_btn.setVisible(False)
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._on_video_stop)
+        ctrl_row.addWidget(self._stop_btn)
         # Overlay controls (hidden by default)
         self._overlay_btn = QPushButton("Overlay", self)
         self._overlay_btn.setCheckable(True)
@@ -284,6 +360,18 @@ class PreviewPane(QWidget):
         self._pending_web_path: str | None = None
         self._qa_future: Future | None = None
         self._qa_loading: bool = False
+        self._temp_video_files: list[str] = []
+        self._vlc_instance = None
+        self._vlc_player = None
+        self._vlc_widget: QWidget | None = None
+        self._video_backend: str | None = None
+        self._html_video_pending: bool = False
+        self._slider_dragging: bool = False
+        self._video_duration_ms: int = 0
+        self._video_poll_timer = QTimer(self)
+        self._video_poll_timer.setInterval(500)
+        self._video_poll_timer.timeout.connect(self._sync_video_slider)
+        self._html_js_pending = False
 
         self._summary_ready.connect(self._on_summary_future_done)
         self._qa_ready.connect(self._on_qa_future_done)
@@ -292,14 +380,104 @@ class PreviewPane(QWidget):
 
     def _clear_content_widgets(self) -> None:
         # Remove content widgets from layout, we'll add the desired one
-        for w in (self._web, self._image, self._fallback):
+        for w in (self._web, self._image, self._fallback, self._video_widget, self._vlc_widget):
+            if w is None:
+                continue
             try:
                 self._layout.removeWidget(w)  # safe even if not present
             except Exception:
                 pass
-            if w is not None:
+            try:
                 w.setParent(None)
+            except Exception:
+                pass
+        self._dispose_video_player()
+        self._cleanup_temp_video_html()
+        self._set_video_backend(None)
         self._current_widget = None
+
+    def _dispose_video_player(self) -> None:
+        if self._media_player is not None:
+            try:
+                self._media_player.stop()
+            except Exception:
+                pass
+            try:
+                self._media_player.setVideoOutput(None)
+            except Exception:
+                pass
+            self._media_player.deleteLater()
+        if self._audio_output is not None:
+            try:
+                self._audio_output.deleteLater()
+            except Exception:
+                pass
+        if self._video_widget is not None:
+            try:
+                self._video_widget.deleteLater()
+            except Exception:
+                pass
+        self._media_player = None
+        self._audio_output = None
+        self._video_widget = None
+        self._dispose_vlc_player()
+
+    def _dispose_vlc_player(self) -> None:
+        player = getattr(self, "_vlc_player", None)
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                pass
+            try:
+                player.release()
+            except Exception:
+                pass
+        instance = getattr(self, "_vlc_instance", None)
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception:
+                pass
+        if self._vlc_widget is not None:
+            try:
+                self._vlc_widget.deleteLater()
+            except Exception:
+                pass
+        self._vlc_instance = None
+        self._vlc_player = None
+        self._vlc_widget = None
+        self._set_video_backend(None)
+
+    def _cleanup_temp_video_html(self) -> None:
+        if not getattr(self, "_temp_video_files", None):
+            return
+        for path in list(self._temp_video_files):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        self._temp_video_files = []
+
+    def _set_video_backend(self, backend: str | None) -> None:
+        self._video_backend = backend
+        has_controls = backend is not None
+        self._html_video_pending = backend == "html"
+        controls_enabled = has_controls and not self._html_video_pending
+        for btn in (self._play_btn, self._pause_btn, self._stop_btn):
+            btn.setVisible(backend is not None)
+            btn.setEnabled(controls_enabled if btn.isVisible() else False)
+        if backend is None:
+            self._video_slider.setVisible(False)
+            self._video_slider.setEnabled(False)
+            self._video_slider.setValue(0)
+            self._video_duration_ms = 0
+            self._video_poll_timer.stop()
+        else:
+            self._video_slider.setVisible(True)
+            self._video_slider.setEnabled(not self._html_video_pending)
+            if not self._video_poll_timer.isActive():
+                self._video_poll_timer.start()
 
     def prepare_sharepoint_preview(self, server_path: str, site: str | None, display_name: str) -> None:
         _LOG.info("SharePoint preview requested: server=%s display=%s", server_path, display_name)
@@ -767,6 +945,17 @@ class PreviewPane(QWidget):
                 self._current_kind = "image"
                 self._show_image(path)
                 return
+            if ext in {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm"}:
+                self._current_kind = "video"
+                success, reason = self._show_video(path)
+                if success:
+                    return
+                if self._show_video_with_vlc(path):
+                    return
+                if self._show_video_in_web(path):
+                    return
+                self._show_fallback(reason or "Video preview not available on this system.")
+                return
             # Unknown file types: try to load in web view if available (some types like html)
             if WEBENGINE_AVAILABLE and self._web is not None:
                 self._current_kind = "web"
@@ -833,6 +1022,296 @@ class PreviewPane(QWidget):
         else:
             self._enable_overlay_controls(False)
 
+    def _show_video(self, path: str) -> tuple[bool, str | None]:
+        self._clear_content_widgets()
+        if not VIDEO_AVAILABLE or QVideoWidget is None or QMediaPlayer is None:
+            reason = _VIDEO_SUPPORT_REASON or "Qt Multimedia backend unavailable"
+            return False, reason
+        try:
+            self._video_widget = QVideoWidget(self)
+        except Exception as exc:
+            _LOG.warning("Failed to create video widget: %s", exc)
+            return False, "Unable to create video preview"
+        self._layout.insertWidget(1, self._video_widget, 1)
+        self._current_widget = self._video_widget
+        try:
+            self._media_player = QMediaPlayer(self)
+        except Exception as exc:
+            _LOG.warning("Failed to create media player: %s", exc)
+            return False, "Unable to create video preview"
+        if QAudioOutput is not None:
+            try:
+                self._audio_output = QAudioOutput(self)
+                self._media_player.setAudioOutput(self._audio_output)
+            except Exception:
+                self._audio_output = None
+        try:
+            self._media_player.setVideoOutput(self._video_widget)
+        except Exception as exc:
+            _LOG.warning("Failed to attach video output: %s", exc)
+            return False, "Unable to prepare video preview"
+        file_url = QUrl.fromLocalFile(os.path.abspath(path))
+        loaded = False
+        try:
+            self._media_player.setSource(file_url)
+            loaded = True
+        except Exception:
+            try:
+                self._media_player.setMedia(file_url)  # older Qt builds
+                loaded = True
+            except Exception as exc:
+                _LOG.warning("Failed to set media source for %s: %s", path, exc)
+        if not loaded:
+            return False, "Unable to load video preview"
+        try:
+            self._media_player.play()
+        except Exception:
+            pass
+        self._open_btn.setEnabled(True)
+        self._title.setText(f"Preview - {os.path.basename(path)}")
+        self._enable_overlay_controls(False)
+        self._set_video_backend("qt")
+        return True, None
+
+    def _show_video_with_vlc(self, path: str) -> bool:
+        if not VLC_AVAILABLE or vlc is None:
+            _LOG.info("VLC backend unavailable; skipping VLC preview.")
+            return False
+        self._clear_content_widgets()
+        try:
+            container = QWidget(self)
+            container.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+            container.setAttribute(Qt.WA_NativeWindow, True)
+        except Exception as exc:
+            _LOG.warning("Failed to create VLC container widget: %s", exc)
+            return False
+        self._vlc_widget = container
+        self._layout.insertWidget(1, self._vlc_widget, 1)
+        self._current_widget = self._vlc_widget
+        _LOG.info("Attempting VLC preview for %s", path)
+        try:
+            self._vlc_instance = vlc.Instance("--quiet")
+            self._vlc_player = self._vlc_instance.media_player_new()
+            media = self._vlc_instance.media_new(os.path.abspath(path))
+            self._vlc_player.set_media(media)
+            self._attach_vlc_output()
+            self._vlc_player.play()
+        except Exception as exc:
+            _LOG.warning("Failed to initialize VLC video playback: %s", exc)
+            self._dispose_vlc_player()
+            return False
+        try:
+            self._open_btn.setEnabled(True)
+            self._title.setText(f"Preview - {os.path.basename(path)}")
+        except Exception:
+            pass
+        self._enable_overlay_controls(False)
+        self._set_video_backend("vlc")
+        return True
+
+    def _attach_vlc_output(self) -> None:
+        if self._vlc_player is None or self._vlc_widget is None:
+            return
+        win_id = int(self._vlc_widget.winId())
+        try:
+            if sys.platform.startswith("win"):
+                self._vlc_player.set_hwnd(win_id)  # type: ignore[attr-defined]
+            elif sys.platform.startswith("linux"):
+                self._vlc_player.set_xwindow(win_id)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                self._vlc_player.set_nsobject(win_id)  # type: ignore[attr-defined]
+            _LOG.info("Attached VLC output to window id %s", win_id)
+        except Exception as exc:
+            _LOG.warning("Failed to attach VLC output: %s", exc)
+
+    def _show_video_in_web(self, path: str) -> bool:
+        if not WEBENGINE_AVAILABLE:
+            return False
+        self._clear_content_widgets()
+        try:
+            self._web = QWebEngineView(self)
+        except Exception as exc:
+            _LOG.warning("Failed to create web view for video fallback: %s", exc)
+            return False
+        if QWebEngineSettings is not None and self._web is not None:
+            try:
+                settings = self._web.settings()
+                settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+                settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            except Exception:
+                pass
+        try:
+            self._web.loadFinished.connect(self._on_video_html_load_finished)
+        except Exception:
+            pass
+        self._layout.insertWidget(1, self._web, 1)
+        self._current_widget = self._web
+        file_url = QUrl.fromLocalFile(os.path.abspath(path))
+        html_content = self._build_video_html(file_url.toString(), os.path.basename(path))
+        try:
+            temp_file = tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8")
+        except Exception as exc:
+            _LOG.warning("Failed to create temp file for video HTML: %s", exc)
+            return False
+        temp_path = temp_file.name
+        try:
+            temp_file.write(html_content)
+        except Exception as exc:
+            _LOG.warning("Failed to write video HTML temp file: %s", exc)
+            temp_file.close()
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+            return False
+        finally:
+            try:
+                temp_file.close()
+            except Exception:
+                pass
+        self._temp_video_files.append(temp_path)
+        local_html_url = QUrl.fromLocalFile(temp_path)
+        try:
+            self._set_video_backend("html")
+            self._web.load(local_html_url)
+        except Exception as exc:
+            _LOG.warning("Failed to load video HTML fallback: %s", exc)
+            self._set_video_backend(None)
+            return False
+        try:
+            self._open_btn.setEnabled(True)
+            self._title.setText(f"Preview - {os.path.basename(path)}")
+        except Exception:
+            pass
+        self._enable_overlay_controls(False)
+        return True
+
+    def _build_video_html(self, source_url: str, title: str) -> str:
+        safe_url = html.escape(source_url, quote=True)
+        safe_title = html.escape(title)
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>{safe_title}</title>
+<style>
+html, body {{
+    margin: 0;
+    padding: 0;
+    background-color: #111;
+    height: 100%;
+}}
+body {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}}
+video {{
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background-color: #000;
+}}
+</style>
+</head>
+<body>
+<video id="{HTML_VIDEO_ELEMENT_ID}" controls autoplay playsinline src="{safe_url}">
+    <source src="{safe_url}">
+    HTML5 video not supported on this system.
+</video>
+</body>
+</html>
+""".strip()
+
+    def _run_video_js(self, script: str) -> None:
+        if self._web is None:
+            return
+        try:
+            page = self._web.page()
+            if page is not None:
+                page.runJavaScript(script)
+        except Exception:
+            pass
+
+    def _on_video_html_load_finished(self, ok: bool) -> None:
+        if self._video_backend != "html":
+            return
+        if not ok:
+            _LOG.warning("HTML video fallback failed to load for %s", self._current_path)
+            self._set_video_backend(None)
+            self._show_fallback("Unable to load video preview")
+            return
+        self._html_video_pending = False
+        for btn in (self._play_btn, self._pause_btn, self._stop_btn):
+            btn.setEnabled(True)
+        self._request_html_video_state()
+
+    def _sync_video_slider(self) -> None:
+        backend = self._video_backend
+        if backend is None or self._slider_dragging:
+            if backend is None:
+                self._video_poll_timer.stop()
+            return
+        if backend == "qt" and self._media_player is not None:
+            pos = max(0, int(self._media_player.position()))
+            dur = max(0, int(self._media_player.duration()))
+            self._update_slider_from_state(pos, dur)
+        elif backend == "vlc" and self._vlc_player is not None:
+            try:
+                pos = max(0, int(self._vlc_player.get_time()))
+                dur = max(0, int(self._vlc_player.get_length()))
+            except Exception:
+                pos = 0
+                dur = 0
+            self._update_slider_from_state(pos, dur)
+        elif backend == "html":
+            self._request_html_video_state()
+
+    def _update_slider_from_state(self, position_ms: int, duration_ms: int) -> None:
+        if duration_ms <= 0:
+            self._video_slider.setEnabled(False)
+            self._video_duration_ms = 0
+            return
+        self._video_duration_ms = duration_ms
+        if not self._slider_dragging:
+            fraction = max(0.0, min(1.0, position_ms / duration_ms))
+            value = int(fraction * self._video_slider.maximum())
+            self._video_slider.blockSignals(True)
+            self._video_slider.setValue(value)
+            self._video_slider.blockSignals(False)
+        self._video_slider.setEnabled(True)
+
+    def _request_html_video_state(self) -> None:
+        if self._html_js_pending or self._web is None:
+            return
+        page = self._web.page()
+        if page is None:
+            return
+        self._html_js_pending = True
+        script = (
+            f"(function() {{"
+            f"var v=document.getElementById('{HTML_VIDEO_ELEMENT_ID}');"
+            f"if(!v) return null;"
+            f"return {{pos: v.currentTime*1000, dur: v.duration*1000}};"
+            f"}})();"
+        )
+        try:
+            page.runJavaScript(script, self._handle_html_video_state)
+        except Exception:
+            self._html_js_pending = False
+
+    def _handle_html_video_state(self, result) -> None:
+        self._html_js_pending = False
+        if result is None:
+            return
+        try:
+            position_ms = int(float(result.get("pos", 0.0)))
+            duration_ms = int(float(result.get("dur", 0.0)))
+        except Exception:
+            return
+        self._update_slider_from_state(position_ms, duration_ms)
+
     def _show_image(self, path: str) -> None:
         self._clear_content_widgets()
         # Use cached thumbnail if available
@@ -893,15 +1372,105 @@ class PreviewPane(QWidget):
             _LOG.info("Web preview loaded successfully: %s", path)
             return
         _LOG.warning("Web preview failed for %s; falling back to external viewer.", path)
-        self._show_fallback("Preview failed in-app. Opening external viewer...")
-        self._sharepoint_auto_opened = False
-        self._sharepoint_local_path = path
-        self._open_sharepoint_file_external()
+        self._show_fallback("Preview failed in-app.")
         self._enable_overlay_controls(False)
+        # Only auto-open externally when we were handling a SharePoint download
+        if self._sharepoint_server_path and self._sharepoint_local_path == path:
+            self._sharepoint_auto_opened = False
+            self._open_sharepoint_file_external()
+            return
+        # For local files, re-enable the Open button so the user can launch it manually.
+        if os.path.exists(path):
+            try:
+                self._current_path = path
+                self._open_btn.setEnabled(True)
+                self._title.setText(f"Preview - {os.path.basename(path)}")
+            except Exception:
+                pass
 
     def _on_open(self) -> None:
         if self._current_path:
             self.open_requested.emit(self._current_path)
+
+    def _on_video_play(self) -> None:
+        self._control_video("play")
+
+    def _on_video_pause(self) -> None:
+        self._control_video("pause")
+
+    def _on_video_stop(self) -> None:
+        self._control_video("stop")
+
+    def _control_video(self, action: str) -> None:
+        backend = self._video_backend
+        if backend == "qt" and self._media_player is not None:
+            try:
+                if action == "play":
+                    self._media_player.play()
+                elif action == "pause":
+                    self._media_player.pause()
+                elif action == "stop":
+                    self._media_player.stop()
+            except Exception:
+                pass
+            return
+        if backend == "vlc" and self._vlc_player is not None:
+            try:
+                if action == "play":
+                    self._vlc_player.play()
+                elif action == "pause":
+                    self._vlc_player.pause()
+                elif action == "stop":
+                    self._vlc_player.stop()
+            except Exception:
+                pass
+            return
+        if backend == "html":
+            if action == "play":
+                self._run_video_js(f"var v=document.getElementById('{HTML_VIDEO_ELEMENT_ID}'); if(v) v.play();")
+            elif action == "pause":
+                self._run_video_js(f"var v=document.getElementById('{HTML_VIDEO_ELEMENT_ID}'); if(v) v.pause();")
+            elif action == "stop":
+                self._run_video_js(
+                    f"var v=document.getElementById('{HTML_VIDEO_ELEMENT_ID}'); if(v) {{ v.pause(); v.currentTime = 0; }}"
+                )
+
+    def _on_video_slider_pressed(self) -> None:
+        if not self._video_backend:
+            return
+        self._slider_dragging = True
+
+    def _on_video_slider_released(self) -> None:
+        if not self._video_backend:
+            self._slider_dragging = False
+            return
+        value = self._video_slider.value()
+        max_value = max(1, self._video_slider.maximum())
+        fraction = value / max_value
+        duration = max(0, self._video_duration_ms)
+        target_ms = int(duration * fraction)
+        self._seek_video_to_ms(target_ms)
+        self._slider_dragging = False
+
+    def _seek_video_to_ms(self, position_ms: int) -> None:
+        backend = self._video_backend
+        if backend == "qt" and self._media_player is not None:
+            try:
+                self._media_player.setPosition(max(0, position_ms))
+            except Exception:
+                pass
+            return
+        if backend == "vlc" and self._vlc_player is not None:
+            try:
+                self._vlc_player.set_time(max(0, position_ms))
+            except Exception:
+                pass
+            return
+        if backend == "html":
+            seconds = max(0.0, position_ms / 1000.0)
+            self._run_video_js(
+                f"var v=document.getElementById('{HTML_VIDEO_ELEMENT_ID}'); if(v && !isNaN(v.duration)) v.currentTime = {seconds};"
+            )
 
     # --- overlay helpers ---
     def set_translator(self, translator) -> None:
