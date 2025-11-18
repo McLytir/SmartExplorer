@@ -564,6 +564,16 @@ class WorkspacePane(QFrame):
         if self._translated_model:
             self._translated_model.set_translator(translator)
 
+    def allow_translation_scopes(self, paths: List[str], *, depth_limit: Optional[int] = None) -> None:
+        """
+        Allow on-demand translation for additional subtrees (translation panes only).
+        """
+        if not self._translated_model:
+            return
+        for p in paths:
+            if p:
+                self._translated_model.add_scope(p, depth_limit=depth_limit)
+
     def eventFilter(self, obj, event):
         if event.type() == QEvent.MouseButtonPress:
             if isinstance(event, QMouseEvent) and event.button() == Qt.LeftButton:
@@ -1137,6 +1147,13 @@ class WorkspacePane(QFrame):
         self._view.setRootIndex(view_idx)
         if self._supports_icon_mode and self._icon_view.model() is not None:
             self._icon_view.setRootIndex(view_idx)
+        # Restrict translations to the current root folder (translation panes)
+        try:
+            if self._translated_model:
+                scope_path = self._path_for_source_index(source_idx)
+                self._translated_model.set_active_root(scope_path)
+        except Exception:
+            pass
         self._update_navigation_buttons()
 
     # --- drag/drop ----------------------------------------------------------

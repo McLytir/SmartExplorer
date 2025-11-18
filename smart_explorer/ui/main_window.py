@@ -1473,6 +1473,9 @@ QLabel { color: #eee8d5; }
             tag_action.setEnabled(False)
         add_action("", separator=True)
         # Translation group
+        translate_more = add_action("Translate Selection (on-demand)", lambda: self._translate_selection_on_demand(pane))
+        if pane.definition.kind != "translation":
+            translate_more.setEnabled(False)
         add_action("Apply Translation Rename", self._apply_translated_rename)
         add_action("", separator=True)
         # SharePoint group
@@ -2791,6 +2794,27 @@ QLabel { color: #eee8d5; }
         if not self._active_workspace_id:
             return None
         return self._workspace_panes.get(self._active_workspace_id)
+
+    def _translate_selection_on_demand(self, pane: WorkspacePane) -> None:
+        if not pane:
+            return
+        if pane.definition.kind != "translation":
+            QMessageBox.information(self, "Translation", "Select a translation workspace to translate more.")
+            return
+        indexes = pane.current_source_indexes()
+        if not indexes:
+            root_idx = pane.root_source_index()
+            if root_idx and root_idx.isValid():
+                indexes = [root_idx]
+        paths: list[str] = []
+        for idx in indexes:
+            path = pane.path_for_source_index(idx)
+            if path:
+                paths.append(path)
+        if not paths:
+            QMessageBox.information(self, "Translation", "No items selected to translate.")
+            return
+        pane.allow_translation_scopes(paths, depth_limit=None)
 
     def _apply_translated_rename(self) -> None:
         pane = self._active_pane()

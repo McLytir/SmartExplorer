@@ -53,31 +53,43 @@ def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
     tenant_host = netloc.lstrip(".")
     parent_host = ".".join(parts[-2:]) if len(parts) > 2 else tenant_host
 
+    def _process_jar(jar) -> None:
+        for cookie in jar or []:
+            name = (getattr(cookie, "name", "") or "").strip()
+            value = getattr(cookie, "value", None)
+            domain = (getattr(cookie, "domain", "") or "").strip()
+            if not name or not value:
+                continue
+            key = name.lower()
+            if key == "fedauth" and required["fedauth"] not in cookies:
+                # Accept FedAuth on tenant host or parent sharepoint host
+                if _domain_matches(domain, tenant_host) or _domain_matches(domain, parent_host):
+                    cookies[required["fedauth"]] = value
+                    continue
+            if key == "rtfa" and required["rtfa"] not in cookies:
+                # rtFa is typically scoped to the parent .sharepoint.com domain
+                if _domain_matches(domain, parent_host):
+                    cookies[required["rtfa"]] = value
+                    continue
+
     for target in targets:
         for fn in collectors:
             if not fn:
                 continue
+            # First, try with the domain filter for speed
             try:
                 jar = fn(domain_name=target)
+                _process_jar(jar)
             except Exception:
-                continue
-            for cookie in jar:
-                name = (getattr(cookie, "name", "") or "").strip()
-                value = getattr(cookie, "value", None)
-                domain = (getattr(cookie, "domain", "") or "").strip()
-                if not name or not value:
-                    continue
-                key = name.lower()
-                if key == "fedauth" and required["fedauth"] not in cookies:
-                    # Ensure FedAuth belongs to the tenant host (not the broad parent domain)
-                    if _domain_matches(domain, tenant_host):
-                        cookies[required["fedauth"]] = value
-                        continue
-                if key == "rtfa" and required["rtfa"] not in cookies:
-                    # rtFa is typically scoped to the parent .sharepoint.com domain
-                    if _domain_matches(domain, parent_host):
-                        cookies[required["rtfa"]] = value
-                        continue
+                jar = None
+            if all(k in cookies for k in required.values()):
+                break
+            # If domain-filtered lookup failed, fall back to full jar to handle alternate profiles/hosts
+            try:
+                jar = fn()
+                _process_jar(jar)
+            except Exception:
+                pass
             if all(k in cookies for k in required.values()):
                 break
         if all(k in cookies for k in required.values()):

@@ -50,6 +50,11 @@ class TranslatedProxyModel(QIdentityProxyModel):
         self._pool = QThreadPool.globalInstance()
         self._disk_cache = cache
         self._ignore_patterns = ignore_patterns or []
+        # Translation scope: by default we translate everything; once a root is
+        # set we restrict automatic translations to that folder (and optionally
+        # any user-added scopes).
+        self._scope_limits: Dict[str, Optional[int]] = {}  # path -> max depth from scope (None = unlimited)
+        self._active_root: Optional[str] = None
 
         self._signals = _TranslateJobSignals()
         self._signals.done.connect(self._on_done)
@@ -82,6 +87,34 @@ class TranslatedProxyModel(QIdentityProxyModel):
         bottom_right = self.index(self.rowCount() - 1, 0)
         self.dataChanged.emit(top_left, bottom_right)
 
+    def set_active_root(self, path: Optional[str]) -> None:
+        """
+        Restrict automatic translations to the current folder. Depth is limited
+        to the immediate children of the root (distance <= 1). Users can extend
+        scope with add_scope().
+        """
+        normalized = self._normalize_path(path)
+        if normalized == self._active_root and self._scope_limits:
+            return
+        self._active_root = normalized
+        self._scope_limits = {normalized: 1} if normalized else {}
+        self._refresh_all_rows()
+
+    def add_scope(self, path: str, *, depth_limit: Optional[int] = None) -> None:
+        """
+        Allow translations for an additional subtree (e.g., user-requested).
+        depth_limit=None means translate recursively; otherwise distance limit
+        from the scope root.
+        """
+        normalized = self._normalize_path(path)
+        if not normalized:
+            return
+        existing = self._scope_limits.get(normalized)
+        if existing is not None and depth_limit is not None and depth_limit <= existing:
+            return
+        self._scope_limits[normalized] = depth_limit
+        self._refresh_all_rows()
+
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return super().data(index, role)
@@ -104,12 +137,15 @@ class TranslatedProxyModel(QIdentityProxyModel):
             if name is None:
                 name = src_model.data(src_idx, Qt.DisplayRole)
 
-            if path in self._cache:
-                return self._cache[path]
-
             # Skip translating ignored paths
             if self._is_ignored(path, name):
                 return name
+
+            if not self._is_in_scope(path):
+                return name
+
+            if path in self._cache:
+                return self._cache[path]
 
             # Try disk cache first
             mtime = 0.0
@@ -173,3 +209,49 @@ class TranslatedProxyModel(QIdentityProxyModel):
                 if fnmatch.fnmatch(part, pattern):
                     return True
         return False
+
+    def _normalize_path(self, path: Optional[str]) -> str:
+        if path is None:
+            return ""
+        p = str(path).replace("\\", "/").strip()
+        while "//" in p:
+            p = p.replace("//", "/")
+        return p.rstrip("/") if p not in ("/", "") else p
+
+    def _is_in_scope(self, path: Optional[str]) -> bool:
+        normalized = self._normalize_path(path)
+        if not normalized:
+            return False
+        # If no scope set, allow translations everywhere (legacy behavior)
+        if not self._scope_limits:
+            return True
+        for scope, depth_limit in self._scope_limits.items():
+            if not scope:
+                continue
+            if self._is_descendant(normalized, scope):
+                if depth_limit is None:
+                    return True
+                return self._distance_from_scope(normalized, scope) <= depth_limit
+        return False
+
+    def _is_descendant(self, path: str, scope: str) -> bool:
+        p = self._normalize_path(path)
+        s = self._normalize_path(scope)
+        if not s:
+            return False
+        if s == "/":
+            return True
+        return p == s or p.startswith(s + "/")
+
+    def _distance_from_scope(self, path: str, scope: str) -> int:
+        p_parts = [seg for seg in self._normalize_path(path).split("/") if seg]
+        s_parts = [seg for seg in self._normalize_path(scope).split("/") if seg]
+        return max(0, len(p_parts) - len(s_parts))
+
+    def _refresh_all_rows(self) -> None:
+        rows = self.rowCount()
+        if rows <= 0:
+            return
+        top_left = self.index(0, 0)
+        bottom_right = self.index(rows - 1, 0)
+        self.dataChanged.emit(top_left, bottom_right)
