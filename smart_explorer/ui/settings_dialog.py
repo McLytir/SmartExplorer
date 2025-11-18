@@ -382,6 +382,11 @@ class SettingsDialog(QDialog):
             self._update_provider_visibility()
         except Exception:
             pass
+        # Show provider-specific hints/masking
+        try:
+            self._apply_api_key_mask(data)
+        except Exception:
+            pass
 
     def _load_saved_api_keys(self) -> None:
         key_value = None
@@ -415,15 +420,18 @@ class SettingsDialog(QDialog):
         if lt_value:
             self.lt_api_key.setText(lt_value)
 
-    def _apply_api_key_mask(self) -> None:
+    def _apply_api_key_mask(self, provider: str | None = None) -> None:
         try:
             self.api_key.setEchoMode(QLineEdit.Password)
             self.lt_api_key.setEchoMode(QLineEdit.Password)
         except Exception:
             pass
-        except Exception:
-            pass
-        if data == "libretranslate" and not self._lt_help_shown:
+        if provider is None:
+            try:
+                provider = self.translator_combo.currentData()
+            except Exception:
+                provider = None
+        if provider == "libretranslate" and not self._lt_help_shown:
             self._lt_help_shown = True
             text = (
                 "LibreTranslate setup options:\n\n"
