@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPalette, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QDockWidget,
     QFileDialog,
     QInputDialog,
     QMainWindow,
@@ -59,6 +60,7 @@ from .translation_dialog import TranslationWorkspaceDialog
 from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
+from .tag_flyout_panel import TagFlyoutPanel
 from ..services import edit_session
 from ..logging_setup import get_log_file_path
 
@@ -132,8 +134,44 @@ class MainWindow(QMainWindow):
         self._favorites_panel.layout_rename_requested.connect(self._on_rename_layout)
         self._favorites_panel.layout_move_requested.connect(self._on_move_layout)
         self._favorites_panel.position_changed.connect(self._change_favorites_position)
-        self._favorites_panel.tag_apply_requested.connect(self._apply_tags_from_panel)
-        self._favorites_panel.tag_filter_requested.connect(self._filter_tags_from_panel)
+        self._favorites_visible = True
+
+        self._tag_panel = TagFlyoutPanel(self)
+        self._tag_panel.tag_apply_requested.connect(self._apply_tags_from_panel)
+        self._tag_panel.tag_filter_requested.connect(self._filter_tags_from_panel)
+        self._tag_dock = QDockWidget("Tags", self)
+        self._tag_dock.setObjectName("TagDock")
+        self._tag_dock.setWidget(self._tag_panel)
+        self._tag_dock.setAllowedAreas(Qt.LeftDockWidgetArea)
+        self._tag_dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
+        self._tag_dock.visibilityChanged.connect(self._on_tag_dock_visibility_changed)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._tag_dock)
+        self._tag_dock.hide()
+        self._tag_toggle_action = self._tag_dock.toggleViewAction()
+        self._tag_toggle_action.setText("Tags")
+        self._tag_toggle_action.setStatusTip("Show or hide the tag panel")
+        self._tag_toggle_action.setToolTip("Show or hide the tag panel")
+        self._tag_toggle_action.setShortcut(QKeySequence(self._cfg.shortcuts.get("toggle_tags", "Ctrl+Shift+L")))
+        self._tag_toggle_action.setShortcutVisibleInContextMenu(True)
+        self._favorites_toggle_action = QAction("Favorites", self)
+        self._favorites_toggle_action.setCheckable(True)
+        self._favorites_toggle_action.setChecked(True)
+        self._favorites_toggle_action.setStatusTip("Show or hide the favorites panel")
+        self._favorites_toggle_action.setToolTip("Show or hide the favorites panel")
+        self._favorites_toggle_action.setShortcut(QKeySequence(self._cfg.shortcuts.get("toggle_favorites", "Ctrl+Shift+B")))
+        self._favorites_toggle_action.setShortcutVisibleInContextMenu(True)
+        self._favorites_toggle_action.triggered.connect(self._toggle_favorites_panel)
+        # Place the tag toggle before the wide address bar to keep it visible.
+        if getattr(self, "_address_bar_action", None):
+            self._toolbar.insertAction(self._address_bar_action, self._favorites_toggle_action)
+            self._toolbar.insertAction(self._address_bar_action, self._tag_toggle_action)
+            self._toolbar.insertSeparator(self._address_bar_action)
+        else:
+            self._toolbar.addSeparator()
+            self._toolbar.addAction(self._favorites_toggle_action)
+            self._toolbar.addAction(self._tag_toggle_action)
+        self.addAction(self._tag_toggle_action)
+        self.addAction(self._favorites_toggle_action)
 
         self._main_splitter: Optional[QSplitter] = None
         self._favorites_index = 0
@@ -246,9 +284,10 @@ class MainWindow(QMainWindow):
         self._address_bar = QLineEdit(self)
         self._address_bar.setPlaceholderText("Path")
         self._address_bar.setClearButtonEnabled(True)
-        self._address_bar.setMinimumWidth(320)
+        self._address_bar.setMinimumWidth(280)
+        self._address_bar.setMaximumWidth(520)
         self._address_bar.returnPressed.connect(self._on_address_bar_return)
-        tb.addWidget(self._address_bar)
+        self._address_bar_action = tb.addWidget(self._address_bar)
 
         # Local path autocompletion in address bar
         try:
@@ -977,6 +1016,17 @@ QLabel { color: #eee8d5; }
         self._container_layout.addWidget(splitter, 1)
         self._update_splitter_sizes()
 
+    def _on_tag_dock_visibility_changed(self, visible: bool) -> None:
+        if visible:
+            self._refresh_tag_suggestions()
+        action = getattr(self, "_tag_toggle_action", None)
+        if action:
+            action.blockSignals(True)
+            try:
+                action.setChecked(visible)
+            finally:
+                action.blockSignals(False)
+
     # ---------------------------------------------------------- layout tabs --
     def _refresh_layout_tabs(self) -> None:
         if not self._layout_tabs:
@@ -991,6 +1041,10 @@ QLabel { color: #eee8d5; }
                 self._layout_tab_ids.append(layout.id)
         finally:
             self._layout_tabs.blockSignals(False)
+
+    # ------------------------------------------------------- tag flyout toggle --
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
 
     def _on_layout_tab_clicked(self, index: int) -> None:
         if 0 <= index < len(self._layout_tab_ids):
@@ -1040,15 +1094,43 @@ QLabel { color: #eee8d5; }
         self._arrange_favorites_panel()
         self._persist_state(save_workspaces=False)
 
+    def _toggle_favorites_panel(self, checked: bool = True) -> None:
+        self._set_favorites_visible(bool(checked))
+
+    def _set_favorites_visible(self, visible: bool) -> None:
+        self._favorites_visible = bool(visible)
+        try:
+            self._favorites_panel.setVisible(self._favorites_visible)
+        except Exception:
+            pass
+        if getattr(self, "_favorites_toggle_action", None):
+            self._favorites_toggle_action.blockSignals(True)
+            try:
+                self._favorites_toggle_action.setChecked(self._favorites_visible)
+            finally:
+                self._favorites_toggle_action.blockSignals(False)
+        # Adjust splitter sizes so workspace takes remaining space when hidden
+        if self._main_splitter:
+            if not self._favorites_visible:
+                try:
+                    if self._favorites_index == 0:
+                        self._main_splitter.setSizes([0, 1])
+                    else:
+                        self._main_splitter.setSizes([1, 0])
+                except Exception:
+                    pass
+            else:
+                self._update_splitter_sizes()
+
     def _refresh_favorites_panel(self) -> None:
         self._favorites_panel.set_favorites([fav.to_config() for fav in self._favorites_manager.all()])
         self._favorites_panel.set_layouts([layout.to_config() for layout in self._layouts_manager.all()])
         self._refresh_tag_suggestions()
 
     def _refresh_tag_suggestions(self) -> None:
-        if getattr(self, "_favorites_panel", None):
-            tags = self._tag_store.all_tags("local")
-            self._favorites_panel.set_tag_suggestions(tags)
+        tags = self._tag_store.all_tags("local")
+        if getattr(self, "_tag_panel", None):
+            self._tag_panel.set_tag_suggestions(tags)
 
     # ------------------------------------------------------------- favorites/layouts
     def _on_favorite_selected(self, favorite_id: str) -> None:

@@ -26,6 +26,7 @@
 - [x] Check-out/edit workflow (local edit sessions); upload edited file(s) back to SharePoint.
 - [ ] True SharePoint CheckOut/CheckIn via REST (locks, comments, versioning).
 - [ ] Saved searches and smart folders (e.g., modified last 7 days; has French content).
+- [ ] Translation panes follow base SharePoint navigation reliably (fix sync issues).
 
 ## Search & Navigation
 - [x] Tag filtering and tag search for local workspaces.
@@ -35,13 +36,9 @@
 ## Quality & Controls
 - [ ] Glossary/termbase management: CSV import, priority rules, per-client sets.
 - [ ] Translation memory cache with fuzzy matches and reuse indicators.
-- [ ] Redaction mode: detect PII/terms to mask before sharing/summarizing.
 
-## Performance & UX
-- [ ] Background prefetch of next/prev pages; LRU cache for render + AI results.
-- [x] Streaming progress indicators for downloads and long operations with cancel.
-- [ ] Keyboard palette actions: summarize page (S), overlay toggle (T), next hit (N).
 
 ## Runner & DevX
 - [x] One-shot runner to start backend + app in one command.
 - [ ] Packaging/distribution scripts for Windows/macOS/Linux.
+- [ ] User-configurable shortcut system (hotkey editor with presets & validation).

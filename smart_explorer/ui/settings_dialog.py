@@ -4,12 +4,23 @@ import webbrowser
 from urllib.parse import urlparse
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton, QWidget, QMessageBox, QComboBox, QCheckBox
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QTextEdit,
+    QPushButton,
+    QWidget,
+    QMessageBox,
+    QComboBox,
+    QCheckBox,
 )
 
 from ..api.backend_client import BackendClient
 from ..settings import AppConfig, save_config
 from ..services.browser_cookies import collect_sharepoint_cookies
+from .shortcut_settings_dialog import ShortcutSettingsDialog
 
 
 class SettingsDialog(QDialog):
@@ -199,6 +210,15 @@ class SettingsDialog(QDialog):
         cgrid.addWidget(left); cgrid.addWidget(right)
         root.addLayout(cgrid)
 
+        # Shortcuts
+        shortcuts_row = QHBoxLayout()
+        shortcuts_row.addWidget(QLabel("Keyboard Shortcuts:", self))
+        self.btn_shortcuts = QPushButton("Configure...", self)
+        self.btn_shortcuts.clicked.connect(self._open_shortcuts)
+        shortcuts_row.addWidget(self.btn_shortcuts)
+        shortcuts_row.addStretch(1)
+        root.addLayout(shortcuts_row)
+
         # Buttons
         btn_row = QHBoxLayout()
         self.btn_save = QPushButton("Save", self)
@@ -222,6 +242,17 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
         self._apply_api_key_mask()
+
+    def _open_shortcuts(self) -> None:
+        try:
+            dlg = ShortcutSettingsDialog(self.cfg.shortcuts or {}, self)
+            if dlg.exec() == QDialog.Accepted:
+                updated = dlg.result_shortcuts()
+                self.cfg.shortcuts = updated
+                save_config(self.cfg)
+                QMessageBox.information(self, "Shortcuts", "Shortcuts saved. Restart may be required for all changes to take effect.")
+        except Exception:
+            QMessageBox.warning(self, "Shortcuts", "Unable to open shortcut editor.")
 
     def _on_save(self):
         try:

@@ -1,7 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, asdict
-from typing import Optional
+from typing import Optional, Dict
 
 
 CONFIG_FILENAME = "smart_explorer_config.json"
@@ -36,6 +36,8 @@ class AppConfig:
     preview_cache_dir: Optional[str] = None
     # LibreTranslate settings
     libretranslate_url: Optional[str] = None  # e.g., https://libretranslate.de
+    # User shortcuts (action -> key sequence string)
+    shortcuts: Optional[Dict[str, str]] = None
 
 
 def _config_path() -> str:
@@ -78,6 +80,15 @@ def load_config() -> AppConfig:
     cfg.favorites_bar_size = max(120, min(600, cfg.favorites_bar_size))
     if cfg.favorites_bar_size == 240:
         cfg.favorites_bar_size = 200
+    # Shortcuts defaults
+    if cfg.shortcuts is None or not isinstance(cfg.shortcuts, dict):
+        cfg.shortcuts = {}
+    defaults = {
+        "toggle_tags": "Ctrl+Shift+L",
+        "toggle_favorites": "Ctrl+Shift+B",
+    }
+    for key, val in defaults.items():
+        cfg.shortcuts.setdefault(key, val)
     # Keep sp_base_url as-is (may be None)
     # Allow env var override for API key
     env_key = os.getenv("OPENAI_API_KEY")

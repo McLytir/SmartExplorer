@@ -192,6 +192,7 @@ class WorkspacePane(QFrame):
         self._suspend_history = False
         self._base_root_path: str = ""
         self._sharepoint_mode = definition.kind == "sharepoint"
+        self._sharepoint_focus_path: Optional[str] = None
         self.tag_store = tag_store
         if definition.kind == "translation" and definition.base_workspace_id:
             base = base_panes.get(definition.base_workspace_id)
@@ -292,6 +293,7 @@ class WorkspacePane(QFrame):
         self._suppress_selection_signal = False
         self._suppress_expand_signal = False
 
+        self._sharepoint_focus_path = self._initial_sharepoint_path()
         self._build_models()
         self._base_root_path = self._determine_base_root()
         self._initialize_history()
@@ -605,6 +607,16 @@ class WorkspacePane(QFrame):
 
     # --- navigation --------------------------------------------------------
     def current_path(self) -> str:
+        if self._sharepoint_mode:
+            focus = self._sharepoint_focus_path
+            if not focus:
+                if self.definition.kind == "sharepoint":
+                    focus = self.definition.server_relative_url or "/"
+                elif self.definition.kind == "translation" and self.definition.base_workspace_id:
+                    base = self._base_panes.get(self.definition.base_workspace_id)
+                    if base:
+                        focus = base.current_path()
+            return self._normalize_path(focus or self._path_for_source_index(self.root_source_index()))
         return self._normalize_path(self._path_for_source_index(self.root_source_index()))
 
     def navigate_back(self) -> None:
@@ -659,6 +671,8 @@ class WorkspacePane(QFrame):
             self._update_navigation_buttons()
         else:
             self._update_navigation_buttons()
+        if self._sharepoint_mode:
+            self._set_sharepoint_focus(target, emit=False)
         return True
 
     def navigate_to_path(self, path: str) -> bool:
@@ -797,6 +811,40 @@ class WorkspacePane(QFrame):
         else:
             base = self.current_path()
         return self._normalize_path(base)
+
+    def _initial_sharepoint_path(self) -> Optional[str]:
+        if not self._sharepoint_mode:
+            return None
+        if self.definition.kind == "sharepoint":
+            return self._normalize_path(self.definition.server_relative_url or "/")
+        if self.definition.kind == "translation" and self.definition.base_workspace_id:
+            base = self._base_panes.get(self.definition.base_workspace_id)
+            if base:
+                return base.current_path()
+        return None
+
+    def _set_sharepoint_focus(self, path: Optional[str], *, emit: bool = False) -> None:
+        if not self._sharepoint_mode:
+            return
+        normalized = self._normalize_path(path)
+        if not normalized:
+            return
+        if normalized == self._sharepoint_focus_path:
+            return
+        self._sharepoint_focus_path = normalized
+        if emit and self.definition.kind != "translation":
+            self.path_changed.emit(self.definition.id, normalized)
+
+    def _sharepoint_selection_path(self) -> Optional[str]:
+        if not self._sharepoint_mode:
+            return None
+        for item in self.current_items():
+            if item.get("is_dir"):
+                return item.get("path")
+        paths = self.current_paths()
+        if paths:
+            return self._parent_path(paths[0])
+        return None
 
     def _normalize_path(self, path: Optional[str]) -> str:
         if not path:
@@ -951,6 +999,10 @@ class WorkspacePane(QFrame):
         if self._suppress_selection_signal:
             return
         self.selection_changed.emit(self.definition.id)
+        if self._sharepoint_mode:
+            focus = self._sharepoint_selection_path()
+            if focus:
+                self._set_sharepoint_focus(focus, emit=True)
 
     def _on_expanded(self, index: QModelIndex) -> None:
         if self._suppress_expand_signal:
