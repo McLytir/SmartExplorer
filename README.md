@@ -105,3 +105,16 @@ Logging & Debugging
 - On Linux, install `xdg-utils` for reliable “open”/“reveal”.
 - SharePoint errors often stem from expired cookies — recapture or resend cookies in Settings.
 - SharePoint previews download to ~/Downloads/SmartExplorerPreviews (mirroring the SharePoint path) so you can open the cached file directly even if the in-app renderer fails.
+Web-First Desktop Shell (Initial)
+- A first migration slice is available under `web_shell/electron` and `smart_explorer/web`.
+- It runs a web UI inside Electron while keeping native local filesystem access via backend APIs.
+- Current web-shell coverage: two-pane local browse, copy/cut/paste, rename, delete, create folder.
+- Run:
+  - Backend: `python -m smart_explorer.backend.server` (or let Electron auto-start it)
+  - Shell install: `cd web_shell/electron && npm install`
+  - Shell start: `npm start`
+
+Web Shell Status (Expanded)
+- The web-first shell now supports both Local and SharePoint pane modes.
+- Includes copy/cut/paste, rename/delete/new-folder, upload, translation rename, tags, media preview, text extraction, and AI summary/Q&A.
+- See `web_shell/electron/README.md` for full details and run instructions.

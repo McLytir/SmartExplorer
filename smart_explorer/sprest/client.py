@@ -537,6 +537,110 @@ class SharePointClient:
             info["modifiedBy"] = mod.get("Title")
         return info
 
+    def _stringify_field_value(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (str, int, float, bool)):
+            return str(value)
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    def list_item_fields(self, server_relative_url: str, *, is_folder: bool, site_relative_url: Optional[str] = None) -> List[dict]:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        if is_folder:
+            item_url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')/ListItemAllFields"
+            fields_url = (
+                f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')/ListItemAllFields/ParentList/Fields"
+                f"?$select=InternalName,Title,TypeAsString,ReadOnlyField,Hidden,Required,Choices"
+            )
+        else:
+            item_url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/ListItemAllFields"
+            fields_url = (
+                f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/ListItemAllFields/ParentList/Fields"
+                f"?$select=InternalName,Title,TypeAsString,ReadOnlyField,Hidden,Required,Choices"
+            )
+        with self._http() as client:
+            item_resp = client.get(item_url)
+            item_resp.raise_for_status()
+            fields_resp = client.get(fields_url)
+            fields_resp.raise_for_status()
+        item_payload = item_resp.json().get("d", item_resp.json()) or {}
+        fields_payload = fields_resp.json()
+        fields = fields_payload.get("value") or fields_payload.get("d", {}).get("results", [])
+
+        out: List[dict] = []
+        for f in fields:
+            internal_name = str(f.get("InternalName") or "").strip()
+            if not internal_name:
+                continue
+            value = self._stringify_field_value(item_payload.get(internal_name))
+            raw_choices = f.get("Choices")
+            choices: List[str] = []
+            if isinstance(raw_choices, dict):
+                choices = [str(x) for x in (raw_choices.get("results") or []) if str(x).strip()]
+            elif isinstance(raw_choices, list):
+                choices = [str(x) for x in raw_choices if str(x).strip()]
+            out.append({
+                "internal_name": internal_name,
+                "title": f.get("Title") or internal_name,
+                "type": f.get("TypeAsString") or "",
+                "read_only": bool(f.get("ReadOnlyField")),
+                "hidden": bool(f.get("Hidden")),
+                "required": bool(f.get("Required")),
+                "value": value,
+                "choices": choices,
+            })
+        out.sort(key=lambda x: (x["hidden"], x["read_only"], str(x["title"]).lower()))
+        return out
+
+    def update_item_fields(self, server_relative_url: str, fields: Dict[str, str], *, is_folder: bool, site_relative_url: Optional[str] = None) -> List[dict]:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        if is_folder:
+            url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')/ListItemAllFields/ValidateUpdateListItem"
+        else:
+            url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/ListItemAllFields/ValidateUpdateListItem"
+
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "Content-Type": "application/json;odata=verbose",
+            "Accept": "application/json;odata=nometadata",
+        }
+        form_values = []
+        for k, v in (fields or {}).items():
+            key = str(k or "").strip()
+            if not key:
+                continue
+            form_values.append({
+                "FieldName": key,
+                "FieldValue": "" if v is None else str(v),
+            })
+        body = {"formValues": form_values, "bNewDocumentUpdate": False}
+        with self._http() as client:
+            resp = client.post(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        results = data.get("value") or data.get("d", {}).get("ValidateUpdateListItem", {}).get("results", []) or data.get("ValidateUpdateListItem", [])
+        if isinstance(results, dict):
+            results = results.get("results", [])
+        normalized: List[dict] = []
+        for r in results or []:
+            normalized.append({
+                "field": r.get("FieldName") or r.get("FieldInternalName") or "",
+                "has_exception": bool(r.get("HasException")),
+                "error_message": r.get("ErrorMessage") or "",
+                "value": r.get("FieldValue") or "",
+            })
+        return normalized
+
     def web_url(self, server_relative_url: str, *,
                 site_relative_url: Optional[str] = None) -> str:
         site = self._resolve_site(site_relative_url)
@@ -549,6 +653,60 @@ class SharePointClient:
                    site_relative_url: Optional[str] = None) -> str:
         # Basic fallback: return direct browser URL. More advanced link generation can be added later.
         return self.web_url(server_relative_url, site_relative_url=site_relative_url)
+
+    def get_effective_permissions(self, server_relative_url: str, *, is_folder: bool, site_relative_url: Optional[str] = None) -> dict:
+        if not server_relative_url.startswith("/"):
+            server_relative_url = "/" + server_relative_url
+        enc = urllib.parse.quote(server_relative_url, safe="/")
+        site_base = self._resolve_site(site_relative_url)
+        if is_folder:
+            url = (
+                f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc}')/ListItemAllFields"
+                f"?$select=EffectiveBasePermissions"
+            )
+        else:
+            url = (
+                f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc}')/ListItemAllFields"
+                f"?$select=EffectiveBasePermissions"
+            )
+        with self._http() as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        payload = data.get("d", data) or {}
+        perms = payload.get("EffectiveBasePermissions") or {}
+        low_raw = perms.get("Low", 0)
+        high_raw = perms.get("High", 0)
+        try:
+            low = int(str(low_raw), 0)
+        except Exception:
+            try:
+                low = int(str(low_raw))
+            except Exception:
+                low = 0
+        try:
+            high = int(str(high_raw), 0)
+        except Exception:
+            try:
+                high = int(str(high_raw))
+            except Exception:
+                high = 0
+
+        # Common SPBasePermissions (low bits)
+        view_items = bool(low & 0x00000001)
+        add_items = bool(low & 0x00000002)
+        edit_items = bool(low & 0x00000004)
+        delete_items = bool(low & 0x00000008)
+        open_items = bool(low & 0x00000020)
+        return {
+            "raw_low": low,
+            "raw_high": high,
+            "can_view": view_items or open_items,
+            "can_add": add_items,
+            "can_edit": edit_items,
+            "can_delete": delete_items,
+            "can_open": open_items,
+        }
 
     # New helpers
     def _resolve_site(self, site_relative_url: Optional[str]) -> str:

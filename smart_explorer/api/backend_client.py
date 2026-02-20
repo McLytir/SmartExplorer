@@ -14,20 +14,30 @@ class BackendClient:
         except Exception:
             pass
         self.base_url = base_url.rstrip("/")
+        self._short_client = httpx.Client(timeout=15.0)
+        self._long_client = httpx.Client(timeout=60.0)
+
+    def close(self) -> None:
+        for client in (self._short_client, self._long_client):
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        self.close()
 
     def get(self, path: str, params: Optional[dict] = None) -> dict:
-        with httpx.Client(timeout=15.0) as c:
-            r = c.get(self.base_url + path, params=params)
-            r.raise_for_status()
-            return r.json()
+        r = self._short_client.get(self.base_url + path, params=params)
+        r.raise_for_status()
+        return r.json()
 
     def post(self, path: str, json: Optional[dict] = None) -> dict:
-        with httpx.Client(timeout=60.0) as c:
-            r = c.post(self.base_url + path, json=json)
-            r.raise_for_status()
-            if r.headers.get("content-type", "").startswith("application/json"):
-                return r.json()
-            return {}
+        r = self._long_client.post(self.base_url + path, json=json)
+        r.raise_for_status()
+        if r.headers.get("content-type", "").startswith("application/json"):
+            return r.json()
+        return {}
 
     def get_settings(self) -> dict:
         return self.get("/api/settings")
@@ -133,16 +143,32 @@ class BackendClient:
         }
         return self.post("/api/sp/properties", json=payload)
 
+    def sp_metadata_fields(self, server_relative_url: str, *, is_folder: bool = False, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "server_relative_url": server_relative_url,
+            "is_folder": is_folder,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/sp/metadata-fields", json=payload)
+
+    def sp_metadata_update(self, server_relative_url: str, fields: Dict[str, str], *, is_folder: bool = False, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "server_relative_url": server_relative_url,
+            "is_folder": is_folder,
+            "site_relative_url": site_relative_url,
+            "fields": fields or {},
+        }
+        return self.post("/api/sp/metadata-update", json=payload)
+
     def sp_download(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> bytes:
         params = {
             "server_relative_url": server_relative_url,
         }
         if site_relative_url:
             params["site_relative_url"] = site_relative_url
-        with httpx.Client(timeout=60.0) as c:
-            r = c.get(self.base_url + "/api/sp/download", params=params)
-            r.raise_for_status()
-            return r.content
+        r = self._long_client.get(self.base_url + "/api/sp/download", params=params)
+        r.raise_for_status()
+        return r.content
 
     # Check-out / Check-in / Versions
     def sp_checkout(self, server_relative_url: str, *, site_relative_url: Optional[str] = None) -> dict:
@@ -176,7 +202,21 @@ class BackendClient:
         params = {"server_relative_url": server_relative_url, "label": label}
         if site_relative_url:
             params["site_relative_url"] = site_relative_url
-        with httpx.Client(timeout=60.0) as c:
-            r = c.get(self.base_url + "/api/sp/download-version", params=params)
-            r.raise_for_status()
-            return r.content
+        r = self._long_client.get(self.base_url + "/api/sp/download-version", params=params)
+        r.raise_for_status()
+        return r.content
+
+    def global_search(self, **kwargs) -> dict:
+        return self.post("/api/search/global", json=kwargs)
+
+    def bulk_dry_run(self, **kwargs) -> dict:
+        return self.post("/api/bulk/dry-run", json=kwargs)
+
+    def permissions_probe(self, kind: str, path: str, *, is_folder: bool = False, site_relative_url: Optional[str] = None) -> dict:
+        payload = {
+            "kind": kind,
+            "path": path,
+            "is_folder": is_folder,
+            "site_relative_url": site_relative_url,
+        }
+        return self.post("/api/permissions/probe", json=payload)

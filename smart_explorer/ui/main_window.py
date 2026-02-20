@@ -35,6 +35,7 @@ from ..api.backend_client import BackendClient
 from ..services.rename_service import apply_rename, safe_new_name
 from ..services.tag_store import TagStore
 from ..services.ai_summary import AISummarizer
+from ..services.ai_tagging import AITagger, TaggingError
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
 
         self._translator: Translator = self._create_translator()
         self._summarizer: Optional[AISummarizer] = self._create_summarizer()
+        self._tagger: Optional[AITagger] = self._create_tagger()
         self._translation_cache = TranslationCache()
         self._ignore_patterns = self._cfg.ignore_patterns or []
 
@@ -172,6 +174,13 @@ class MainWindow(QMainWindow):
             self._toolbar.addAction(self._tag_toggle_action)
         self.addAction(self._tag_toggle_action)
         self.addAction(self._favorites_toggle_action)
+        self._favorites_panel.tag_apply_requested.connect(self._apply_tags_from_panel)
+        self._favorites_panel.tag_filter_requested.connect(self._filter_tags_from_panel)
+        self._favorites_panel.tag_ai_requested.connect(self._apply_ai_tags_from_panel)
+        self._favorites_panel.tag_remove_requested.connect(self._remove_tag_everywhere)
+        self._favorites_panel.tag_open_requested.connect(self._open_tag_result)
+        self._favorites_panel.tag_reveal_requested.connect(self._reveal_tag_result)
+        self._favorites_panel.tag_copy_requested.connect(self._copy_tag_result)
 
         self._main_splitter: Optional[QSplitter] = None
         self._favorites_index = 0
@@ -1129,8 +1138,11 @@ QLabel { color: #eee8d5; }
 
     def _refresh_tag_suggestions(self) -> None:
         tags = self._tag_store.all_tags("local")
+        stats = self._tag_store.tag_stats("local")
         if getattr(self, "_tag_panel", None):
             self._tag_panel.set_tag_suggestions(tags)
+        if getattr(self, "_favorites_panel", None):
+            self._favorites_panel.set_tag_suggestions(stats)
 
     # ------------------------------------------------------------- favorites/layouts
     def _on_favorite_selected(self, favorite_id: str) -> None:
@@ -1628,11 +1640,128 @@ QLabel { color: #eee8d5; }
         self._refresh_tag_suggestions()
 
     def _filter_tags_from_panel(self, text: str) -> None:
+        tags = [segment.strip().lstrip("#") for segment in text.split(",") if segment.strip()]
+        matches = self._tag_store.find_paths_for_tags("local", tags)
+        self._favorites_panel.set_tag_results(matches)
         pane = self._active_pane()
-        if not pane:
+        if pane and pane.definition.kind == "local":
+            try:
+                pane._tag_filter.setText(text)
+            except Exception:
+                pass
+        if tags and not matches:
+            self.statusBar().showMessage("No files matched those tags.", 4000)
+        elif matches:
+            self.statusBar().showMessage(f"{len(matches)} files matched tag filter.", 4000)
+
+    def _apply_ai_tags_from_panel(self) -> None:
+        pane = self._active_pane()
+        if not pane or pane.definition.kind != "local":
+            QMessageBox.information(self, "AI Tags", "Select a local workspace to tag.")
+            return
+        items = pane.current_items()
+        if not items:
+            QMessageBox.information(self, "AI Tags", "Select at least one file or folder.")
+            return
+        tagger = self._tagger or self._create_tagger()
+        self._tagger = tagger
+        if not tagger:
+            QMessageBox.warning(self, "AI Tags", "Add an OpenAI key in Settings to enable AI tagging.")
+            return
+        QApplication.setOverrideCursor(Qt.BusyCursor)
+        updated = 0
+        errors: list[str] = []
+        for item in items:
+            path = os.path.abspath(item.get("path") or "")
+            if not path or item.get("is_dir"):
+                continue
+            if not os.path.exists(path):
+                continue
+            existing = self._tag_store.get_tags("local", path)
+            try:
+                suggestions = tagger.suggest_tags(path, existing)
+            except TaggingError as exc:
+                errors.append(f"{os.path.basename(path)}: {exc}")
+                continue
+            normalized = sorted({*(tag.lower() for tag in existing), *(tag.lower() for tag in suggestions)})
+            if normalized != existing:
+                self._tag_store.set_tags("local", path, normalized)
+                updated += 1
+        QApplication.restoreOverrideCursor()
+        if updated:
+            pane.refresh_filters()
+            self._refresh_tag_suggestions()
+            self._favorites_panel.set_tag_results([])
+            self.statusBar().showMessage(f"AI updated tags for {updated} file(s).", 5000)
+        if errors:
+            sample = "\n".join(errors[:3])
+            if len(errors) > 3:
+                sample += "\n..."
+            QMessageBox.warning(self, "AI Tags", f"Some files could not be tagged:\n{sample}")
+        elif not updated:
+            QMessageBox.information(self, "AI Tags", "AI did not produce new tags for the selection.")
+
+    def _remove_tag_everywhere(self, tag: str) -> None:
+        if not tag:
+            return
+        removed = self._tag_store.remove_tag_everywhere("local", tag)
+        if removed:
+            self._favorites_panel.set_tag_results([])
+            self._refresh_tag_suggestions()
+            self.statusBar().showMessage(f"Removed #{tag} from all tagged files.", 4000)
+        else:
+            QMessageBox.information(self, "Tags", f"No files were tagged with #{tag}.")
+
+    def _open_tag_result(self, path: str) -> None:
+        if not path:
+            return
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "Open", f"{path} no longer exists.")
+            return
+        target = path if os.path.isfile(path) else os.path.abspath(path)
+        try:
+            if os.name == "nt":
+                os.startfile(target)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", target])
+            else:
+                subprocess.Popen(["xdg-open", target])
+        except Exception as exc:
+            QMessageBox.warning(self, "Open", f"Failed to open {target}: {exc}")
+
+    def _reveal_tag_result(self, path: str) -> None:
+        if not path:
+            return
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "Reveal", f"{path} no longer exists.")
             return
         try:
-            pane._tag_filter.setText(text)
+            if sys.platform.startswith("win"):
+                if os.path.isfile(path):
+                    subprocess.Popen(["explorer.exe", "/select,", path])
+                else:
+                    subprocess.Popen(["explorer.exe", os.path.abspath(path)])
+            elif sys.platform == "darwin":
+                if os.path.isfile(path):
+                    subprocess.Popen(["open", "-R", path])
+                else:
+                    subprocess.Popen(["open", path])
+            else:
+                target = path if os.path.isdir(path) else os.path.dirname(path) or path
+                if target:
+                    try:
+                        subprocess.Popen(["xdg-open", target])
+                    except Exception:
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+        except Exception as exc:
+            QMessageBox.warning(self, "Reveal", f"Failed to reveal {path}: {exc}")
+
+    def _copy_tag_result(self, path: str) -> None:
+        if not path:
+            return
+        try:
+            QGuiApplication.clipboard().setText(path)
+            self.statusBar().showMessage(f"Copied path: {path}", 3000)
         except Exception:
             pass
 
@@ -3355,6 +3484,24 @@ QLabel { color: #eee8d5; }
         except Exception:
             return None
 
+    def _create_tagger(self) -> Optional[AITagger]:
+        key = (self._cfg.api_key or "").strip()
+        try:
+            from ..services import secret_store
+        except Exception:
+            secret_store = None  # type: ignore
+        if not key and secret_store:
+            try:
+                key = secret_store.get_secret("OPENAI_API_KEY") or ""
+            except Exception:
+                key = ""
+        if not key:
+            return None
+        try:
+            return AITagger(api_key=key, model=self._cfg.model, timeout=45.0)
+        except Exception:
+            return None
+
     def _create_translator(self) -> Translator:
         provider = getattr(self._cfg, "translator_provider", "auto") or "auto"
         # Secrets
@@ -3424,9 +3571,14 @@ QLabel { color: #eee8d5; }
         dlg = SettingsDialog(self._cfg, self)
         dlg.exec()
         self._cfg = load_config()
+        try:
+            self._backend.close()
+        except Exception:
+            pass
         self._backend = BackendClient(getattr(self._cfg, "backend_url", None) or "http://127.0.0.1:5001")
         self._translator = self._create_translator()
         self._summarizer = self._create_summarizer()
+        self._tagger = self._create_tagger()
         self._ignore_patterns = self._cfg.ignore_patterns or []
         self._apply_theme()
         for pane in self._workspace_panes.values():
@@ -3445,4 +3597,8 @@ QLabel { color: #eee8d5; }
     # ---------------------------------------------------------------- misc ---
     def closeEvent(self, event) -> None:  # noqa: N802
         self._persist_state()
+        try:
+            self._backend.close()
+        except Exception:
+            pass
         super().closeEvent(event)

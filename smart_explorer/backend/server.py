@@ -4,10 +4,15 @@ import base64
 import fnmatch
 import io
 import logging
+import mimetypes
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
+from pathlib import Path
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -17,12 +22,18 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..settings import load_config, save_config, AppConfig
+from ..services.ai_summary import AISummarizer, SummaryError, extract_text_snippet
+from ..services.tag_store import TagStore
 from ..translation_cache import TranslationCache
 from ..translators.base import IdentityTranslator, Translator
-from ..translators.openai_translator import OpenAITranslator
+try:
+    from ..translators.openai_translator import OpenAITranslator
+except Exception:
+    OpenAITranslator = None  # type: ignore[assignment]
 from ..sprest.client import SharePointClient
 
 
@@ -57,6 +68,161 @@ class RenameRequest(BaseModel):
 
 class RenameResponse(BaseModel):
     newPath: str
+
+
+class LocalPathResponse(BaseModel):
+    path: str
+
+
+class LocalMkdirRequest(BaseModel):
+    path: str
+    name: str
+
+
+class LocalRenameRequest(BaseModel):
+    path: str
+    new_name: str
+
+
+class LocalBatchRequest(BaseModel):
+    sources: List[str]
+    destination: Optional[str] = None
+
+
+class GlobalSearchRequest(BaseModel):
+    query: str
+    include_local: bool = True
+    include_sharepoint: bool = True
+    local_root: Optional[str] = None
+    site_relative_url: Optional[str] = None
+    library_server_relative_url: Optional[str] = None
+    max_results: int = 200
+    max_depth: int = 6
+    include_dirs: bool = False
+    extensions: Optional[List[str]] = None
+
+
+class GlobalSearchItem(BaseModel):
+    kind: str
+    name: str
+    path: str
+    isDir: bool
+    size: int = 0
+    site_relative_url: Optional[str] = None
+    parent: Optional[str] = None
+
+
+class GlobalSearchResponse(BaseModel):
+    results: List[GlobalSearchItem]
+    errors: List[str]
+
+
+class PermissionProbeRequest(BaseModel):
+    kind: str = "local"  # local | sharepoint
+    path: str
+    is_folder: bool = False
+    site_relative_url: Optional[str] = None
+
+
+class BulkDryRunSourceItem(BaseModel):
+    kind: str
+    path: str
+    isDir: bool = False
+    name: Optional[str] = None
+    site_relative_url: Optional[str] = None
+
+
+class BulkDryRunRequest(BaseModel):
+    operation: str  # copy | move | delete
+    conflict_policy: str = "skip"  # skip | fail | overwrite
+    destination_kind: Optional[str] = None  # local | sharepoint
+    destination_path: Optional[str] = None
+    destination_site_relative_url: Optional[str] = None
+    sources: List[BulkDryRunSourceItem]
+
+
+class LocalBulkRenameItem(BaseModel):
+    path: str
+    new_name: str
+
+
+class LocalBulkRenameRequest(BaseModel):
+    items: List[LocalBulkRenameItem]
+
+
+class RenamePreviewItem(BaseModel):
+    path: str
+    new_name: str
+    is_folder: Optional[bool] = None
+
+
+class RenamePreviewRequest(BaseModel):
+    items: List[RenamePreviewItem]
+    site_relative_url: Optional[str] = None
+
+
+class LocalOpenRequest(BaseModel):
+    path: str
+    reveal: bool = False
+
+
+class LocalWriteRequest(BaseModel):
+    destination_dir: str
+    filename: str
+    content_base64: str
+    overwrite: bool = False
+
+
+class LocalTransferFromSharePointRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    server_relative_urls: List[str]
+    destination_dir: str
+    move: bool = False
+
+
+class SharePointTransferFromLocalRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    source_paths: List[str]
+    destination_server_relative_url: str
+    move: bool = False
+    overwrite: bool = False
+
+
+class TagGetResponse(BaseModel):
+    kind: str
+    identifier: str
+    tags: List[str]
+
+
+class TagSetRequest(BaseModel):
+    kind: str = "local"
+    identifier: str
+    tags: List[str]
+
+
+class TagSearchRequest(BaseModel):
+    kind: str = "local"
+    tags: List[str]
+
+
+class SummaryRequest(BaseModel):
+    path: str
+    preset: str = "short"
+    tone: str = "neutral"
+
+
+class QuestionRequest(BaseModel):
+    path: str
+    question: str
+
+
+class ItemAIRequest(BaseModel):
+    kind: str = "local"  # local | sharepoint
+    path: str
+    site_relative_url: Optional[str] = None
+    preset: Optional[str] = "short"
+    tone: Optional[str] = "neutral"
+    question: Optional[str] = None
 
 
 class TranslateItem(BaseModel):
@@ -108,7 +274,7 @@ def create_translator(cfg: AppConfig) -> Translator:
             api_key = secret_store.get_secret("OPENAI_API_KEY") or ""
         except Exception:
             api_key = ""
-    if api_key:
+    if api_key and OpenAITranslator is not None:
         return OpenAITranslator(api_key=api_key, model=cfg.model)
     return IdentityTranslator()
 
@@ -129,8 +295,374 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def _normalize_local_path(path: Optional[str]) -> str:
+    p = (path or "").strip()
+    if not p:
+        return os.path.expanduser("~")
+    return os.path.abspath(os.path.expanduser(p))
+
+
+def _list_windows_roots() -> List[ListItem]:
+    roots: List[ListItem] = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = f"{letter}:\\"
+        if os.path.exists(drive):
+            roots.append(ListItem(name=drive, path=drive, isDir=True, size=0, mtime=0.0))
+    return roots
+
+
+def _local_list(path: str) -> List[ListItem]:
+    if os.name == "nt" and path in {"\\", "/", ""}:
+        return _list_windows_roots()
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
+
+    out: List[ListItem] = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    out.append(
+                        ListItem(
+                            name=entry.name,
+                            path=entry.path,
+                            isDir=is_dir,
+                            size=0 if is_dir else int(stat.st_size),
+                            mtime=float(stat.st_mtime),
+                        )
+                    )
+                except Exception:
+                    continue
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {path}")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list directory: {exc}")
+
+    out.sort(key=lambda x: (not x.isDir, x.name.lower()))
+    return out
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = (name or "").strip().replace("..", "_")
+    cleaned = "".join("_" if ch in '<>:"|?*' else ch for ch in cleaned)
+    return cleaned or "file"
+
+
+def _preview_local_rename(items: List[RenamePreviewItem]) -> List[dict]:
+    seen_targets: set[str] = set()
+    out: List[dict] = []
+    for item in items:
+        src = _normalize_local_path(item.path)
+        new_name = (item.new_name or "").strip()
+        result = {"path": src, "new_name": new_name, "ok": False, "reason": ""}
+        if not os.path.exists(src):
+            result["reason"] = "missing_source"
+            out.append(result)
+            continue
+        if not new_name or new_name in {".", ".."}:
+            result["reason"] = "invalid_name"
+            out.append(result)
+            continue
+        dst = os.path.join(os.path.dirname(src), new_name)
+        dst_key = os.path.normcase(dst)
+        if dst_key in seen_targets:
+            result["reason"] = "duplicate_target_in_batch"
+            out.append(result)
+            continue
+        seen_targets.add(dst_key)
+        if os.path.normcase(src) == dst_key:
+            result["reason"] = "same_name"
+            out.append(result)
+            continue
+        if os.path.exists(dst):
+            result["reason"] = "target_exists"
+            out.append(result)
+            continue
+        result["ok"] = True
+        result["reason"] = "ok"
+        out.append(result)
+    return out
+
+
+def _preview_sp_rename(items: List[RenamePreviewItem], site_relative_url: Optional[str]) -> List[dict]:
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    illegal = set("\\/:*?\"<>|")
+    out: List[dict] = []
+    seen_targets: set[str] = set()
+    parent_to_names: Dict[str, set[str]] = {}
+
+    parents = {((it.path or "").rsplit("/", 1)[0] or "/") for it in items if it.path}
+    for parent in parents:
+        try:
+            folders, files = sp_client.list_children(parent, site_relative_url=site_relative_url)
+            names: set[str] = set()
+            for row in folders:
+                nm = str(row.get("Name") or "").strip()
+                if nm:
+                    names.add(nm.lower())
+            for row in files:
+                nm = str(row.get("Name") or "").strip()
+                if nm:
+                    names.add(nm.lower())
+            parent_to_names[parent] = names
+        except Exception:
+            parent_to_names[parent] = set()
+
+    for item in items:
+        src = item.path or ""
+        new_name = (item.new_name or "").strip()
+        parent = src.rsplit("/", 1)[0] if "/" in src else "/"
+        result = {"path": src, "new_name": new_name, "ok": False, "reason": ""}
+        if not src:
+            result["reason"] = "missing_source"
+            out.append(result)
+            continue
+        if not new_name or any(ch in illegal for ch in new_name):
+            result["reason"] = "invalid_name"
+            out.append(result)
+            continue
+        current = src.rsplit("/", 1)[-1]
+        if current.lower() == new_name.lower():
+            result["reason"] = "same_name"
+            out.append(result)
+            continue
+        target_key = f"{parent}/{new_name}".lower()
+        if target_key in seen_targets:
+            result["reason"] = "duplicate_target_in_batch"
+            out.append(result)
+            continue
+        seen_targets.add(target_key)
+        existing = parent_to_names.get(parent, set())
+        if new_name.lower() in existing:
+            result["reason"] = "target_exists"
+            out.append(result)
+            continue
+        result["ok"] = True
+        result["reason"] = "ok"
+        out.append(result)
+    return out
+
+
+def _search_name_match(name: str, query: str) -> bool:
+    return query in (name or "").lower()
+
+
+def _search_ext_match(name: str, extensions: Optional[set[str]]) -> bool:
+    if not extensions:
+        return True
+    ext = os.path.splitext(name or "")[1].lower()
+    return ext in extensions
+
+
+def _global_search_local(req: GlobalSearchRequest, query: str, ext_filter: Optional[set[str]], errors: List[str]) -> List[GlobalSearchItem]:
+    root = _normalize_local_path(req.local_root)
+    if not os.path.isdir(root):
+        errors.append(f"Local root not found: {root}")
+        return []
+    max_results = max(1, min(int(req.max_results or 200), 2000))
+    max_depth = max(0, min(int(req.max_depth or 6), 32))
+    include_dirs = bool(req.include_dirs)
+
+    out: List[GlobalSearchItem] = []
+    root_depth = root.rstrip("\\/").count(os.sep)
+    try:
+        for cur, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            rel_depth = cur.rstrip("\\/").count(os.sep) - root_depth
+            if rel_depth >= max_depth:
+                dirs[:] = []
+            dirs[:] = [d for d in dirs if not _is_ignored(os.path.join(cur, d), d, cfg.ignore_patterns)]
+
+            if include_dirs:
+                for d in dirs:
+                    if len(out) >= max_results:
+                        return out
+                    full = os.path.join(cur, d)
+                    if _search_name_match(d, query):
+                        out.append(GlobalSearchItem(
+                            kind="local",
+                            name=d,
+                            path=full,
+                            isDir=True,
+                            size=0,
+                            parent=cur,
+                        ))
+            for f in files:
+                if len(out) >= max_results:
+                    return out
+                if _is_ignored(os.path.join(cur, f), f, cfg.ignore_patterns):
+                    continue
+                if not _search_name_match(f, query):
+                    continue
+                if not _search_ext_match(f, ext_filter):
+                    continue
+                full = os.path.join(cur, f)
+                size = 0
+                try:
+                    size = int(os.path.getsize(full))
+                except Exception:
+                    size = 0
+                out.append(GlobalSearchItem(
+                    kind="local",
+                    name=f,
+                    path=full,
+                    isDir=False,
+                    size=size,
+                    parent=cur,
+                ))
+    except Exception as exc:
+        errors.append(f"Local search failed: {exc}")
+    return out
+
+
+def _global_search_sharepoint(req: GlobalSearchRequest, query: str, ext_filter: Optional[set[str]], errors: List[str]) -> List[GlobalSearchItem]:
+    if not sp_client:
+        errors.append("SharePoint base URL not configured")
+        return []
+    max_results = max(1, min(int(req.max_results or 200), 2000))
+    max_depth = max(0, min(int(req.max_depth or 6), 32))
+    include_dirs = bool(req.include_dirs)
+    out: List[GlobalSearchItem] = []
+
+    site = req.site_relative_url
+    root = req.library_server_relative_url
+    if not root:
+        try:
+            libs = sp_client.list_libraries(site_relative_url=site)
+            if libs:
+                root = libs[0].get("server_relative_url")
+        except Exception as exc:
+            errors.append(f"Failed to resolve SharePoint library: {exc}")
+            return []
+    if not root:
+        errors.append("SharePoint library root not resolved")
+        return []
+
+    queue: List[Tuple[str, int]] = [(root, 0)]
+    visited: set[str] = set()
+    while queue and len(out) < max_results:
+        folder, depth = queue.pop(0)
+        key = f"{site or ''}|{folder}"
+        if key in visited:
+            continue
+        visited.add(key)
+        try:
+            folders, files = sp_client.list_children(folder, site_relative_url=site)
+        except Exception as exc:
+            errors.append(f"SharePoint list failed for {folder}: {exc}")
+            continue
+
+        for row in folders:
+            name = str(row.get("Name") or "")
+            path = str(row.get("ServerRelativeUrl") or "")
+            if include_dirs and _search_name_match(name, query):
+                out.append(GlobalSearchItem(
+                    kind="sharepoint",
+                    name=name,
+                    path=path,
+                    isDir=True,
+                    size=0,
+                    site_relative_url=site,
+                    parent=folder,
+                ))
+                if len(out) >= max_results:
+                    break
+            if depth < max_depth and path:
+                queue.append((path, depth + 1))
+        if len(out) >= max_results:
+            break
+        for row in files:
+            if len(out) >= max_results:
+                break
+            name = str(row.get("Name") or "")
+            if not _search_name_match(name, query):
+                continue
+            if not _search_ext_match(name, ext_filter):
+                continue
+            path = str(row.get("ServerRelativeUrl") or "")
+            size = 0
+            try:
+                size = int(row.get("Length") or 0)
+            except Exception:
+                size = 0
+            out.append(GlobalSearchItem(
+                kind="sharepoint",
+                name=name,
+                path=path,
+                isDir=False,
+                size=size,
+                site_relative_url=site,
+                parent=folder,
+            ))
+    return out
+
+
+def _destination_existing_names(kind: Optional[str], path: Optional[str], site_relative_url: Optional[str]) -> set[str]:
+    names: set[str] = set()
+    if kind == "local":
+        p = _normalize_local_path(path)
+        if not os.path.isdir(p):
+            raise HTTPException(status_code=404, detail=f"Destination not found: {p}")
+        try:
+            with os.scandir(p) as it:
+                for e in it:
+                    names.add((e.name or "").lower())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to inspect local destination: {exc}")
+        return names
+    if kind == "sharepoint":
+        if not sp_client:
+            raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+        folder = path or "/"
+        try:
+            folders, files = sp_client.list_children(folder, site_relative_url=site_relative_url)
+            for row in folders:
+                names.add(str(row.get("Name") or "").lower())
+            for row in files:
+                names.add(str(row.get("Name") or "").lower())
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to inspect SharePoint destination: {exc}")
+        return names
+    return names
+
+
+def _prepare_item_for_ai(kind: str, path: str, site_relative_url: Optional[str]) -> tuple[str, Optional[str]]:
+    item_kind = (kind or "local").strip().lower()
+    if item_kind == "local":
+        local_path = _normalize_local_path(path)
+        if not os.path.isfile(local_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {local_path}")
+        return local_path, None
+    if item_kind == "sharepoint":
+        if not sp_client:
+            raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+        try:
+            content = sp_client.download_file(path, site_relative_url=site_relative_url)
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"SharePoint download failed: {exc}")
+        suffix = os.path.splitext(path)[1] or ".bin"
+        tmp = tempfile.NamedTemporaryFile(prefix="smx_ai_", suffix=suffix, delete=False)
+        tmp.write(content)
+        tmp.close()
+        return tmp.name, tmp.name
+    raise HTTPException(status_code=400, detail=f"Unsupported kind: {kind}")
+
+
 translator = create_translator(cfg)
 cache = TranslationCache()
+tag_store = TagStore()
+_local_rename_undo_stack: List[List[Dict[str, str]]] = []
 sp_client: Optional[SharePointClient] = None
 if getattr(cfg, "sp_base_url", None):
     try:
@@ -154,6 +686,27 @@ from collections import OrderedDict
 
 _MEM_CACHE_MAX = 500
 _mem_cache: "OrderedDict[str, str]" = OrderedDict()
+
+_web_dir = Path(__file__).resolve().parent.parent / "web"
+if _web_dir.exists():
+    app.mount("/web", StaticFiles(directory=str(_web_dir), html=True), name="web")
+
+
+def _create_summarizer() -> Optional[AISummarizer]:
+    api_key = (cfg.api_key or "").strip()
+    if not api_key:
+        try:
+            from ..services import secret_store
+
+            api_key = secret_store.get_secret("OPENAI_API_KEY") or ""
+        except Exception:
+            api_key = ""
+    if not api_key:
+        return None
+    try:
+        return AISummarizer(api_key=api_key, model=cfg.model, timeout=45.0)
+    except Exception:
+        return None
 
 
 def _mem_get(key: str) -> Optional[str]:
@@ -231,6 +784,570 @@ def _schedule_prefetch(folders: List[dict], site: Optional[str]) -> None:
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/local/home", response_model=LocalPathResponse)
+def local_home():
+    return LocalPathResponse(path=os.path.expanduser("~"))
+
+
+@app.get("/api/local/list", response_model=ListResponse)
+def local_list(path: Optional[str] = Query(None)):
+    normalized = _normalize_local_path(path)
+    items = _local_list(normalized)
+    return ListResponse(path=normalized, items=items)
+
+
+@app.post("/api/search/global", response_model=GlobalSearchResponse)
+def global_search(req: GlobalSearchRequest):
+    q = (req.query or "").strip().lower()
+    if not q:
+        return GlobalSearchResponse(results=[], errors=[])
+    ext_filter: Optional[set[str]] = None
+    if req.extensions:
+        normalized = set()
+        for raw in req.extensions:
+            e = (raw or "").strip().lower()
+            if not e:
+                continue
+            if not e.startswith("."):
+                e = "." + e
+            normalized.add(e)
+        if normalized:
+            ext_filter = normalized
+
+    errors: List[str] = []
+    out: List[GlobalSearchItem] = []
+    limit = max(1, min(int(req.max_results or 200), 2000))
+
+    if req.include_local:
+        rows = _global_search_local(req, q, ext_filter, errors)
+        out.extend(rows[: max(0, limit - len(out))])
+    if req.include_sharepoint and len(out) < limit:
+        rows = _global_search_sharepoint(req, q, ext_filter, errors)
+        out.extend(rows[: max(0, limit - len(out))])
+
+    return GlobalSearchResponse(results=out[:limit], errors=errors[:50])
+
+
+@app.post("/api/permissions/probe")
+def permissions_probe(req: PermissionProbeRequest):
+    kind = (req.kind or "local").strip().lower()
+    if kind == "local":
+        p = _normalize_local_path(req.path)
+        exists = os.path.exists(p)
+        parent = os.path.dirname(p) if not req.is_folder else p
+        return {
+            "kind": "local",
+            "path": p,
+            "exists": exists,
+            "can_read": bool(exists and os.access(p, os.R_OK)),
+            "can_write": bool(exists and os.access(p, os.W_OK)),
+            "can_execute": bool(exists and os.access(p, os.X_OK)),
+            "can_delete": bool(parent and os.path.isdir(parent) and os.access(parent, os.W_OK)),
+        }
+    if kind == "sharepoint":
+        if not sp_client:
+            raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+        try:
+            perms = sp_client.get_effective_permissions(
+                req.path,
+                is_folder=bool(req.is_folder),
+                site_relative_url=req.site_relative_url,
+            )
+            return {
+                "kind": "sharepoint",
+                "path": req.path,
+                "site_relative_url": req.site_relative_url,
+                **perms,
+            }
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to probe SharePoint permissions: {exc}")
+    raise HTTPException(status_code=400, detail=f"Unsupported kind: {req.kind}")
+
+
+@app.post("/api/bulk/dry-run")
+def bulk_dry_run(req: BulkDryRunRequest):
+    op = (req.operation or "").strip().lower()
+    if op not in {"copy", "move", "delete"}:
+        raise HTTPException(status_code=400, detail="Unsupported operation")
+    policy = (req.conflict_policy or "skip").strip().lower()
+    if policy not in {"skip", "fail", "overwrite"}:
+        policy = "skip"
+    rows: List[dict] = []
+    errors: List[str] = []
+    if not req.sources:
+        return {"ok": True, "rows": [], "summary": {"total": 0, "ready": 0, "blocked": 0}}
+
+    existing_names: set[str] = set()
+    if op != "delete":
+        existing_names = _destination_existing_names(
+            (req.destination_kind or "").strip().lower(),
+            req.destination_path,
+            req.destination_site_relative_url,
+        )
+
+    blocked = 0
+    for src in req.sources:
+        name = (src.name or os.path.basename(src.path or "") or "").strip()
+        path = src.path or ""
+        if not path:
+            blocked += 1
+            rows.append({"path": path, "status": "blocked", "reason": "missing_path"})
+            continue
+        if op == "delete":
+            rows.append({"path": path, "status": "ok", "reason": "delete"})
+            continue
+        conflict = name.lower() in existing_names if name else False
+        if conflict and policy != "overwrite":
+            blocked += 1
+            rows.append({"path": path, "status": "blocked", "reason": "target_exists"})
+        else:
+            rows.append({"path": path, "status": "ok", "reason": "overwrite" if conflict else "ok"})
+
+    ready = len(rows) - blocked
+    return {
+        "ok": blocked == 0,
+        "rows": rows,
+        "errors": errors[:50],
+        "summary": {"total": len(rows), "ready": ready, "blocked": blocked},
+    }
+
+
+@app.post("/api/local/mkdir", response_model=LocalPathResponse)
+def local_mkdir(req: LocalMkdirRequest):
+    parent = _normalize_local_path(req.path)
+    if not os.path.isdir(parent):
+        raise HTTPException(status_code=404, detail=f"Directory not found: {parent}")
+    name = (req.name or "").strip()
+    if not name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid directory name")
+    target = os.path.join(parent, name)
+    try:
+        os.makedirs(target, exist_ok=False)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail=f"Path already exists: {target}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create directory: {exc}")
+    return LocalPathResponse(path=target)
+
+
+@app.post("/api/local/rename", response_model=LocalPathResponse)
+def local_rename(req: LocalRenameRequest):
+    src = _normalize_local_path(req.path)
+    if not os.path.exists(src):
+        raise HTTPException(status_code=404, detail=f"Path not found: {src}")
+    new_name = (req.new_name or "").strip()
+    if not new_name or new_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid new name")
+    dst = os.path.join(os.path.dirname(src), new_name)
+    if os.path.exists(dst):
+        raise HTTPException(status_code=409, detail=f"Path already exists: {dst}")
+    try:
+        os.rename(src, dst)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Rename failed: {exc}")
+    return LocalPathResponse(path=dst)
+
+
+@app.post("/api/local/copy")
+def local_copy(req: LocalBatchRequest):
+    destination = _normalize_local_path(req.destination)
+    if not os.path.isdir(destination):
+        raise HTTPException(status_code=404, detail=f"Destination not found: {destination}")
+    if not req.sources:
+        return {"ok": True, "copied": 0}
+
+    copied = 0
+    errors: List[str] = []
+    for src_raw in req.sources:
+        src = _normalize_local_path(src_raw)
+        if not os.path.exists(src):
+            errors.append(f"Missing: {src}")
+            continue
+        dst = os.path.join(destination, os.path.basename(src))
+        if os.path.exists(dst):
+            errors.append(f"Exists: {dst}")
+            continue
+        try:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            copied += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    return {"ok": len(errors) == 0, "copied": copied, "errors": errors}
+
+
+@app.post("/api/local/move")
+def local_move(req: LocalBatchRequest):
+    destination = _normalize_local_path(req.destination)
+    if not os.path.isdir(destination):
+        raise HTTPException(status_code=404, detail=f"Destination not found: {destination}")
+    if not req.sources:
+        return {"ok": True, "moved": 0}
+
+    moved = 0
+    errors: List[str] = []
+    for src_raw in req.sources:
+        src = _normalize_local_path(src_raw)
+        if not os.path.exists(src):
+            errors.append(f"Missing: {src}")
+            continue
+        dst = os.path.join(destination, os.path.basename(src))
+        if os.path.exists(dst):
+            errors.append(f"Exists: {dst}")
+            continue
+        try:
+            shutil.move(src, dst)
+            moved += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    return {"ok": len(errors) == 0, "moved": moved, "errors": errors}
+
+
+@app.post("/api/local/delete")
+def local_delete(req: LocalBatchRequest):
+    if not req.sources:
+        return {"ok": True, "deleted": 0}
+
+    deleted = 0
+    errors: List[str] = []
+    for src_raw in req.sources:
+        src = _normalize_local_path(src_raw)
+        if not os.path.exists(src):
+            errors.append(f"Missing: {src}")
+            continue
+        try:
+            if os.path.isdir(src):
+                shutil.rmtree(src)
+            else:
+                os.remove(src)
+            deleted += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    return {"ok": len(errors) == 0, "deleted": deleted, "errors": errors}
+
+
+@app.post("/api/local/bulk-rename")
+def local_bulk_rename(req: LocalBulkRenameRequest):
+    if not req.items:
+        return {"ok": True, "renamed": 0, "errors": []}
+    batch_undo: List[Dict[str, str]] = []
+    renamed = 0
+    errors: List[str] = []
+    for item in req.items:
+        src = _normalize_local_path(item.path)
+        if not os.path.exists(src):
+            errors.append(f"Missing: {src}")
+            continue
+        new_name = (item.new_name or "").strip()
+        if not new_name or new_name in {".", ".."}:
+            errors.append(f"Invalid name for {src}")
+            continue
+        dst = os.path.join(os.path.dirname(src), new_name)
+        if os.path.exists(dst):
+            errors.append(f"Exists: {dst}")
+            continue
+        try:
+            os.rename(src, dst)
+            batch_undo.append({"old": src, "new": dst})
+            renamed += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    if batch_undo:
+        _local_rename_undo_stack.append(batch_undo)
+    return {"ok": len(errors) == 0, "renamed": renamed, "errors": errors}
+
+
+@app.post("/api/local/rename-preview")
+def local_rename_preview(req: RenamePreviewRequest):
+    return {"items": _preview_local_rename(req.items or [])}
+
+
+@app.post("/api/local/undo-rename")
+def local_undo_rename():
+    if not _local_rename_undo_stack:
+        return {"ok": True, "undone": 0, "errors": []}
+    batch = _local_rename_undo_stack.pop()
+    undone = 0
+    errors: List[str] = []
+    for op in reversed(batch):
+        src = op.get("new") or ""
+        dst = op.get("old") or ""
+        if not src or not dst:
+            continue
+        if not os.path.exists(src):
+            errors.append(f"Missing: {src}")
+            continue
+        try:
+            os.rename(src, dst)
+            undone += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    return {"ok": len(errors) == 0, "undone": undone, "errors": errors}
+
+
+@app.post("/api/local/open")
+def local_open(req: LocalOpenRequest):
+    path = _normalize_local_path(req.path)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+    try:
+        if req.reveal:
+            target = path if os.path.isdir(path) else os.path.dirname(path)
+            if sys.platform.startswith("win"):
+                if os.path.isfile(path):
+                    subprocess.Popen(["explorer.exe", "/select,", path])
+                else:
+                    subprocess.Popen(["explorer.exe", target])
+            elif sys.platform == "darwin":
+                if os.path.isfile(path):
+                    subprocess.Popen(["open", "-R", path])
+                else:
+                    subprocess.Popen(["open", target])
+            else:
+                subprocess.Popen(["xdg-open", target])
+        else:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to open path: {exc}")
+    return {"ok": True}
+
+
+@app.get("/api/local/download")
+def local_download(path: str = Query(...)):
+    normalized = _normalize_local_path(path)
+    if not os.path.isfile(normalized):
+        raise HTTPException(status_code=404, detail=f"File not found: {normalized}")
+    filename = os.path.basename(normalized) or "download"
+    mime, _ = mimetypes.guess_type(filename)
+    media_type = mime or "application/octet-stream"
+    with open(normalized, "rb") as fh:
+        data = fh.read()
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": _build_content_disposition(filename)},
+    )
+
+
+@app.post("/api/local/write", response_model=LocalPathResponse)
+def local_write(req: LocalWriteRequest):
+    destination_dir = _normalize_local_path(req.destination_dir)
+    if not os.path.isdir(destination_dir):
+        raise HTTPException(status_code=404, detail=f"Destination not found: {destination_dir}")
+    filename = _safe_filename(req.filename)
+    target = os.path.join(destination_dir, filename)
+    if os.path.exists(target) and not req.overwrite:
+        raise HTTPException(status_code=409, detail=f"Path already exists: {target}")
+    try:
+        content = base64.b64decode(req.content_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 content")
+    try:
+        with open(target, "wb") as fh:
+            fh.write(content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Write failed: {exc}")
+    return LocalPathResponse(path=target)
+
+
+@app.post("/api/transfer/sp-to-local")
+def transfer_sharepoint_to_local(req: LocalTransferFromSharePointRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    destination_dir = _normalize_local_path(req.destination_dir)
+    if not os.path.isdir(destination_dir):
+        raise HTTPException(status_code=404, detail=f"Destination not found: {destination_dir}")
+    transferred = 0
+    errors: List[str] = []
+    for src in req.server_relative_urls:
+        try:
+            content = sp_client.download_file(src, site_relative_url=req.site_relative_url)
+            name = _safe_filename(os.path.basename(src))
+            target = os.path.join(destination_dir, name)
+            if os.path.exists(target):
+                errors.append(f"Exists: {target}")
+                continue
+            with open(target, "wb") as fh:
+                fh.write(content)
+            if req.move:
+                try:
+                    sp_client.delete_item(src, is_folder=False, site_relative_url=req.site_relative_url, recycle=True)
+                except Exception:
+                    pass
+            transferred += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    return {"ok": len(errors) == 0, "transferred": transferred, "errors": errors}
+
+
+@app.post("/api/transfer/local-to-sp")
+def transfer_local_to_sharepoint(req: SharePointTransferFromLocalRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    if not req.destination_server_relative_url:
+        raise HTTPException(status_code=400, detail="destination_server_relative_url is required")
+    transferred = 0
+    errors: List[str] = []
+    for src_raw in req.source_paths:
+        src = _normalize_local_path(src_raw)
+        if not os.path.isfile(src):
+            errors.append(f"Not a file: {src}")
+            continue
+        try:
+            with open(src, "rb") as fh:
+                data = fh.read()
+            name = _safe_filename(os.path.basename(src))
+            sp_client.upload_file(
+                req.destination_server_relative_url,
+                name,
+                data,
+                site_relative_url=req.site_relative_url,
+                overwrite=req.overwrite,
+            )
+            if req.move:
+                try:
+                    os.remove(src)
+                except Exception:
+                    pass
+            transferred += 1
+        except Exception as exc:
+            errors.append(f"{src}: {exc}")
+    return {"ok": len(errors) == 0, "transferred": transferred, "errors": errors}
+
+
+@app.get("/api/tags/stats")
+def tags_stats(kind: str = Query("local")):
+    return {"kind": kind, "stats": tag_store.tag_stats(kind)}
+
+
+@app.get("/api/tags/get", response_model=TagGetResponse)
+def tags_get(kind: str = Query("local"), identifier: str = Query(...)):
+    return TagGetResponse(kind=kind, identifier=identifier, tags=tag_store.get_tags(kind, identifier))
+
+
+@app.post("/api/tags/set")
+def tags_set(req: TagSetRequest):
+    tag_store.set_tags(req.kind, req.identifier, req.tags)
+    return {"ok": True, "tags": tag_store.get_tags(req.kind, req.identifier)}
+
+
+@app.post("/api/tags/search")
+def tags_search(req: TagSearchRequest):
+    return {"kind": req.kind, "results": tag_store.find_paths_for_tags(req.kind, req.tags)}
+
+
+@app.post("/api/ai/summary")
+def ai_summary(req: SummaryRequest):
+    path = _normalize_local_path(req.path)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    summarizer = _create_summarizer()
+    if summarizer is None:
+        raise HTTPException(status_code=400, detail="OpenAI key is not configured.")
+    try:
+        result = summarizer.summarize_file(path, preset=req.preset, tone=req.tone)
+        return {"preset": result.preset, "tone": result.tone, "summary": result.summary}
+    except SummaryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Summary failed: {exc}")
+
+
+@app.post("/api/ai/question")
+def ai_question(req: QuestionRequest):
+    path = _normalize_local_path(req.path)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    summarizer = _create_summarizer()
+    if summarizer is None:
+        raise HTTPException(status_code=400, detail="OpenAI key is not configured.")
+    try:
+        answer = summarizer.ask_question(path, req.question)
+        return {"answer": answer}
+    except SummaryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Question failed: {exc}")
+
+
+@app.post("/api/ai/summary-item")
+def ai_summary_item(req: ItemAIRequest):
+    summarizer = _create_summarizer()
+    if summarizer is None:
+        raise HTTPException(status_code=400, detail="OpenAI key is not configured.")
+    temp_path: Optional[str] = None
+    local_path, temp_path = _prepare_item_for_ai(req.kind, req.path, req.site_relative_url)
+    try:
+        result = summarizer.summarize_file(local_path, preset=req.preset or "short", tone=req.tone or "neutral")
+        return {"preset": result.preset, "tone": result.tone, "summary": result.summary}
+    except SummaryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Summary failed: {exc}")
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+@app.post("/api/ai/question-item")
+def ai_question_item(req: ItemAIRequest):
+    summarizer = _create_summarizer()
+    if summarizer is None:
+        raise HTTPException(status_code=400, detail="OpenAI key is not configured.")
+    if not (req.question or "").strip():
+        raise HTTPException(status_code=400, detail="Question is required.")
+    temp_path: Optional[str] = None
+    local_path, temp_path = _prepare_item_for_ai(req.kind, req.path, req.site_relative_url)
+    try:
+        answer = summarizer.ask_question(local_path, req.question or "")
+        return {"answer": answer}
+    except SummaryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Question failed: {exc}")
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+@app.get("/api/local/extract-text")
+def local_extract_text(path: str = Query(...), limit: int = Query(8000)):
+    normalized = _normalize_local_path(path)
+    if not os.path.isfile(normalized):
+        raise HTTPException(status_code=404, detail=f"File not found: {normalized}")
+    text = extract_text_snippet(normalized, limit=max(1000, min(50000, int(limit))))
+    return {"path": normalized, "text": text}
+
+
+@app.post("/api/extract-text-item")
+def extract_text_item(req: ItemAIRequest):
+    local_path, temp_path = _prepare_item_for_ai(req.kind, req.path, req.site_relative_url)
+    try:
+        text = extract_text_snippet(local_path, limit=12000)
+        return {"path": req.path, "kind": req.kind, "text": text}
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
@@ -773,6 +1890,11 @@ class SPRenameRequest(BaseModel):
     site_relative_url: Optional[str] = None
 
 
+@app.post("/api/sp/rename-preview")
+def sp_rename_preview(req: RenamePreviewRequest):
+    return {"items": _preview_sp_rename(req.items or [], req.site_relative_url)}
+
+
 @app.post("/api/sp/rename", response_model=RenameResponse)
 def sp_rename(req: SPRenameRequest):
     if not sp_client:
@@ -921,6 +2043,70 @@ def sp_properties(req: SPPropertiesRequest):
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get properties: {e}")
+
+
+class SPMetadataField(BaseModel):
+    internal_name: str
+    title: str
+    type: str
+    read_only: bool
+    hidden: bool
+    required: bool
+    value: str
+    choices: Optional[List[str]] = None
+
+
+class SPMetadataFieldsResponse(BaseModel):
+    fields: List[SPMetadataField]
+
+
+class SPMetadataFieldsRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    server_relative_url: str
+    is_folder: bool = False
+
+
+class SPMetadataUpdateRequest(BaseModel):
+    site_relative_url: Optional[str] = None
+    server_relative_url: str
+    is_folder: bool = False
+    fields: Dict[str, str]
+
+
+@app.post("/api/sp/metadata-fields", response_model=SPMetadataFieldsResponse)
+def sp_metadata_fields(req: SPMetadataFieldsRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        rows = sp_client.list_item_fields(
+            req.server_relative_url,
+            is_folder=req.is_folder,
+            site_relative_url=req.site_relative_url,
+        )
+        return SPMetadataFieldsResponse(fields=[SPMetadataField(**r) for r in rows])
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load metadata fields: {e}")
+
+
+@app.post("/api/sp/metadata-update")
+def sp_metadata_update(req: SPMetadataUpdateRequest):
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    try:
+        result = sp_client.update_item_fields(
+            req.server_relative_url,
+            req.fields or {},
+            is_folder=req.is_folder,
+            site_relative_url=req.site_relative_url,
+        )
+        failures = [r for r in result if r.get("has_exception")]
+        return {"ok": len(failures) == 0, "results": result, "failures": failures}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update metadata: {e}")
 
 
 def main(argv: Optional[list[str]] = None):

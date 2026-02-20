@@ -497,9 +497,9 @@ class SettingsDialog(QDialog):
             self._lt_url_row.setVisible(bool(visible))
         if hasattr(self, "_lt_key_row") and self._lt_key_row is not None:
             self._lt_key_row.setVisible(bool(visible))
-        # OpenAI key row only when OpenAI selected
+        # Keep OpenAI key editable regardless of translator choice (summaries/tagging rely on it).
         if hasattr(self, "_openai_key_row") and self._openai_key_row is not None:
-            self._openai_key_row.setVisible(provider == "openai")
+            self._openai_key_row.setVisible(True)
         # Backend URL row only when Backend selected
         if hasattr(self, "_backend_url_row") and self._backend_url_row is not None:
             self._backend_url_row.setVisible(provider == "backend")

@@ -1,0 +1,306 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartExplorer Web Shell</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SmartExplorer Web Shell</div>
+    <div class="actions">
+      <input id="langInput" type="text" value="English" title="Translation language" />
+      <button id="toggleTranslateBtn">Translate: Off</button>
+      <button id="renameTranslatedBtn">Apply Translation Rename</button>
+      <button id="undoRenameBtn">Undo Rename</button>
+      <button id="copyBtn">Copy</button>
+      <button id="cutBtn">Cut</button>
+      <button id="pasteBtn">Paste</button>
+      <button id="renameBtn">Rename</button>
+      <button id="deleteBtn">Delete</button>
+      <button id="mkdirBtn">New Folder</button>
+      <button id="openBtn">Open</button>
+      <button id="revealBtn">Reveal</button>
+      <button id="addFavoriteBtn">Add Favorite</button>
+      <button id="exportConfigBtn">Export Config</button>
+      <button id="importConfigBtn">Import Config</button>
+      <span id="status"></span>
+    </div>
+  </header>
+  <input id="importConfigInput" type="file" accept="application/json" hidden />
+
+  <section class="session-tabs-wrap">
+    <div class="layout-tabs-title">Workspace Sessions</div>
+    <div class="layout-tabs">
+      <div id="sessionTabs" class="layout-tabs"></div>
+      <button id="newSessionBtn" class="layout-tab">+ New Session</button>
+      <button id="duplicateSessionBtn" class="layout-tab">Duplicate Session</button>
+      <button id="renameSessionBtn" class="layout-tab">Rename Session</button>
+      <button id="closeSessionBtn" class="layout-tab">Close Session</button>
+    </div>
+  </section>
+
+  <section class="layout-tabs-wrap">
+    <div class="layout-tabs-title">Quick Layout Tabs</div>
+    <div id="layoutTabs" class="layout-tabs"></div>
+  </section>
+
+  <main class="panes">
+    <section class="pane" data-pane="left">
+      <div class="pane-head">
+        <strong>Left</strong>
+        <select id="leftKind">
+          <option value="local">Local</option>
+          <option value="sharepoint">SharePoint</option>
+        </select>
+        <select id="leftSite"></select>
+        <select id="leftLibrary"></select>
+        <input id="leftPath" type="text" />
+        <button id="leftGo">Go</button>
+        <button id="leftUploadBtn">Upload</button>
+      </div>
+      <div class="pane-filter-row">
+        <input id="leftFilterInput" type="text" placeholder="Filter this pane..." />
+      </div>
+      <div id="leftList" class="list"></div>
+    </section>
+
+    <section class="pane" data-pane="right">
+      <div class="pane-head">
+        <strong>Right</strong>
+        <select id="rightKind">
+          <option value="local">Local</option>
+          <option value="sharepoint">SharePoint</option>
+        </select>
+        <select id="rightSite"></select>
+        <select id="rightLibrary"></select>
+        <input id="rightPath" type="text" />
+        <button id="rightGo">Go</button>
+        <button id="rightUploadBtn">Upload</button>
+      </div>
+      <div class="pane-filter-row">
+        <input id="rightFilterInput" type="text" placeholder="Filter this pane..." />
+      </div>
+      <div id="rightList" class="list"></div>
+    </section>
+  </main>
+
+  <section class="inspector">
+    <div class="inspector-col">
+      <h3>Favorites / Layouts</h3>
+      <div class="row">
+        <input id="favoriteNameInput" type="text" placeholder="optional favorite label" />
+        <button id="saveFavoriteBtn">Save Current</button>
+      </div>
+      <div id="favoritesList" class="favorites"></div>
+      <hr />
+      <div class="row">
+        <input id="layoutNameInput" type="text" placeholder="layout name" />
+        <button id="saveLayoutBtn">Save Layout</button>
+      </div>
+      <div id="layoutsList" class="favorites"></div>
+      <hr />
+      <h4>Recent Locations</h4>
+      <div id="recentList" class="favorites"></div>
+      <hr />
+      <h4>Operation Log</h4>
+      <pre id="opLogOutput"></pre>
+      <div class="row">
+        <button id="desktopNotifyBtn">Desktop Alerts: Off</button>
+        <button id="clearNotificationsBtn">Clear Notifications</button>
+      </div>
+      <div id="notificationsList" class="notifications-list"></div>
+      <hr />
+      <h4>Global Search</h4>
+      <div class="row">
+        <input id="searchQueryInput" type="text" placeholder="search name..." />
+        <button id="searchRunBtn">Run</button>
+      </div>
+      <div class="row">
+        <label><input id="searchIncludeLocal" type="checkbox" checked /> Local</label>
+        <label><input id="searchIncludeSp" type="checkbox" checked /> SharePoint</label>
+      </div>
+      <div class="row">
+        <input id="searchExtInput" type="text" placeholder=".pdf,.docx (optional)" />
+        <input id="searchMaxInput" type="number" min="10" max="2000" value="200" />
+      </div>
+      <div class="row">
+        <select id="searchFilterSelect"></select>
+        <button id="searchFilterSaveBtn">Save Filter</button>
+        <button id="searchFilterDeleteBtn">Delete</button>
+      </div>
+      <div id="searchResults" class="search-results"></div>
+      <hr />
+      <h4>Bulk Operations + Jobs</h4>
+      <div class="row">
+        <select id="bulkOpType">
+          <option value="copy">Copy</option>
+          <option value="move">Move</option>
+          <option value="delete">Delete</option>
+        </select>
+        <select id="bulkTargetPane">
+          <option value="left">Target: Left</option>
+          <option value="right">Target: Right</option>
+        </select>
+      </div>
+      <div class="row">
+        <select id="bulkConflictPolicy">
+          <option value="skip">Conflict: Skip</option>
+          <option value="fail">Conflict: Fail</option>
+          <option value="overwrite">Conflict: Overwrite</option>
+        </select>
+        <button id="bulkDryRunBtn">Dry Run</button>
+        <button id="bulkQueueBtn">Queue Job</button>
+      </div>
+      <pre id="bulkDryRunOutput"></pre>
+      <div class="row">
+        <button id="jobsPauseBtn">Pause</button>
+        <button id="jobsResumeBtn">Resume</button>
+        <button id="jobsCancelBtn">Cancel</button>
+        <button id="jobsRetryFailedBtn">Retry Failed</button>
+      </div>
+      <div class="row">
+        <button id="jobsExportBtn">Export Jobs</button>
+        <button id="jobsClearFinishedBtn">Clear Finished</button>
+      </div>
+      <div id="jobsList" class="jobs-list"></div>
+      <div id="queueMetrics" class="queue-metrics"></div>
+      <hr />
+      <h4>Keyboard Shortcuts</h4>
+      <div class="shortcuts-grid">
+        <label>Copy <input id="scCopy" type="text" value="Ctrl+C" /></label>
+        <label>Cut <input id="scCut" type="text" value="Ctrl+X" /></label>
+        <label>Paste <input id="scPaste" type="text" value="Ctrl+V" /></label>
+        <label>Delete <input id="scDelete" type="text" value="Delete" /></label>
+        <label>Rename <input id="scRename" type="text" value="F2" /></label>
+        <label>New Folder <input id="scMkdir" type="text" value="Ctrl+Shift+N" /></label>
+        <label>Refresh <input id="scRefresh" type="text" value="F5" /></label>
+      </div>
+      <div class="row">
+        <button id="saveShortcutsBtn">Save Shortcuts</button>
+        <button id="resetShortcutsBtn">Reset</button>
+      </div>
+      <hr />
+      <h4>Glossary</h4>
+      <div class="row">
+        <input id="glossarySourceInput" type="text" placeholder="source term" />
+        <input id="glossaryTargetInput" type="text" placeholder="target term" />
+        <button id="addGlossaryBtn">Add</button>
+      </div>
+      <div id="glossaryList" class="rules-list"></div>
+      <hr />
+      <h4>Automation Rules</h4>
+      <div class="row">
+        <input id="ruleMatchInput" type="text" placeholder="name contains..." />
+        <select id="ruleActionSelect">
+          <option value="add_tag">Add Tag</option>
+          <option value="rename_prefix">Rename Prefix</option>
+          <option value="move_to_pane">Move To Pane</option>
+        </select>
+      </div>
+      <div class="row">
+        <input id="ruleValueInput" type="text" placeholder="value (tag / prefix / left|right)" />
+        <button id="addRuleBtn">Add Rule</button>
+      </div>
+      <div class="row">
+        <button id="applyRulesBtn">Apply Rules To Selection</button>
+      </div>
+      <div id="rulesList" class="rules-list"></div>
+    </div>
+
+    <div class="inspector-col">
+      <h3>Tags + Properties</h3>
+      <div class="row">
+        <input id="tagInput" type="text" placeholder="comma,separated,tags" />
+        <button id="saveTagsBtn">Save Tags</button>
+      </div>
+      <div class="row">
+        <input id="tagSearchInput" type="text" placeholder="search tags (comma separated)" />
+        <button id="searchTagsBtn">Search</button>
+      </div>
+      <pre id="tagResults"></pre>
+      <hr />
+      <div class="row">
+        <button id="propertiesBtn">Load Properties</button>
+        <button id="permissionsBtn">Permissions Probe</button>
+        <button id="metadataLoadBtn">Load SP Metadata</button>
+        <button id="metadataApplyBtn">Apply SP Metadata</button>
+      </div>
+      <div id="metadataForm" class="metadata-form"></div>
+      <textarea id="metadataInput" rows="7" placeholder='{"Title":"Updated Title"}'></textarea>
+      <div id="metadataValidation" class="validation-errors"></div>
+      <div id="metadataDiff" class="metadata-diff"></div>
+      <pre id="metadataOutput"></pre>
+      <pre id="permissionsOutput"></pre>
+      <pre id="propertiesOutput"></pre>
+    </div>
+
+    <div class="inspector-col preview-col">
+      <h3>Preview / AI / SharePoint Versions</h3>
+      <div class="row">
+        <button id="previewBtn">Preview Selected</button>
+        <button id="extractBtn">Extract Text</button>
+        <button id="summaryBtn">Summary</button>
+        <input id="questionInput" type="text" placeholder="Ask a question about selected file" />
+        <button id="askBtn">Ask</button>
+      </div>
+      <div class="row">
+        <input id="pdfPageInput" type="number" min="1" placeholder="PDF page #" />
+        <button id="pdfJumpBtn">Jump To Page</button>
+        <button id="pdfBookmarkAddBtn">Add Bookmark</button>
+      </div>
+      <div id="pdfBookmarksList" class="rules-list"></div>
+      <div id="previewFrame" class="preview-frame"></div>
+      <pre id="previewText"></pre>
+      <hr />
+      <div class="row">
+        <button id="checkoutBtn">Check-Out</button>
+        <button id="checkinBtn">Check-In</button>
+        <button id="undoCheckoutBtn">Undo Check-Out</button>
+      </div>
+      <div class="row">
+        <button id="loadVersionsBtn">Load Versions</button>
+        <select id="versionsSelect"></select>
+        <button id="downloadVersionBtn">Download Version</button>
+        <button id="restoreVersionBtn">Restore Version</button>
+      </div>
+      <pre id="versionsOutput"></pre>
+    </div>
+  </section>
+
+  <input id="leftUploadInput" type="file" hidden />
+  <input id="rightUploadInput" type="file" hidden />
+
+  <div id="renamePreviewModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <h3>Rename Preview</h3>
+      <p id="renamePreviewSummary"></p>
+      <pre id="renamePreviewConflicts"></pre>
+      <div class="row">
+        <button id="renamePreviewCancelBtn">Cancel</button>
+        <button id="renamePreviewProceedBtn">Proceed Safe Renames</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="transferPreviewModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <h3>Transfer Preview</h3>
+      <p id="transferPreviewSummary"></p>
+      <div class="row">
+        <button id="transferSelectSafeBtn">Select Safe</button>
+        <button id="transferSelectNoneBtn">Select None</button>
+      </div>
+      <div id="transferPreviewList" class="transfer-preview-list"></div>
+      <pre id="transferPreviewConflicts"></pre>
+      <div class="row">
+        <button id="transferPreviewCancelBtn">Cancel</button>
+        <button id="transferPreviewProceedBtn">Proceed Safe Transfers</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional
+import os
+from typing import Iterable, Optional, Sequence
 
-from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtCore import Qt, Signal, QPoint, QStringListModel
 from PySide6.QtWidgets import (
+    QCompleter,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -19,6 +23,57 @@ from PySide6.QtWidgets import (
 )
 
 from .workspace_pane import PANE_DRAG_MIME
+from .tag_editor_dialog import FlowLayout
+
+
+class TagBubble(QFrame):
+    removed = Signal(str)
+    filter_requested = Signal(str)
+
+    def __init__(self, tag: str, count: int = 0, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._tag = tag
+        self._count = max(0, count)
+        self.setObjectName("TagBubble")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(
+            "#TagBubble { border: 1px solid palette(mid); border-radius: 11px; padding: 2px 8px; } "
+            "#TagCount { background: palette(midlight); border-radius: 8px; padding: 0 6px; }"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 0, 4, 0)
+        layout.setSpacing(6)
+        self._label = QLabel(f"#{tag}", self)
+        layout.addWidget(self._label)
+        self._count_label = QLabel(str(self._count), self)
+        self._count_label.setObjectName("TagCount")
+        layout.addWidget(self._count_label)
+        remove_btn = QToolButton(self)
+        remove_btn.setText("×")
+        remove_btn.setAutoRaise(True)
+        remove_btn.setCursor(Qt.PointingHandCursor)
+        remove_btn.setToolTip(f"Remove #{tag} from all files")
+        remove_btn.clicked.connect(self._emit_remove)
+        remove_btn.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(remove_btn)
+
+    def set_count(self, count: int) -> None:
+        self._count = max(0, count)
+        self._count_label.setText(str(self._count))
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            try:
+                pos = event.position().toPoint()
+            except AttributeError:
+                pos = event.pos()
+            child = self.childAt(pos)
+            if not isinstance(child, QToolButton):
+                self.filter_requested.emit(self._tag)
+        super().mouseReleaseEvent(event)
+
+    def _emit_remove(self) -> None:
+        self.removed.emit(self._tag)
 
 
 class FavoritesListWidget(QListWidget):
@@ -64,6 +119,13 @@ class FavoritesPanel(QWidget):
     layout_move_requested = Signal(str, int)
 
     position_changed = Signal(str)
+    tag_apply_requested = Signal(str)
+    tag_filter_requested = Signal(str)
+    tag_ai_requested = Signal()
+    tag_remove_requested = Signal(str)
+    tag_open_requested = Signal(str)
+    tag_reveal_requested = Signal(str)
+    tag_copy_requested = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -72,15 +134,18 @@ class FavoritesPanel(QWidget):
         self._layouts_index: dict[str, QListWidgetItem] = {}
         self._position_actions: list = []
         self.setMinimumWidth(140)
+        self._all_tags: list[tuple[str, int]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(12)
 
         fav_frame = self._build_favorites_section()
+        tags_frame = self._build_tags_section()
         layouts_frame = self._build_layouts_section()
 
         root.addWidget(fav_frame)
+        root.addWidget(tags_frame, 1)
         root.addWidget(layouts_frame)
         root.addStretch(1)
 
@@ -136,6 +201,67 @@ class FavoritesPanel(QWidget):
         layout.addLayout(self._build_button_grid(fav_buttons, prefix="fav", columns=2))
         self._favorites_list.currentRowChanged.connect(self._update_favorite_buttons)
         self._update_favorite_buttons()
+        return frame
+
+    def _build_tags_section(self) -> QWidget:
+        frame = QFrame(self)
+        frame.setMinimumHeight(240)
+        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        label = QLabel("Tags", self)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.addWidget(label)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        self._tag_input = QLineEdit(self)
+        self._tag_input.setPlaceholderText("Add or filter tags (comma separated)")
+        self._tag_model = QStringListModel([], self)
+        self._tag_completer = QCompleter(self._tag_model, self)
+        self._tag_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._tag_input.setCompleter(self._tag_completer)
+        self._tag_input.returnPressed.connect(self._emit_tag_apply)
+        layout.addWidget(self._tag_input)
+
+        btn_row = QHBoxLayout()
+        apply_btn = QPushButton("Apply to Selection", self)
+        apply_btn.clicked.connect(self._emit_tag_apply)
+        btn_row.addWidget(apply_btn)
+        filter_btn = QPushButton("Filter", self)
+        filter_btn.clicked.connect(self._emit_tag_filter)
+        btn_row.addWidget(filter_btn)
+        ai_btn = QPushButton("AI Suggest", self)
+        ai_btn.clicked.connect(self._emit_tag_ai)
+        btn_row.addWidget(ai_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        self._tag_chip_area = QScrollArea(self)
+        self._tag_chip_area.setWidgetResizable(True)
+        self._tag_chip_container = QWidget(self._tag_chip_area)
+        self._tag_chip_layout = FlowLayout(self._tag_chip_container, margin=6, spacing=6)
+        self._tag_chip_area.setWidget(self._tag_chip_container)
+        layout.addWidget(self._tag_chip_area, 1)
+
+        self._tag_results_label = QLabel("Tag matches: 0", self)
+        layout.addWidget(self._tag_results_label)
+
+        self._tag_results_list = QListWidget(self)
+        self._tag_results_list.setSelectionMode(QListWidget.SingleSelection)
+        self._tag_results_list.itemDoubleClicked.connect(self._on_tag_result_open)
+        self._tag_results_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tag_results_list.customContextMenuRequested.connect(self._on_tag_result_context_menu)
+        layout.addWidget(self._tag_results_list, 1)
+
+        self.set_tag_results([])
+
+        hint = QLabel("Click x on a bubble to remove a tag everywhere.", self)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         return frame
 
     def _build_layouts_section(self) -> QWidget:
@@ -220,6 +346,105 @@ class FavoritesPanel(QWidget):
             self._layouts_index[lid] = item
             self._layouts_list.addItem(item)
         self._update_layout_buttons()
+
+    def set_tag_suggestions(self, tags: Iterable[Sequence[str]] | Iterable[str]) -> None:
+        processed: list[tuple[str, int]] = []
+        for entry in tags:
+            if isinstance(entry, (list, tuple)) and entry:
+                tag = str(entry[0]).strip()
+                count = int(entry[1]) if len(entry) > 1 else 0
+            else:
+                tag = str(entry).strip()
+                count = 0
+            if not tag:
+                continue
+            processed.append((tag, max(0, count)))
+        processed.sort(key=lambda item: item[0])
+        self._all_tags = processed
+        self._tag_model.setStringList([tag for tag, _ in processed])
+        self._refresh_tag_bubbles()
+
+    def _emit_tag_apply(self) -> None:
+        text = self._tag_input.text().strip()
+        if text:
+            self.tag_apply_requested.emit(text)
+
+    def _emit_tag_filter(self) -> None:
+        text = self._tag_input.text().strip()
+        self.tag_filter_requested.emit(text)
+
+    def _emit_tag_ai(self) -> None:
+        self.tag_ai_requested.emit()
+
+    def _refresh_tag_bubbles(self) -> None:
+        if not hasattr(self, "_tag_chip_layout"):
+            return
+        if hasattr(self._tag_chip_layout, "clear"):
+            self._tag_chip_layout.clear()
+        if not self._all_tags:
+            placeholder = QLabel("No tags created yet.", self._tag_chip_container)
+            self._tag_chip_layout.addWidget(placeholder)
+            return
+        for tag, count in self._all_tags:
+            bubble = TagBubble(tag, count, self._tag_chip_container)
+            bubble.removed.connect(self._emit_tag_remove)
+            bubble.filter_requested.connect(self._filter_from_bubble)
+            self._tag_chip_layout.addWidget(bubble)
+
+    def _emit_tag_remove(self, tag: str) -> None:
+        self.tag_remove_requested.emit(tag)
+
+    def _filter_from_bubble(self, tag: str) -> None:
+        self._tag_input.setText(tag)
+        self.tag_filter_requested.emit(tag)
+
+    def set_tag_results(self, results: Sequence[dict]) -> None:
+        self._tag_results_list.clear()
+        count = 0
+        for entry in results:
+            path = entry.get("path")
+            if not path:
+                continue
+            matched = entry.get("matched") or []
+            all_tags = entry.get("tags") or []
+            basename = os.path.basename(path) or path
+            display = f"{basename}\n{path}"
+            if all_tags:
+                display += f"\nTags: {', '.join(f'#{t}' for t in all_tags)}"
+            if matched:
+                display += f"\nMatched: {', '.join(f'#{t}' for t in matched)}"
+            item = QListWidgetItem(display, self._tag_results_list)
+            item.setData(Qt.UserRole, path)
+            if matched:
+                item.setToolTip(f"Matched tags: {', '.join(f'#{t}' for t in matched)}")
+            count += 1
+        self._tag_results_label.setText(f"Tag matches: {count}")
+
+    def _on_tag_result_open(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if path:
+            self.tag_open_requested.emit(path)
+
+    def _on_tag_result_context_menu(self, pos) -> None:
+        item = self._tag_results_list.itemAt(pos)
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
+        menu = QMenu(self)
+        open_act = menu.addAction("Open")
+        reveal_act = menu.addAction("Reveal in Explorer")
+        copy_act = menu.addAction("Copy Path")
+        action = menu.exec(self._tag_results_list.viewport().mapToGlobal(pos))
+        if not action:
+            return
+        if action is open_act:
+            self.tag_open_requested.emit(path)
+        elif action is reveal_act:
+            self.tag_reveal_requested.emit(path)
+        elif action is copy_act:
+            self.tag_copy_requested.emit(path)
 
     def select_favorite(self, favorite_id: str) -> None:
         item = self._favorites_index.get(favorite_id)

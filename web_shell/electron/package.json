@@ -1,0 +1,13 @@
+﻿{
+  "name": "smart-explorer-web-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron desktop shell for SmartExplorer web UI",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^36.2.0"
+  }
+}

@@ -84,5 +84,58 @@ class TagStore:
                     tags.add(tag)
         return sorted(tags)
 
+    def tag_stats(self, kind: Optional[str] = None) -> List[tuple[str, int]]:
+        kinds = []
+        if kind is None:
+            kinds = ["local", "sharepoint"]
+        else:
+            kinds = ["sharepoint" if kind == "sharepoint" else "local"]
+        counts: dict[str, int] = {}
+        for k in kinds:
+            for entries in self._data.get(k, {}).values():
+                for tag in entries:
+                    counts[tag] = counts.get(tag, 0) + 1
+        return sorted(counts.items(), key=lambda item: item[0])
+
+    def remove_tag_everywhere(self, kind: str, tag: str) -> bool:
+        kind_key = "sharepoint" if kind == "sharepoint" else "local"
+        tag_lower = tag.strip().lower()
+        if not tag_lower:
+            return False
+        changed = False
+        kind_data = self._data.get(kind_key, {})
+        for key in list(kind_data.keys()):
+            tags = kind_data.get(key, [])
+            if tag_lower in tags:
+                remaining = [t for t in tags if t != tag_lower]
+                if remaining:
+                    kind_data[key] = remaining
+                else:
+                    kind_data.pop(key, None)
+                changed = True
+        if changed:
+            self._save()
+        return changed
+
+    def find_paths_for_tags(self, kind: str, tags: List[str]) -> List[dict]:
+        kind_key = "sharepoint" if kind == "sharepoint" else "local"
+        query = [segment.strip().lower() for segment in tags if segment.strip()]
+        if not query:
+            return []
+        results: list[dict] = []
+        for path, tag_list in self._data.get(kind_key, {}).items():
+            matched = [tag for tag in query if tag in tag_list]
+            if not matched:
+                continue
+            results.append(
+                {
+                    "path": path,
+                    "matched": sorted(matched),
+                    "tags": list(tag_list),
+                }
+            )
+        results.sort(key=lambda item: item["path"].lower())
+        return results
+
 
 __all__ = ["TagStore"]
