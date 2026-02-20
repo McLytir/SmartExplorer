@@ -28,6 +28,7 @@ This is an active migration target for SmartExplorer and now mirrors most daily 
   - Check-out / Check-in / Undo check-out
   - Version list / download version / restore version
   - Properties panel
+  - Embedded SharePoint sign-in window with automatic cookie capture
 - Productivity:
   - Favorites (localStorage)
   - Layout save/load + quick layout tabs
