@@ -618,6 +618,16 @@ class PreviewPane(QWidget):
         self._summarizer = summarizer
         self._reset_summary_state("AI summary unavailable." if not summarizer else "Select a document to summarize.")
 
+    def run_summary(self) -> None:
+        self._on_summary_clicked()
+
+    def ask_question(self, question: str) -> None:
+        text = (question or "").strip()
+        if not text:
+            return
+        self._qa_input.setText(text)
+        self._on_qa_clicked()
+
     def _reset_summary_state(self, placeholder: str | None = None) -> None:
         self._summary_generation += 1
         self._cancel_summary_future()

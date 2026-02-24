@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..api.backend_client import BackendClient
 from ..settings import AppConfig, save_config
-from ..services.browser_cookies import collect_sharepoint_cookies
+from ..services.browser_cookies import collect_sharepoint_cookies, get_last_capture_hint
 from .shortcut_settings_dialog import ShortcutSettingsDialog
 
 
@@ -27,10 +27,11 @@ class SettingsDialog(QDialog):
     def __init__(self, cfg: AppConfig, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(520, 420)
+        self.resize(700, 620)
         self.cfg = cfg
         self.backend = BackendClient()
         self._lt_help_shown = False
+        self.setObjectName("SettingsDialog")
 
         root = QVBoxLayout(self)
 
@@ -242,6 +243,29 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
         self._apply_api_key_mask()
+        self._apply_visual_style()
+
+    def _apply_visual_style(self) -> None:
+        self.setStyleSheet(
+            """
+QDialog#SettingsDialog {
+    background-color: palette(Window);
+}
+QLineEdit, QTextEdit, QComboBox {
+    min-height: 28px;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+QPushButton {
+    min-height: 28px;
+    padding: 4px 10px;
+    border-radius: 6px;
+}
+QLabel {
+    font-size: 12px;
+}
+"""
+        )
 
     def _open_shortcuts(self) -> None:
         try:
@@ -367,10 +391,17 @@ class SettingsDialog(QDialog):
 
         cookies = collect_sharepoint_cookies(parsed.netloc)
         if not cookies:
+            hint = get_last_capture_hint()
+            msg = (
+                "Could not locate SharePoint cookies. Ensure you are signed in using Edge, Opera, Chrome, or Firefox on this machine. "
+                "Note: Incognito/Private windows do not persist cookies and cannot be captured."
+            )
+            if hint:
+                msg = f"{msg}\n\n{hint}\n\nFallback: copy the full Cookie request header from Opera DevTools and paste it into the Cookie header box."
             QMessageBox.warning(
                 self,
                 "Cookie Capture",
-                "Could not locate SharePoint cookies. Ensure you are signed in using Edge, Chrome, or Firefox on this machine. Note: Incognito/Private windows do not persist cookies and cannot be captured.",
+                msg,
             )
             return
 

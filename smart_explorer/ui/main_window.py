@@ -62,6 +62,7 @@ from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
 from .tag_flyout_panel import TagFlyoutPanel
+from .smart_actions_panel import SmartActionsPanel
 from ..services import edit_session
 from ..logging_setup import get_log_file_path
 
@@ -181,6 +182,20 @@ class MainWindow(QMainWindow):
         self._favorites_panel.tag_open_requested.connect(self._open_tag_result)
         self._favorites_panel.tag_reveal_requested.connect(self._reveal_tag_result)
         self._favorites_panel.tag_copy_requested.connect(self._copy_tag_result)
+
+        self._smart_actions_panel = SmartActionsPanel(self)
+        self._smart_actions_panel.summarize_requested.connect(self._run_smart_summary)
+        self._smart_actions_panel.auto_tag_requested.connect(self._apply_ai_tags_from_panel)
+        self._smart_actions_panel.ask_requested.connect(self._run_smart_question)
+        self._smart_actions_panel.set_selection_context("", "")
+        self._smart_actions_panel.set_cost_hint("idle")
+        self._smart_actions_dock = QDockWidget("Smart Actions", self)
+        self._smart_actions_dock.setObjectName("SmartActionsDock")
+        self._smart_actions_dock.setWidget(self._smart_actions_panel)
+        self._smart_actions_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        self._smart_actions_dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
+        self.addDockWidget(Qt.RightDockWidgetArea, self._smart_actions_dock)
+        self._smart_actions_dock.show()
 
         self._main_splitter: Optional[QSplitter] = None
         self._favorites_index = 0
@@ -790,11 +805,42 @@ QLabel { color: #eee8d5; }
         palette = QPalette()
         self._apply_palette_colors(palette, spec.get("palette", {}))
         app.setPalette(palette)
-        stylesheet = spec.get("stylesheet")
-        if stylesheet:
-            app.setStyleSheet(stylesheet)
-        else:
-            app.setStyleSheet("")
+        base_stylesheet = spec.get("stylesheet") or ""
+        accent = str(spec.get("palette", {}).get("Highlight", "#3d6dcc"))
+        panel_border = str(spec.get("palette", {}).get("Mid", "#c7d0de"))
+        panel_bg = str(spec.get("palette", {}).get("Base", "#ffffff"))
+        card_bg = str(spec.get("palette", {}).get("AlternateBase", "#f0f3f9"))
+        text = str(spec.get("palette", {}).get("Text", "#1f2b3a"))
+        smart_stylesheet = f"""
+QDockWidget#SmartActionsDock {{
+    border-left: 1px solid {panel_border};
+}}
+QWidget#SmartActionsPanel {{
+    background-color: {panel_bg};
+}}
+QLabel#SmartActionsHeader {{
+    font-weight: 700;
+    color: {accent};
+    padding: 2px 2px 6px 2px;
+}}
+QFrame#SmartSelectionCard {{
+    border: 1px solid {panel_border};
+    border-radius: 8px;
+    background-color: {card_bg};
+}}
+QLabel#SmartSelectionTitle {{
+    font-weight: 600;
+    color: {text};
+}}
+QLabel#SmartSelectionMeta {{
+    color: {text};
+}}
+QLabel#SmartCostLabel {{
+    color: {text};
+    font-size: 11px;
+}}
+"""
+        app.setStyleSheet(base_stylesheet + "\n" + smart_stylesheet)
 
         self._base_color_palette = list(spec.get("base_colors", []))
         self._workspace_color_map = {}
@@ -971,10 +1017,12 @@ QLabel { color: #eee8d5; }
         else:
             self._active_workspace_id = None
         self._sync_address_bar()
+        pane = self._workspace_panes.get(self._active_workspace_id) if self._active_workspace_id else None
+        selected = pane.current_items() if pane else []
+        self._update_smart_actions_context(pane, selected)
         # Update follow toggle state/visibility
         try:
             if hasattr(self, "_follow_toggle") and self._follow_toggle:
-                pane = self._workspace_panes.get(self._active_workspace_id) if self._active_workspace_id else None
                 if pane and pane.definition.kind == "translation":
                     self._follow_toggle.setEnabled(True)
                     self._follow_toggle.setChecked(getattr(pane.definition, "follow_base", True))
@@ -1900,6 +1948,7 @@ QLabel { color: #eee8d5; }
         except Exception:
             title = pane.definition.name
         self.statusBar().showMessage(f"{title}: {len(selected)} selected")
+        self._update_smart_actions_context(pane, selected)
         self._mirror_selection(workspace_id)
         # keep toolbar follow toggle in sync
         try:
@@ -1911,6 +1960,61 @@ QLabel { color: #eee8d5; }
                     self._follow_toggle.setEnabled(False)
         except Exception:
             pass
+
+    def _update_smart_actions_context(self, pane: Optional[WorkspacePane], selected: List[dict]) -> None:
+        panel = getattr(self, "_smart_actions_panel", None)
+        if panel is None:
+            return
+        if not pane or not selected:
+            panel.set_selection_context("", "")
+            panel.set_cost_hint("idle")
+            return
+        item = selected[0]
+        name = item.get("name") or os.path.basename(item.get("path") or "") or "Selected item"
+        kind = "Folder" if item.get("is_dir") else "File"
+        size = item.get("size")
+        size_text = ""
+        try:
+            if isinstance(size, int) and size >= 0:
+                size_text = f" • {size / (1024 * 1024):.2f} MB" if size >= 1024 * 1024 else f" • {size} B"
+        except Exception:
+            size_text = ""
+        details = f"{kind}{size_text} • {len(selected)} selected"
+        panel.set_selection_context(name, details)
+        panel.set_cost_hint("est. dynamic")
+
+    def _ensure_preview_for_ai(self) -> bool:
+        if not getattr(self, "_preview_enabled", False):
+            self._toggle_preview_pane(True)
+        return bool(getattr(self, "_preview_widget", None))
+
+    def _run_smart_summary(self) -> None:
+        pane = self._active_pane()
+        if not pane or not pane.current_items():
+            QMessageBox.information(self, "Smart Actions", "Select a file first.")
+            return
+        if not self._ensure_preview_for_ai():
+            QMessageBox.warning(self, "Smart Actions", "Preview pane is unavailable.")
+            return
+        try:
+            self._preview_widget.run_summary()  # type: ignore[union-attr]
+            self.statusBar().showMessage("Running AI summary...", 4000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Smart Actions", f"Unable to run summary: {exc}")
+
+    def _run_smart_question(self, question: str) -> None:
+        pane = self._active_pane()
+        if not pane or not pane.current_items():
+            QMessageBox.information(self, "Smart Actions", "Select a file first.")
+            return
+        if not self._ensure_preview_for_ai():
+            QMessageBox.warning(self, "Smart Actions", "Preview pane is unavailable.")
+            return
+        try:
+            self._preview_widget.ask_question(question)  # type: ignore[union-attr]
+            self.statusBar().showMessage("Running AI Q&A...", 4000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Smart Actions", f"Unable to ask question: {exc}")
         # Update preview pane (if enabled) with the selected paths from the active pane
         try:
             if getattr(self, "_preview_enabled", False) and getattr(self, "_preview_widget", None):

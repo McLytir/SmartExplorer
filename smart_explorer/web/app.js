@@ -45,7 +45,7 @@ function paneState(key){
 }
 
 const el = {
-  status: id('status'), langInput: id('langInput'), toggleTranslateBtn: id('toggleTranslateBtn'),
+  status: id('status'), uiVersionSelect:id('uiVersionSelect'), langInput: id('langInput'), toggleTranslateBtn: id('toggleTranslateBtn'),
   renameTranslatedBtn: id('renameTranslatedBtn'), undoRenameBtn: id('undoRenameBtn'), copyBtn: id('copyBtn'), cutBtn: id('cutBtn'), pasteBtn: id('pasteBtn'),
   renameBtn: id('renameBtn'), deleteBtn: id('deleteBtn'), mkdirBtn: id('mkdirBtn'), openBtn: id('openBtn'), revealBtn: id('revealBtn'), addFavoriteBtn: id('addFavoriteBtn'), exportConfigBtn:id('exportConfigBtn'), importConfigBtn:id('importConfigBtn'), importConfigInput:id('importConfigInput'),
   layoutTabs:id('layoutTabs'),
@@ -56,6 +56,7 @@ const el = {
   layoutNameInput:id('layoutNameInput'), saveLayoutBtn:id('saveLayoutBtn'), layoutsList:id('layoutsList'), recentList:id('recentList'),
   opLogOutput:id('opLogOutput'), desktopNotifyBtn:id('desktopNotifyBtn'), clearNotificationsBtn:id('clearNotificationsBtn'), notificationsList:id('notificationsList'),
   searchQueryInput:id('searchQueryInput'), searchRunBtn:id('searchRunBtn'), searchIncludeLocal:id('searchIncludeLocal'), searchIncludeSp:id('searchIncludeSp'), searchExtInput:id('searchExtInput'), searchMaxInput:id('searchMaxInput'), searchFilterSelect:id('searchFilterSelect'), searchFilterSaveBtn:id('searchFilterSaveBtn'), searchFilterDeleteBtn:id('searchFilterDeleteBtn'), searchResults:id('searchResults'),
+  spBaseUrlInput:id('spBaseUrlInput'), spCookieHeaderInput:id('spCookieHeaderInput'), spSaveAuthBtn:id('spSaveAuthBtn'), spRefreshAuthBtn:id('spRefreshAuthBtn'), spEmbeddedSigninBtn:id('spEmbeddedSigninBtn'), spAuthState:id('spAuthState'),
   bulkOpType:id('bulkOpType'), bulkTargetPane:id('bulkTargetPane'), bulkConflictPolicy:id('bulkConflictPolicy'), bulkDryRunBtn:id('bulkDryRunBtn'), bulkQueueBtn:id('bulkQueueBtn'), bulkDryRunOutput:id('bulkDryRunOutput'),
   jobsPauseBtn:id('jobsPauseBtn'), jobsResumeBtn:id('jobsResumeBtn'), jobsCancelBtn:id('jobsCancelBtn'), jobsRetryFailedBtn:id('jobsRetryFailedBtn'), jobsExportBtn:id('jobsExportBtn'), jobsClearFinishedBtn:id('jobsClearFinishedBtn'), jobsList:id('jobsList'), queueMetrics:id('queueMetrics'),
   scCopy:id('scCopy'), scCut:id('scCut'), scPaste:id('scPaste'), scDelete:id('scDelete'), scRename:id('scRename'), scMkdir:id('scMkdir'), scRefresh:id('scRefresh'), saveShortcutsBtn:id('saveShortcutsBtn'), resetShortcutsBtn:id('resetShortcutsBtn'),
@@ -75,6 +76,20 @@ function id(x){ return document.getElementById(x); }
 function paneEls(key){ return key==='left' ? {kind:el.leftKind,site:el.leftSite,library:el.leftLibrary,path:el.leftPath,go:el.leftGo,list:el.leftList,uploadBtn:el.leftUploadBtn,uploadInput:el.leftUploadInput,filter:el.leftFilterInput} : {kind:el.rightKind,site:el.rightSite,library:el.rightLibrary,path:el.rightPath,go:el.rightGo,list:el.rightList,uploadBtn:el.rightUploadBtn,uploadInput:el.rightUploadInput,filter:el.rightFilterInput}; }
 function loadNotificationPrefs(){
   state.desktopNotify=localStorage.getItem('smx_web_desktop_notify')==='1';
+}
+function applyUiVersion(version){
+  const v=(version==='v2'||version==='v3')?version:'v1';
+  document.body.setAttribute('data-ui-version',v);
+  if(el.uiVersionSelect) el.uiVersionSelect.value=v;
+}
+function loadUiVersion(){
+  const stored=localStorage.getItem('smx_web_ui_version')||'v1';
+  applyUiVersion(stored);
+}
+function setUiVersion(version){
+  applyUiVersion(version);
+  localStorage.setItem('smx_web_ui_version',document.body.getAttribute('data-ui-version')||'v1');
+  setStatus(`UI architecture set to ${document.body.getAttribute('data-ui-version')}.`);
 }
 function persistNotificationPrefs(){
   localStorage.setItem('smx_web_desktop_notify',state.desktopNotify?'1':'0');
@@ -1227,6 +1242,62 @@ async function apiGet(url){ const r=await fetch(url); if(!r.ok) throw new Error(
 async function apiPost(url,body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 function fillSelect(sel,rows,val,label,selected=''){ sel.innerHTML=''; rows.forEach(r=>{ const o=document.createElement('option'); o.value=String(r[val]??''); o.textContent=String(r[label]??r[val]??''); if(String(o.value)===String(selected)) o.selected=true; sel.appendChild(o); }); }
 
+function renderSpAuthState(settings){
+  if(!el.spAuthState) return;
+  const base=String(settings?.sp_base_url||'').trim();
+  const hasCookies=!!settings?.sp_has_cookies;
+  const baseLabel=base?`Base URL: ${base}`:'Base URL: not configured';
+  const cookieLabel=`Cookies: ${hasCookies?'loaded':'missing'}`;
+  el.spAuthState.textContent=`Status: ${baseLabel} | ${cookieLabel}`;
+}
+
+async function refreshSpAuthPanel(){
+  try{
+    const settings=await apiGet('/api/settings');
+    if(el.spBaseUrlInput) el.spBaseUrlInput.value=String(settings?.sp_base_url||'');
+    renderSpAuthState(settings);
+  }catch(e){
+    if(el.spAuthState) el.spAuthState.textContent=`Status: failed to load (${err(e)})`;
+  }
+}
+
+async function saveSpAuthFromPortal(){
+  const base=String(el.spBaseUrlInput?.value||'').trim();
+  const cookieHeader=String(el.spCookieHeaderInput?.value||'').trim();
+  if(!base) return setStatus('Enter SharePoint site URL before saving access.');
+  try{
+    await apiPost('/api/settings',{sp_base_url:base});
+    if(cookieHeader){
+      await apiPost('/api/sp/cookies',{base_url:base,cookie_header:cookieHeader});
+      if(el.spCookieHeaderInput) el.spCookieHeaderInput.value='';
+    }
+    await refreshSpAuthPanel();
+    setStatus(cookieHeader?'SharePoint URL and cookies saved.':'SharePoint URL saved. Paste Cookie header to enable authenticated access.');
+  }catch(e){
+    setStatus(`SharePoint access save failed: ${err(e)}`);
+  }
+}
+
+async function startEmbeddedSharePointSignIn(){
+  const base=String(el.spBaseUrlInput?.value||'').trim();
+  if(!base) return setStatus('Enter SharePoint site URL first.');
+  if(!window.smxDesktop || typeof window.smxDesktop.signInSharePoint!=='function'){
+    return setStatus('Embedded sign-in is only available in Electron WebShell.');
+  }
+  setStatus('Opening SharePoint sign-in window...');
+  try{
+    const result=await window.smxDesktop.signInSharePoint(base);
+    if(result?.ok){
+      await refreshSpAuthPanel();
+      setStatus(result.message||'SharePoint sign-in completed and cookies captured.');
+      return;
+    }
+    setStatus(`Embedded sign-in failed: ${result?.message||'Unknown error'}`);
+  }catch(e){
+    setStatus(`Embedded sign-in failed: ${err(e)}`);
+  }
+}
+
 function updatePaneControls(key){
   const p=state[key], ui=paneEls(key);
   ui.kind.value=p.kind; ui.path.value=p.path||'';
@@ -1793,6 +1864,10 @@ function wireGlobalEvents(){
   if(el.searchFilterSaveBtn) el.searchFilterSaveBtn.onclick=saveCurrentSearchFilter;
   if(el.searchFilterDeleteBtn) el.searchFilterDeleteBtn.onclick=deleteSelectedSearchFilter;
   if(el.searchFilterSelect) el.searchFilterSelect.onchange=applySelectedSearchFilter;
+  if(el.spSaveAuthBtn) el.spSaveAuthBtn.onclick=saveSpAuthFromPortal;
+  if(el.spRefreshAuthBtn) el.spRefreshAuthBtn.onclick=refreshSpAuthPanel;
+  if(el.spEmbeddedSigninBtn) el.spEmbeddedSigninBtn.onclick=startEmbeddedSharePointSignIn;
+  if(el.uiVersionSelect) el.uiVersionSelect.onchange=()=>setUiVersion(el.uiVersionSelect.value);
   if(el.bulkDryRunBtn) el.bulkDryRunBtn.onclick=dryRunBulkOperation;
   if(el.bulkQueueBtn) el.bulkQueueBtn.onclick=queueBulkOperationJob;
   if(el.jobsPauseBtn) el.jobsPauseBtn.onclick=pauseActiveJob;
@@ -1824,6 +1899,12 @@ function wireGlobalEvents(){
 
 async function init(){
   wireGlobalEvents(); wirePaneEvents('left'); wirePaneEvents('right'); clearPreview();
+  loadUiVersion();
+  if(el.spEmbeddedSigninBtn && (!window.smxDesktop || !window.smxDesktop.isDesktop)){
+    el.spEmbeddedSigninBtn.disabled=true;
+    el.spEmbeddedSigninBtn.title='Available only in Electron WebShell';
+  }
+  await refreshSpAuthPanel();
   refreshMetadataValidationAndDiff();
   loadNotificationPrefs(); renderNotifications();
   loadShortcuts(); renderShortcuts();

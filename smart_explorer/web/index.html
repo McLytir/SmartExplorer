@@ -1,274 +1,204 @@
-﻿<!doctype html>
-<html lang="en">
+<!doctype html>
+<html class="dark" lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SmartExplorer Web Shell</title>
+  <title>SmartExplorer</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css" />
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            primary: "#2b6cee",
+            "surface-light": "#f6f6f8",
+            "surface-dark": "#101622"
+          },
+          fontFamily: {
+            sans: ["Inter", "sans-serif"]
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      font-family: Inter, sans-serif;
+      background: #101622;
+      color: #e2e8f0;
+    }
+    .se-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+    .se-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 999px; }
+    .se-list .item {
+      border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+      padding: 10px 12px;
+    }
+    .se-list .item:hover { background: rgba(43, 108, 238, 0.12); }
+    .compat-mount { display: none !important; }
+  </style>
 </head>
-<body>
-  <header class="topbar">
-    <div class="brand">SmartExplorer Web Shell</div>
-    <div class="actions">
-      <input id="langInput" type="text" value="English" title="Translation language" />
-      <button id="toggleTranslateBtn">Translate: Off</button>
-      <button id="renameTranslatedBtn">Apply Translation Rename</button>
-      <button id="undoRenameBtn">Undo Rename</button>
-      <button id="copyBtn">Copy</button>
-      <button id="cutBtn">Cut</button>
-      <button id="pasteBtn">Paste</button>
-      <button id="renameBtn">Rename</button>
-      <button id="deleteBtn">Delete</button>
-      <button id="mkdirBtn">New Folder</button>
-      <button id="openBtn">Open</button>
-      <button id="revealBtn">Reveal</button>
-      <button id="addFavoriteBtn">Add Favorite</button>
-      <button id="exportConfigBtn">Export Config</button>
-      <button id="importConfigBtn">Import Config</button>
-      <span id="status"></span>
+<body class="bg-surface-light text-slate-900 dark:bg-surface-dark dark:text-slate-100">
+  <div class="flex h-screen flex-col overflow-hidden">
+    <header class="z-20 flex h-14 items-center justify-between border-b border-slate-200 bg-surface-light px-4 dark:border-slate-800 dark:bg-surface-dark">
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2 text-primary">
+          <span class="material-symbols-outlined text-3xl">explore</span>
+          <h1 class="text-xl font-bold">SmartExplorer</h1>
+        </div>
+        <button id="addRuleBtn" class="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary/90">New Rule</button>
+      </div>
+
+      <div class="w-full max-w-2xl px-6">
+        <div class="relative">
+          <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">search</span>
+          <input id="searchQueryInput" type="text" placeholder="Global search with AI insights..." class="w-full rounded-xl border-none bg-slate-100 py-2 pl-10 pr-4 text-sm focus:ring-2 focus:ring-primary/50 dark:bg-slate-900" />
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="searchRunBtn" class="rounded-lg px-3 py-1.5 text-sm hover:bg-slate-200 dark:hover:bg-slate-800">Search</button>
+        <button class="rounded-lg p-2 hover:bg-slate-200 dark:hover:bg-slate-800"><span class="material-symbols-outlined">notifications</span></button>
+        <button id="importConfigBtn" class="rounded-lg p-2 hover:bg-slate-200 dark:hover:bg-slate-800"><span class="material-symbols-outlined">upload_file</span></button>
+        <button id="exportConfigBtn" class="rounded-lg p-2 hover:bg-slate-200 dark:hover:bg-slate-800"><span class="material-symbols-outlined">download</span></button>
+        <button id="toggleTranslateBtn" class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs dark:border-slate-700">Translate: Off</button>
+      </div>
+    </header>
+
+    <div class="border-b border-slate-200 px-4 py-2 dark:border-slate-800">
+      <div class="flex items-center gap-2 overflow-x-auto">
+        <div id="sessionTabs" class="flex items-center gap-2"></div>
+        <button id="newSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">+ New Session</button>
+        <button id="duplicateSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Duplicate</button>
+        <button id="renameSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Rename</button>
+        <button id="closeSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Close</button>
+        <div id="layoutTabs" class="ml-2 flex items-center gap-2"></div>
+      </div>
     </div>
-  </header>
+
+    <div class="flex min-h-0 flex-1 overflow-hidden">
+      <aside class="hidden w-60 shrink-0 border-r border-slate-200 bg-surface-light p-4 dark:border-slate-800 dark:bg-surface-dark lg:block">
+        <h2 class="mb-3 px-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Navigation</h2>
+        <nav class="space-y-1">
+          <a href="#" class="flex items-center gap-3 rounded-lg bg-primary/10 px-3 py-2 font-medium text-primary"><span class="material-symbols-outlined">hard_drive</span>Local Disk</a>
+          <a href="#" class="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-100 dark:hover:bg-slate-800"><span class="material-symbols-outlined">cloud</span>SharePoint</a>
+          <a href="#" class="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-100 dark:hover:bg-slate-800"><span class="material-symbols-outlined">schedule</span>Recents</a>
+          <a href="#" class="flex items-center gap-3 rounded-lg px-3 py-2 text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800"><span class="material-symbols-outlined">star</span>Starred</a>
+        </nav>
+        <div class="mt-6">
+          <button id="addFavoriteBtn" class="w-full rounded-lg border border-slate-300 py-2 text-sm dark:border-slate-700">Add Favorite</button>
+        </div>
+        <div id="favoritesList" class="se-scroll mt-4 max-h-60 overflow-auto"></div>
+      </aside>
+
+      <main class="flex min-w-0 flex-1 overflow-hidden">
+        <section class="flex min-w-0 flex-1 flex-col border-r border-slate-200 dark:border-slate-800">
+          <div class="border-b border-slate-200 p-3 dark:border-slate-800">
+            <div class="mb-2 flex items-center gap-2 text-xs text-slate-500">
+              <span>C:/</span><span>Users</span><span>/</span><span>Admin</span><span>/</span><span class="font-semibold text-slate-900 dark:text-slate-100">Documents</span>
+            </div>
+            <div class="pane-head grid grid-cols-12 gap-2">
+              <select id="leftKind" class="col-span-2 rounded-md border-slate-300 text-xs dark:border-slate-700">
+                <option value="local">Local</option>
+                <option value="sharepoint">SharePoint</option>
+              </select>
+              <select id="leftSite" class="col-span-2 rounded-md border-slate-300 text-xs dark:border-slate-700"></select>
+              <select id="leftLibrary" class="col-span-2 rounded-md border-slate-300 text-xs dark:border-slate-700"></select>
+              <input id="leftPath" type="text" class="col-span-4 rounded-md border-slate-300 text-xs dark:border-slate-700" placeholder="Path" />
+              <button id="leftGo" class="col-span-1 rounded-md bg-primary px-2 text-xs text-white">Go</button>
+              <button id="leftUploadBtn" class="col-span-1 rounded-md border border-slate-300 text-xs dark:border-slate-700">Upload</button>
+            </div>
+            <div class="mt-2">
+              <input id="leftFilterInput" type="text" placeholder="Filter this pane..." class="w-full rounded-md border-slate-300 text-xs dark:border-slate-700" />
+            </div>
+          </div>
+          <div id="leftList" class="list se-list se-scroll min-h-0 flex-1 overflow-auto"></div>
+        </section>
+
+        <section class="hidden min-w-0 flex-1 flex-col xl:flex">
+          <div class="border-b border-slate-200 p-3 dark:border-slate-800">
+            <div class="mb-2 flex items-center gap-2 text-xs text-slate-500">
+              <span>SharePoint</span><span>/</span><span>Corporate</span><span>/</span><span class="font-semibold text-slate-900 dark:text-slate-100">Project_Falcon</span>
+            </div>
+            <div class="pane-head grid grid-cols-12 gap-2">
+              <select id="rightKind" class="col-span-2 rounded-md border-slate-300 text-xs dark:border-slate-700">
+                <option value="local">Local</option>
+                <option value="sharepoint">SharePoint</option>
+              </select>
+              <select id="rightSite" class="col-span-2 rounded-md border-slate-300 text-xs dark:border-slate-700"></select>
+              <select id="rightLibrary" class="col-span-2 rounded-md border-slate-300 text-xs dark:border-slate-700"></select>
+              <input id="rightPath" type="text" class="col-span-4 rounded-md border-slate-300 text-xs dark:border-slate-700" placeholder="Path" />
+              <button id="rightGo" class="col-span-1 rounded-md bg-primary px-2 text-xs text-white">Go</button>
+              <button id="rightUploadBtn" class="col-span-1 rounded-md border border-slate-300 text-xs dark:border-slate-700">Upload</button>
+            </div>
+            <div class="mt-2">
+              <input id="rightFilterInput" type="text" placeholder="Filter this pane..." class="w-full rounded-md border-slate-300 text-xs dark:border-slate-700" />
+            </div>
+          </div>
+          <div id="rightList" class="list se-list se-scroll min-h-0 flex-1 overflow-auto"></div>
+        </section>
+      </main>
+
+      <aside class="w-80 shrink-0 border-l border-slate-200 bg-surface-light dark:border-slate-800 dark:bg-slate-900/40">
+        <div class="border-b border-slate-200 p-4 font-bold text-primary dark:border-slate-800">Smart Actions</div>
+        <div class="se-scroll h-full overflow-auto p-4">
+          <div class="mb-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+            <div class="text-sm font-semibold">Selection Preview</div>
+            <div id="previewFrame" class="preview-frame mt-2 min-h-44 rounded-lg border border-slate-200 dark:border-slate-700"></div>
+            <pre id="previewText" class="mt-2 max-h-28 overflow-auto rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700"></pre>
+          </div>
+
+          <div class="space-y-2">
+            <button id="previewBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Preview Selected</button>
+            <button id="summaryBtn" class="w-full rounded-xl border border-primary/30 bg-primary/10 px-3 py-2 text-left text-sm text-primary">Summarize File</button>
+            <button id="extractBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Extract Text</button>
+          </div>
+
+          <div class="mt-3 flex gap-2">
+            <input id="questionInput" type="text" class="flex-1 rounded-lg border-slate-300 text-sm dark:border-slate-700" placeholder="Ask AI assistant" />
+            <button id="askBtn" class="rounded-lg bg-primary px-3 py-2 text-sm text-white">Ask</button>
+          </div>
+
+          <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
+            <button id="copyBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Copy</button>
+            <button id="cutBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Cut</button>
+            <button id="pasteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Paste</button>
+            <button id="renameBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Rename</button>
+            <button id="deleteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Delete</button>
+            <button id="mkdirBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">New Folder</button>
+            <button id="openBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Open</button>
+            <button id="revealBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Reveal</button>
+            <button id="renameTranslatedBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Apply Translation Rename</button>
+            <button id="undoRenameBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Undo Rename</button>
+          </div>
+
+          <div class="mt-4 rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-800">
+            <div class="mb-2 font-semibold text-slate-500">Current Task Cost</div>
+            <div class="font-semibold text-primary">$0.00 (Idle)</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="flex h-8 items-center justify-between border-t border-slate-200 bg-white px-4 text-xs text-slate-500 dark:border-slate-800 dark:bg-surface-dark">
+      <div class="flex items-center gap-3">
+        <span>AI Engine Ready</span>
+        <span>|</span>
+        <span id="status"></span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span>Lat: 24ms</span>
+        <span>Connected</span>
+      </div>
+    </footer>
+  </div>
+
   <input id="importConfigInput" type="file" accept="application/json" hidden />
-
-  <section class="session-tabs-wrap">
-    <div class="layout-tabs-title">Workspace Sessions</div>
-    <div class="layout-tabs">
-      <div id="sessionTabs" class="layout-tabs"></div>
-      <button id="newSessionBtn" class="layout-tab">+ New Session</button>
-      <button id="duplicateSessionBtn" class="layout-tab">Duplicate Session</button>
-      <button id="renameSessionBtn" class="layout-tab">Rename Session</button>
-      <button id="closeSessionBtn" class="layout-tab">Close Session</button>
-    </div>
-  </section>
-
-  <section class="layout-tabs-wrap">
-    <div class="layout-tabs-title">Quick Layout Tabs</div>
-    <div id="layoutTabs" class="layout-tabs"></div>
-  </section>
-
-  <main class="panes">
-    <section class="pane" data-pane="left">
-      <div class="pane-head">
-        <strong>Left</strong>
-        <select id="leftKind">
-          <option value="local">Local</option>
-          <option value="sharepoint">SharePoint</option>
-        </select>
-        <select id="leftSite"></select>
-        <select id="leftLibrary"></select>
-        <input id="leftPath" type="text" />
-        <button id="leftGo">Go</button>
-        <button id="leftUploadBtn">Upload</button>
-      </div>
-      <div class="pane-filter-row">
-        <input id="leftFilterInput" type="text" placeholder="Filter this pane..." />
-      </div>
-      <div id="leftList" class="list"></div>
-    </section>
-
-    <section class="pane" data-pane="right">
-      <div class="pane-head">
-        <strong>Right</strong>
-        <select id="rightKind">
-          <option value="local">Local</option>
-          <option value="sharepoint">SharePoint</option>
-        </select>
-        <select id="rightSite"></select>
-        <select id="rightLibrary"></select>
-        <input id="rightPath" type="text" />
-        <button id="rightGo">Go</button>
-        <button id="rightUploadBtn">Upload</button>
-      </div>
-      <div class="pane-filter-row">
-        <input id="rightFilterInput" type="text" placeholder="Filter this pane..." />
-      </div>
-      <div id="rightList" class="list"></div>
-    </section>
-  </main>
-
-  <section class="inspector">
-    <div class="inspector-col">
-      <h3>Favorites / Layouts</h3>
-      <div class="row">
-        <input id="favoriteNameInput" type="text" placeholder="optional favorite label" />
-        <button id="saveFavoriteBtn">Save Current</button>
-      </div>
-      <div id="favoritesList" class="favorites"></div>
-      <hr />
-      <div class="row">
-        <input id="layoutNameInput" type="text" placeholder="layout name" />
-        <button id="saveLayoutBtn">Save Layout</button>
-      </div>
-      <div id="layoutsList" class="favorites"></div>
-      <hr />
-      <h4>Recent Locations</h4>
-      <div id="recentList" class="favorites"></div>
-      <hr />
-      <h4>Operation Log</h4>
-      <pre id="opLogOutput"></pre>
-      <div class="row">
-        <button id="desktopNotifyBtn">Desktop Alerts: Off</button>
-        <button id="clearNotificationsBtn">Clear Notifications</button>
-      </div>
-      <div id="notificationsList" class="notifications-list"></div>
-      <hr />
-      <h4>Global Search</h4>
-      <div class="row">
-        <input id="searchQueryInput" type="text" placeholder="search name..." />
-        <button id="searchRunBtn">Run</button>
-      </div>
-      <div class="row">
-        <label><input id="searchIncludeLocal" type="checkbox" checked /> Local</label>
-        <label><input id="searchIncludeSp" type="checkbox" checked /> SharePoint</label>
-      </div>
-      <div class="row">
-        <input id="searchExtInput" type="text" placeholder=".pdf,.docx (optional)" />
-        <input id="searchMaxInput" type="number" min="10" max="2000" value="200" />
-      </div>
-      <div class="row">
-        <select id="searchFilterSelect"></select>
-        <button id="searchFilterSaveBtn">Save Filter</button>
-        <button id="searchFilterDeleteBtn">Delete</button>
-      </div>
-      <div id="searchResults" class="search-results"></div>
-      <hr />
-      <h4>Bulk Operations + Jobs</h4>
-      <div class="row">
-        <select id="bulkOpType">
-          <option value="copy">Copy</option>
-          <option value="move">Move</option>
-          <option value="delete">Delete</option>
-        </select>
-        <select id="bulkTargetPane">
-          <option value="left">Target: Left</option>
-          <option value="right">Target: Right</option>
-        </select>
-      </div>
-      <div class="row">
-        <select id="bulkConflictPolicy">
-          <option value="skip">Conflict: Skip</option>
-          <option value="fail">Conflict: Fail</option>
-          <option value="overwrite">Conflict: Overwrite</option>
-        </select>
-        <button id="bulkDryRunBtn">Dry Run</button>
-        <button id="bulkQueueBtn">Queue Job</button>
-      </div>
-      <pre id="bulkDryRunOutput"></pre>
-      <div class="row">
-        <button id="jobsPauseBtn">Pause</button>
-        <button id="jobsResumeBtn">Resume</button>
-        <button id="jobsCancelBtn">Cancel</button>
-        <button id="jobsRetryFailedBtn">Retry Failed</button>
-      </div>
-      <div class="row">
-        <button id="jobsExportBtn">Export Jobs</button>
-        <button id="jobsClearFinishedBtn">Clear Finished</button>
-      </div>
-      <div id="jobsList" class="jobs-list"></div>
-      <div id="queueMetrics" class="queue-metrics"></div>
-      <hr />
-      <h4>Keyboard Shortcuts</h4>
-      <div class="shortcuts-grid">
-        <label>Copy <input id="scCopy" type="text" value="Ctrl+C" /></label>
-        <label>Cut <input id="scCut" type="text" value="Ctrl+X" /></label>
-        <label>Paste <input id="scPaste" type="text" value="Ctrl+V" /></label>
-        <label>Delete <input id="scDelete" type="text" value="Delete" /></label>
-        <label>Rename <input id="scRename" type="text" value="F2" /></label>
-        <label>New Folder <input id="scMkdir" type="text" value="Ctrl+Shift+N" /></label>
-        <label>Refresh <input id="scRefresh" type="text" value="F5" /></label>
-      </div>
-      <div class="row">
-        <button id="saveShortcutsBtn">Save Shortcuts</button>
-        <button id="resetShortcutsBtn">Reset</button>
-      </div>
-      <hr />
-      <h4>Glossary</h4>
-      <div class="row">
-        <input id="glossarySourceInput" type="text" placeholder="source term" />
-        <input id="glossaryTargetInput" type="text" placeholder="target term" />
-        <button id="addGlossaryBtn">Add</button>
-      </div>
-      <div id="glossaryList" class="rules-list"></div>
-      <hr />
-      <h4>Automation Rules</h4>
-      <div class="row">
-        <input id="ruleMatchInput" type="text" placeholder="name contains..." />
-        <select id="ruleActionSelect">
-          <option value="add_tag">Add Tag</option>
-          <option value="rename_prefix">Rename Prefix</option>
-          <option value="move_to_pane">Move To Pane</option>
-        </select>
-      </div>
-      <div class="row">
-        <input id="ruleValueInput" type="text" placeholder="value (tag / prefix / left|right)" />
-        <button id="addRuleBtn">Add Rule</button>
-      </div>
-      <div class="row">
-        <button id="applyRulesBtn">Apply Rules To Selection</button>
-      </div>
-      <div id="rulesList" class="rules-list"></div>
-    </div>
-
-    <div class="inspector-col">
-      <h3>Tags + Properties</h3>
-      <div class="row">
-        <input id="tagInput" type="text" placeholder="comma,separated,tags" />
-        <button id="saveTagsBtn">Save Tags</button>
-      </div>
-      <div class="row">
-        <input id="tagSearchInput" type="text" placeholder="search tags (comma separated)" />
-        <button id="searchTagsBtn">Search</button>
-      </div>
-      <pre id="tagResults"></pre>
-      <hr />
-      <div class="row">
-        <button id="propertiesBtn">Load Properties</button>
-        <button id="permissionsBtn">Permissions Probe</button>
-        <button id="metadataLoadBtn">Load SP Metadata</button>
-        <button id="metadataApplyBtn">Apply SP Metadata</button>
-      </div>
-      <div id="metadataForm" class="metadata-form"></div>
-      <textarea id="metadataInput" rows="7" placeholder='{"Title":"Updated Title"}'></textarea>
-      <div id="metadataValidation" class="validation-errors"></div>
-      <div id="metadataDiff" class="metadata-diff"></div>
-      <pre id="metadataOutput"></pre>
-      <pre id="permissionsOutput"></pre>
-      <pre id="propertiesOutput"></pre>
-    </div>
-
-    <div class="inspector-col preview-col">
-      <h3>Preview / AI / SharePoint Versions</h3>
-      <div class="row">
-        <button id="previewBtn">Preview Selected</button>
-        <button id="extractBtn">Extract Text</button>
-        <button id="summaryBtn">Summary</button>
-        <input id="questionInput" type="text" placeholder="Ask a question about selected file" />
-        <button id="askBtn">Ask</button>
-      </div>
-      <div class="row">
-        <input id="pdfPageInput" type="number" min="1" placeholder="PDF page #" />
-        <button id="pdfJumpBtn">Jump To Page</button>
-        <button id="pdfBookmarkAddBtn">Add Bookmark</button>
-      </div>
-      <div id="pdfBookmarksList" class="rules-list"></div>
-      <div id="previewFrame" class="preview-frame"></div>
-      <pre id="previewText"></pre>
-      <hr />
-      <div class="row">
-        <button id="checkoutBtn">Check-Out</button>
-        <button id="checkinBtn">Check-In</button>
-        <button id="undoCheckoutBtn">Undo Check-Out</button>
-      </div>
-      <div class="row">
-        <button id="loadVersionsBtn">Load Versions</button>
-        <select id="versionsSelect"></select>
-        <button id="downloadVersionBtn">Download Version</button>
-        <button id="restoreVersionBtn">Restore Version</button>
-      </div>
-      <pre id="versionsOutput"></pre>
-    </div>
-  </section>
-
   <input id="leftUploadInput" type="file" hidden />
   <input id="rightUploadInput" type="file" hidden />
 
@@ -300,6 +230,87 @@
       </div>
     </div>
   </div>
+
+  <div id="compatMount" class="compat-mount" aria-hidden="true"></div>
+
+  <script>
+    (function () {
+      const required = [
+        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","mkdirBtn","newSessionBtn","notificationsList","openBtn","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
+      ];
+
+      const mount = document.getElementById("compatMount");
+      if (!mount) return;
+
+      const fileInputs = new Set(["importConfigInput", "leftUploadInput", "rightUploadInput"]);
+      const textareas = new Set(["spCookieHeaderInput", "metadataInput"]);
+      const checks = new Set(["searchIncludeLocal", "searchIncludeSp"]);
+      const numbers = new Set(["searchMaxInput", "pdfPageInput"]);
+      const selects = new Set(["leftKind","rightKind","leftSite","leftLibrary","rightSite","rightLibrary","bulkOpType","bulkTargetPane","bulkConflictPolicy","searchFilterSelect","ruleActionSelect","versionsSelect","uiVersionSelect"]);
+
+      function createElement(id) {
+        if (fileInputs.has(id)) {
+          const el = document.createElement("input");
+          el.type = "file";
+          return el;
+        }
+        if (textareas.has(id)) return document.createElement("textarea");
+        if (checks.has(id)) {
+          const el = document.createElement("input");
+          el.type = "checkbox";
+          return el;
+        }
+        if (numbers.has(id)) {
+          const el = document.createElement("input");
+          el.type = "number";
+          return el;
+        }
+        if (selects.has(id)) return document.createElement("select");
+        if (id.endsWith("Btn")) return document.createElement("button");
+        if (id.endsWith("Input") || id.startsWith("sc") || id === "langInput") return document.createElement("input");
+        if (id.endsWith("Output") || id.endsWith("Results") || id.endsWith("Conflicts")) return document.createElement("pre");
+        return document.createElement("div");
+      }
+
+      function seedSelect(el, id) {
+        if (!(el instanceof HTMLSelectElement)) return;
+        if (el.options.length) return;
+        const add = (value, text) => el.add(new Option(text, value));
+        if (id === "leftKind" || id === "rightKind") {
+          add("local", "Local");
+          add("sharepoint", "SharePoint");
+        } else if (id === "bulkOpType") {
+          add("copy", "Copy"); add("move", "Move"); add("delete", "Delete");
+        } else if (id === "bulkTargetPane") {
+          add("left", "Target: Left"); add("right", "Target: Right");
+        } else if (id === "bulkConflictPolicy") {
+          add("skip", "Conflict: Skip"); add("fail", "Conflict: Fail"); add("overwrite", "Conflict: Overwrite");
+        } else if (id === "ruleActionSelect") {
+          add("add_tag", "Add Tag"); add("rename_prefix", "Rename Prefix"); add("move_to_pane", "Move To Pane");
+        } else if (id === "uiVersionSelect") {
+          add("v1", "UI v1: Command Center"); add("v2", "UI v2: Explorer-First"); add("v3", "UI v3: Inspector-First");
+        }
+      }
+
+      for (const id of required) {
+        let el = document.getElementById(id);
+        if (!el) {
+          el = createElement(id);
+          el.id = id;
+          mount.appendChild(el);
+        }
+        seedSelect(el, id);
+      }
+
+      const includeLocal = document.getElementById("searchIncludeLocal");
+      const includeSp = document.getElementById("searchIncludeSp");
+      if (includeLocal && includeLocal.type === "checkbox") includeLocal.checked = true;
+      if (includeSp && includeSp.type === "checkbox") includeSp.checked = true;
+
+      const searchMax = document.getElementById("searchMaxInput");
+      if (searchMax && "value" in searchMax && !searchMax.value) searchMax.value = "200";
+    })();
+  </script>
 
   <script src="./app.js"></script>
 </body>

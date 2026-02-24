@@ -300,6 +300,39 @@ class SharePointClient:
             source_server_relative = "/" + source_server_relative
         if not target_server_relative.startswith("/"):
             target_server_relative = "/" + target_server_relative
+        with self._http() as client:
+            # Prefer body-based API: avoids URL-length limits for deep paths.
+            try:
+                self._copy_item_by_path(
+                    client,
+                    source_server_relative=source_server_relative,
+                    target_server_relative=target_server_relative,
+                    is_folder=is_folder,
+                    overwrite=overwrite,
+                    site_relative_url=site_relative_url,
+                )
+            except httpx.HTTPStatusError:
+                # Fallback for older tenants that don't expose MoveCopyUtil.
+                self._copy_item_legacy(
+                    client,
+                    source_server_relative=source_server_relative,
+                    target_server_relative=target_server_relative,
+                    is_folder=is_folder,
+                    overwrite=overwrite,
+                    site_relative_url=site_relative_url,
+                )
+        return target_server_relative
+
+    def _copy_item_legacy(
+        self,
+        client: httpx.Client,
+        *,
+        source_server_relative: str,
+        target_server_relative: str,
+        is_folder: bool,
+        overwrite: bool,
+        site_relative_url: Optional[str],
+    ) -> None:
         enc_src = urllib.parse.quote(source_server_relative, safe="/")
         enc_dst = urllib.parse.quote(target_server_relative, safe="/")
         digest = self._ensure_digest(site_relative_url)
@@ -308,14 +341,56 @@ class SharePointClient:
             "IF-MATCH": "*",
         }
         site_base = self._resolve_site(site_relative_url)
-        with self._http() as client:
-            if is_folder:
-                url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_src}')/copyTo(strNewUrl='{enc_dst}')"
-            else:
-                url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_src}')/copyTo(strNewUrl='{enc_dst}',boverwrite={'true' if overwrite else 'false'})"
-            resp = client.post(url, headers=headers)
-            resp.raise_for_status()
-        return target_server_relative
+        if is_folder:
+            url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_src}')/copyTo(strNewUrl='{enc_dst}')"
+        else:
+            url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_src}')/copyTo(strNewUrl='{enc_dst}',boverwrite={'true' if overwrite else 'false'})"
+        resp = client.post(url, headers=headers)
+        resp.raise_for_status()
+
+    def _copy_item_by_path(
+        self,
+        client: httpx.Client,
+        *,
+        source_server_relative: str,
+        target_server_relative: str,
+        is_folder: bool,
+        overwrite: bool,
+        site_relative_url: Optional[str],
+    ) -> None:
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "Content-Type": "application/json;odata=verbose",
+        }
+        src_abs = f"{self._resource_base}{source_server_relative}"
+        dst_abs = f"{self._resource_base}{target_server_relative}"
+        payload = {
+            "srcPath": {"DecodedUrl": src_abs},
+            "destPath": {"DecodedUrl": dst_abs},
+            "options": {
+                "KeepBoth": not overwrite,
+                "ResetAuthorAndCreatedOnCopy": False,
+                "ShouldBypassSharedLocks": True,
+            },
+        }
+        method = "CopyFolderByPath" if is_folder else "CopyFileByPath"
+        # Different SPO builds accept either dotted or slash form.
+        endpoints = [
+            f"{site_base}/_api/SP.MoveCopyUtil.{method}()",
+            f"{site_base}/_api/SP.MoveCopyUtil/{method}",
+        ]
+        last_resp: Optional[httpx.Response] = None
+        for endpoint in endpoints:
+            resp = client.post(endpoint, headers=headers, json=payload)
+            last_resp = resp
+            if resp.status_code < 400:
+                return
+            if resp.status_code not in (400, 404):
+                break
+        if last_resp is not None:
+            last_resp.raise_for_status()
 
     def move_item(self, source_server_relative: str, target_server_relative: str, *,
                   is_folder: bool, overwrite: bool = False,
@@ -324,6 +399,81 @@ class SharePointClient:
             source_server_relative = "/" + source_server_relative
         if not target_server_relative.startswith("/"):
             target_server_relative = "/" + target_server_relative
+        with self._http() as client:
+            # Prefer body-based API: avoids URL-length limits for deep paths.
+            try:
+                self._move_item_by_path(
+                    client,
+                    source_server_relative=source_server_relative,
+                    target_server_relative=target_server_relative,
+                    is_folder=is_folder,
+                    overwrite=overwrite,
+                    site_relative_url=site_relative_url,
+                )
+            except httpx.HTTPStatusError:
+                # Fallback for older tenants that don't expose MoveCopyUtil.
+                self._move_item_legacy(
+                    client,
+                    source_server_relative=source_server_relative,
+                    target_server_relative=target_server_relative,
+                    is_folder=is_folder,
+                    overwrite=overwrite,
+                    site_relative_url=site_relative_url,
+                )
+        return target_server_relative
+
+    def _move_item_by_path(
+        self,
+        client: httpx.Client,
+        *,
+        source_server_relative: str,
+        target_server_relative: str,
+        is_folder: bool,
+        overwrite: bool,
+        site_relative_url: Optional[str],
+    ) -> None:
+        site_base = self._resolve_site(site_relative_url)
+        digest = self._ensure_digest(site_relative_url)
+        headers = {
+            "X-RequestDigest": digest,
+            "Content-Type": "application/json;odata=verbose",
+        }
+        src_abs = f"{self._resource_base}{source_server_relative}"
+        dst_abs = f"{self._resource_base}{target_server_relative}"
+        payload = {
+            "srcPath": {"DecodedUrl": src_abs},
+            "destPath": {"DecodedUrl": dst_abs},
+            "options": {
+                "KeepBoth": not overwrite,
+                "ShouldBypassSharedLocks": True,
+            },
+        }
+        method = "MoveFolderByPath" if is_folder else "MoveFileByPath"
+        endpoints = [
+            f"{site_base}/_api/SP.MoveCopyUtil.{method}()",
+            f"{site_base}/_api/SP.MoveCopyUtil/{method}",
+        ]
+        last_resp: Optional[httpx.Response] = None
+        for endpoint in endpoints:
+            resp = client.post(endpoint, headers=headers, json=payload)
+            last_resp = resp
+            if resp.status_code < 400:
+                return
+            if resp.status_code not in (400, 404):
+                break
+        if last_resp is not None:
+            last_resp.raise_for_status()
+
+    def _move_item_legacy(
+        self,
+        client: httpx.Client,
+        *,
+        source_server_relative: str,
+        target_server_relative: str,
+        is_folder: bool,
+        overwrite: bool,
+        site_relative_url: Optional[str],
+    ) -> None:
         enc_src = urllib.parse.quote(source_server_relative, safe="/")
         enc_dst = urllib.parse.quote(target_server_relative, safe="/")
         digest = self._ensure_digest(site_relative_url)
@@ -332,18 +482,16 @@ class SharePointClient:
             "IF-MATCH": "*",
         }
         site_base = self._resolve_site(site_relative_url)
-        with self._http() as client:
-            if is_folder:
-                url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_src}')/moveTo(newurl='{enc_dst}')"
-            else:
-                url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_src}')/moveTo(newUrl='{enc_dst}',flags={'1' if overwrite else '0'})"
-            resp = client.post(url, headers=headers)
-            if resp.status_code >= 400:
-                headers2 = dict(headers)
-                headers2["X-HTTP-Method"] = "MERGE"
-                resp = client.post(url, headers=headers2)
-            resp.raise_for_status()
-        return target_server_relative
+        if is_folder:
+            url = f"{site_base}/_api/web/GetFolderByServerRelativeUrl('{enc_src}')/moveTo(newurl='{enc_dst}')"
+        else:
+            url = f"{site_base}/_api/web/GetFileByServerRelativeUrl('{enc_src}')/moveTo(newUrl='{enc_dst}',flags={'1' if overwrite else '0'})"
+        resp = client.post(url, headers=headers)
+        if resp.status_code >= 400:
+            headers2 = dict(headers)
+            headers2["X-HTTP-Method"] = "MERGE"
+            resp = client.post(url, headers=headers2)
+        resp.raise_for_status()
 
     def delete_item(self, server_relative_url: str, *, is_folder: bool,
                     site_relative_url: Optional[str] = None, recycle: bool = True) -> None:
