@@ -36,6 +36,7 @@ from ..services.rename_service import apply_rename, safe_new_name
 from ..services.tag_store import TagStore
 from ..services.ai_summary import AISummarizer
 from ..services.ai_tagging import AITagger, TaggingError
+from ..services.link_migration_log import LinkMigrationLog
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
@@ -63,6 +64,8 @@ from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
 from .tag_flyout_panel import TagFlyoutPanel
 from .smart_actions_panel import SmartActionsPanel
+from .link_migration_log_dialog import LinkMigrationLogDialog
+from .resolve_old_link_dialog import ResolveOldLinkDialog
 from ..services import edit_session
 from ..logging_setup import get_log_file_path
 
@@ -82,6 +85,7 @@ class MainWindow(QMainWindow):
         self._favorites_manager: FavoritesManager = ensure_favorites(self._cfg)
         self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
         self._tag_store = TagStore()
+        self._link_migration_log = LinkMigrationLog()
 
         self._translator: Translator = self._create_translator()
         self._summarizer: Optional[AISummarizer] = self._create_summarizer()
@@ -117,6 +121,7 @@ class MainWindow(QMainWindow):
 
         self._toolbar = self._build_toolbar()
         self.addToolBar(Qt.TopToolBarArea, self._toolbar)
+        self._build_menus()
 
         self._workspace_holder = QWidget()
         self._workspace_layout = QVBoxLayout(self._workspace_holder)
@@ -282,6 +287,22 @@ class MainWindow(QMainWindow):
         settings.triggered.connect(self._open_settings)
         tb.addAction(settings)
 
+        export_link_log = QAction("Export Link Log...", self)
+        export_link_log.triggered.connect(self._export_link_migration_log)
+        tb.addAction(export_link_log)
+
+        view_link_log = QAction("View Link Log...", self)
+        view_link_log.triggered.connect(self._open_link_migration_log)
+        tb.addAction(view_link_log)
+
+        resolve_old_link = QAction("Resolve Old Link...", self)
+        resolve_old_link.triggered.connect(self._open_resolve_old_link_dialog)
+        tb.addAction(resolve_old_link)
+
+        import_link_log = QAction("Import Link Log...", self)
+        import_link_log.triggered.connect(self._import_link_migration_log)
+        tb.addAction(import_link_log)
+
         # Toggle preview pane (off by default to avoid clutter)
         toggle_preview = QAction("Preview Pane", self)
         toggle_preview.setCheckable(True)
@@ -353,6 +374,32 @@ class MainWindow(QMainWindow):
         self._follow_toggle.setEnabled(False)
 
         return tb
+
+    def _build_menus(self) -> None:
+        menu_bar = self.menuBar()
+        tools_menu = menu_bar.addMenu("Tools")
+
+        resolve_old_link = QAction("Resolve Old Link...", self)
+        resolve_old_link.triggered.connect(self._open_resolve_old_link_dialog)
+        tools_menu.addAction(resolve_old_link)
+
+        view_link_log = QAction("View Link Log...", self)
+        view_link_log.triggered.connect(self._open_link_migration_log)
+        tools_menu.addAction(view_link_log)
+
+        export_link_log = QAction("Export Link Log...", self)
+        export_link_log.triggered.connect(self._export_link_migration_log)
+        tools_menu.addAction(export_link_log)
+
+        import_link_log = QAction("Import Link Log...", self)
+        import_link_log.triggered.connect(self._import_link_migration_log)
+        tools_menu.addAction(import_link_log)
+
+        tools_menu.addSeparator()
+
+        settings_action = QAction("Settings...", self)
+        settings_action.triggered.connect(self._open_settings)
+        tools_menu.addAction(settings_action)
 
     # ------------------------------------------------------------- workspaces
     def _setup_shortcuts(self) -> None:
@@ -1275,6 +1322,18 @@ QLabel#SmartCostLabel {{
         return None
 
     def _open_favorite(self, favorite: FavoriteLocation) -> None:
+        if favorite.kind == "sharepoint" and favorite.server_relative_url:
+            resolved = self._link_migration_log.resolve_target(
+                favorite.server_relative_url,
+                site_relative_url=favorite.site_relative_url,
+            )
+            if resolved and resolved.get("server_relative_url") != favorite.server_relative_url:
+                favorite.server_relative_url = resolved.get("server_relative_url")
+                if resolved.get("site_relative_url"):
+                    favorite.site_relative_url = resolved.get("site_relative_url")
+                self._favorites_manager.update(favorite)
+                self._persist_state(save_workspaces=False)
+                self._refresh_favorites_panel()
         pane = self._active_pane()
         if pane and pane.definition.kind != "translation" and pane.definition.kind == favorite.kind:
             definition = pane.definition
@@ -1311,6 +1370,152 @@ QLabel#SmartCostLabel {{
             pane = self._workspace_panes.get(definition.id)
             if pane:
                 pane.set_root_to_path(favorite.server_relative_url)
+
+    def _record_sharepoint_migration(
+        self,
+        *,
+        old_server_relative_url: str,
+        new_server_relative_url: str,
+        is_folder: bool,
+        source_site_relative_url: Optional[str],
+        target_site_relative_url: Optional[str] = None,
+        operation_type: str,
+        workspace_id: Optional[str] = None,
+    ) -> None:
+        old_path = str(old_server_relative_url or "").strip()
+        new_path = str(new_server_relative_url or "").strip()
+        if not old_path or not new_path or old_path == new_path:
+            return
+        target_site = target_site_relative_url or source_site_relative_url
+        old_name = os.path.basename(old_path.rstrip("/")) or old_path
+        new_name = os.path.basename(new_path.rstrip("/")) or new_path
+        source_site_url = self._resolved_site_url(source_site_relative_url)
+        target_site_url = self._resolved_site_url(target_site)
+        old_web_url = self._link_migration_log.build_web_url(self._cfg.sp_base_url, old_path)
+        new_web_url = self._link_migration_log.build_web_url(self._cfg.sp_base_url, new_path)
+        self._link_migration_log.record(
+            operation_type=operation_type,
+            item_type="folder" if is_folder else "file",
+            old_server_relative_url=old_path,
+            new_server_relative_url=new_path,
+            source_site_relative_url=source_site_relative_url,
+            target_site_relative_url=target_site,
+            source_site_url=source_site_url,
+            target_site_url=target_site_url,
+            old_web_url=old_web_url,
+            new_web_url=new_web_url,
+            old_display_name=old_name,
+            new_display_name=new_name,
+            workspace_id=workspace_id,
+            status="completed",
+        )
+        updated = self._favorites_manager.rewrite_sharepoint_paths(
+            old_server_relative_url=old_path,
+            new_server_relative_url=new_path,
+            old_site_relative_url=source_site_relative_url,
+            new_site_relative_url=target_site,
+        )
+        if updated:
+            self._refresh_favorites_panel()
+            self._persist_state(save_workspaces=False)
+            self.statusBar().showMessage(f"Updated {updated} favorite link(s) after SharePoint move.", 5000)
+
+    def _resolved_site_url(self, site_relative_url: Optional[str]) -> Optional[str]:
+        base = (self._cfg.sp_base_url or "").strip()
+        if not base:
+            return None
+        from urllib.parse import urljoin, urlparse
+
+        parsed = urlparse(base)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if not site_relative_url:
+            return base
+        rel = str(site_relative_url).strip()
+        if not rel.startswith("/"):
+            rel = "/" + rel
+        return urljoin(origin, rel)
+
+    def _export_link_migration_log(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Link Migration Log",
+            "smart_explorer_link_migrations.json",
+            "JSON Files (*.json);;CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                self._link_migration_log.export_csv(path)
+            else:
+                self._link_migration_log.export_json(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Link Log", f"Failed to export link log: {exc}")
+            return
+        self.statusBar().showMessage(f"Exported link migration log to {path}", 5000)
+
+    def _import_link_migration_log(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Link Migration Log",
+            "",
+            "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            report = self._link_migration_log.import_json_report(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Link Log", f"Failed to import link log: {exc}")
+            return
+        message = (
+            f"Imported {report['added']} migration record(s), "
+            f"skipped {report['duplicates']} duplicate(s), "
+            f"detected {report['conflicts']} conflict(s) from {path}"
+        )
+        self.statusBar().showMessage(message, 7000)
+
+    def _open_link_migration_log(self) -> None:
+        dlg = LinkMigrationLogDialog(self._link_migration_log, self)
+        dlg.exec()
+
+    def _open_resolve_old_link_dialog(self) -> None:
+        dlg = ResolveOldLinkDialog(self._link_migration_log, self._cfg, self)
+        dlg.open_in_app_requested.connect(self._open_resolved_sharepoint_location)
+        dlg.exec()
+
+    def _open_resolved_sharepoint_location(self, server_relative_url: str, site_relative_url: str) -> None:
+        path = str(server_relative_url or "").strip()
+        site = str(site_relative_url or "").strip() or None
+        if not path:
+            return
+        pane = self._active_pane()
+        if pane and pane.definition.kind == "sharepoint":
+            definition = pane.definition
+        else:
+            definition = WorkspaceDefinition(
+                id=self._workspace_manager.ensure_unique_id("ws"),
+                kind="sharepoint",
+                name="Resolved SharePoint Link",
+            )
+        definition.kind = "sharepoint"
+        definition.name = "Resolved SharePoint Link"
+        definition.site_relative_url = site or definition.site_relative_url or ""
+        definition.server_relative_url = path
+        definition.root_path = None
+        definition.base_workspace_id = None
+        definition.language = None
+        if definition.id in [ws.id for ws in self._workspace_manager.definitions()]:
+            self._workspace_manager.update(definition)
+        else:
+            self._workspace_manager.add(definition)
+        self._persist_state()
+        self._rebuild_workspace_area(focus_workspace_id=definition.id)
+        pane = self._workspace_panes.get(definition.id)
+        if pane:
+            pane.set_root_to_path(path)
 
     def _on_save_layout(self) -> None:
         name, ok = QInputDialog.getText(self, "Save Layout", "Layout name:", text=f"Layout {len(self._layouts_manager.all()) + 1}")
@@ -2901,11 +3106,23 @@ QLabel#SmartCostLabel {{
                 from ..services.rename_service import apply_rename
                 apply_rename(path, new_name)
             elif target_pane.definition.kind == "sharepoint":
-                self._backend.sp_rename(
+                parent = path.rsplit("/", 1)[0]
+                new_path = f"{parent}/{new_name}"
+                resp = self._backend.sp_rename(
                     server_relative_url=path,
                     new_name=new_name,
                     is_folder=bool(it.get("is_dir")),
                     site_relative_url=target_pane.definition.site_relative_url,
+                )
+                if isinstance(resp, dict) and resp.get("newPath"):
+                    new_path = resp["newPath"]
+                self._record_sharepoint_migration(
+                    old_server_relative_url=path,
+                    new_server_relative_url=new_path,
+                    is_folder=bool(it.get("is_dir")),
+                    source_site_relative_url=target_pane.definition.site_relative_url,
+                    operation_type="rename",
+                    workspace_id=target_pane.id,
                 )
         except Exception as exc:
             QMessageBox.warning(self, "Rename", f"Failed to rename item: {exc}")
@@ -3219,6 +3436,14 @@ QLabel#SmartCostLabel {{
                             new_path = resp["newPath"]
                     except Exception:
                         raise
+                    self._record_sharepoint_migration(
+                        old_server_relative_url=old_path,
+                        new_server_relative_url=new_path,
+                        is_folder=is_dir,
+                        source_site_relative_url=site,
+                        operation_type="rename",
+                        workspace_id=base_pane.id if base_pane else None,
+                    )
                     undo_batch.append({
                         "type": "sp",
                         "old_path": old_path,
@@ -3418,6 +3643,15 @@ QLabel#SmartCostLabel {{
                             is_folder=item["is_dir"],
                             overwrite=False,
                             site_relative_url=source_site,
+                        )
+                        self._record_sharepoint_migration(
+                            old_server_relative_url=src,
+                            new_server_relative_url=dest,
+                            is_folder=bool(item["is_dir"]),
+                            source_site_relative_url=source_site,
+                            target_site_relative_url=target_site,
+                            operation_type="move",
+                            workspace_id=source.id,
                         )
                     else:
                         self._backend.sp_copy(

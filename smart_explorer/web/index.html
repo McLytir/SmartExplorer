@@ -181,6 +181,26 @@
             <div class="mb-2 font-semibold text-slate-500">Current Task Cost</div>
             <div class="font-semibold text-primary">$0.00 (Idle)</div>
           </div>
+
+          <div class="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+            <div class="mb-2 text-sm font-semibold">Link Migration Log</div>
+            <div class="flex gap-2">
+              <input id="migrationResolveInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Paste old SharePoint URL or path" />
+              <button id="migrationResolveBtn" class="rounded-lg bg-primary px-3 py-2 text-xs text-white">Resolve</button>
+            </div>
+            <div class="mt-2 flex gap-2">
+              <input id="migrationFilterInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Filter migration records" />
+              <button id="migrationImportBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Import JSON</button>
+            </div>
+            <div id="migrationResolveOutput" class="mt-2 rounded-lg border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">No resolution yet.</div>
+            <div class="mt-3 flex gap-2">
+              <button id="migrationCopyResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Copy Resolved</button>
+              <button id="migrationOpenResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Open Resolved</button>
+              <button id="migrationExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
+              <button id="migrationExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
+            </div>
+            <div id="migrationLogList" class="se-scroll mt-3 max-h-56 space-y-2 overflow-auto"></div>
+          </div>
         </div>
       </aside>
     </div>
@@ -199,6 +219,7 @@
   </div>
 
   <input id="importConfigInput" type="file" accept="application/json" hidden />
+  <input id="migrationImportInput" type="file" accept="application/json" hidden />
   <input id="leftUploadInput" type="file" hidden />
   <input id="rightUploadInput" type="file" hidden />
 

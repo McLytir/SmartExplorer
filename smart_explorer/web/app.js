@@ -38,6 +38,7 @@ const state = {
   glossary: [],
   translationLocalCache: {},
   pdfBookmarks: [],
+  migrationLog: [],
 };
 
 function paneState(key){
@@ -70,6 +71,7 @@ const el = {
   previewBtn:id('previewBtn'), extractBtn:id('extractBtn'), summaryBtn:id('summaryBtn'), questionInput:id('questionInput'), askBtn:id('askBtn'), previewFrame:id('previewFrame'), previewText:id('previewText'),
   pdfPageInput:id('pdfPageInput'), pdfJumpBtn:id('pdfJumpBtn'), pdfBookmarkAddBtn:id('pdfBookmarkAddBtn'), pdfBookmarksList:id('pdfBookmarksList'),
   checkoutBtn:id('checkoutBtn'), checkinBtn:id('checkinBtn'), undoCheckoutBtn:id('undoCheckoutBtn'), loadVersionsBtn:id('loadVersionsBtn'), versionsSelect:id('versionsSelect'), downloadVersionBtn:id('downloadVersionBtn'), restoreVersionBtn:id('restoreVersionBtn'), versionsOutput:id('versionsOutput'),
+  migrationResolveInput:id('migrationResolveInput'), migrationResolveBtn:id('migrationResolveBtn'), migrationFilterInput:id('migrationFilterInput'), migrationImportBtn:id('migrationImportBtn'), migrationImportInput:id('migrationImportInput'), migrationResolveOutput:id('migrationResolveOutput'), migrationCopyResolvedBtn:id('migrationCopyResolvedBtn'), migrationOpenResolvedBtn:id('migrationOpenResolvedBtn'), migrationExportJsonBtn:id('migrationExportJsonBtn'), migrationExportCsvBtn:id('migrationExportCsvBtn'), migrationLogList:id('migrationLogList'),
 };
 
 function id(x){ return document.getElementById(x); }
@@ -1132,7 +1134,9 @@ async function executeSingleJobItem(job,item){
   }
   if(item.kind==='sharepoint'){
     const dst=`${(targetPath||'/').replace(/\/+$/,'')}/${targetName}`;
-    return apiPost(type==='move'?'/api/sp/move':'/api/sp/copy',{source_server_relative_url:item.path,target_server_relative_url:dst,is_folder:!!item.isDir,overwrite:policy==='overwrite',site_relative_url:item.site||destPane.site||null});
+    const result=await apiPost(type==='move'?'/api/sp/move':'/api/sp/copy',{source_server_relative_url:item.path,target_server_relative_url:dst,is_folder:!!item.isDir,overwrite:policy==='overwrite',site_relative_url:item.site||destPane.site||null});
+    if(type==='move') recordMigration('move',item.isDir?'folder':'file',item.path,dst,item.site||'',destPane.site||item.site||'');
+    return result;
   }
   if(item.isDir) throw new Error('local_folder_to_sp_not_supported');
   return apiPost('/api/transfer/local-to-sp',{site_relative_url:destPane.site||null,source_paths:[item.path],destination_server_relative_url:targetPath,move:type==='move',overwrite:policy==='overwrite'});
@@ -1470,6 +1474,7 @@ async function executeTransfer(sources,target,move,withPreview=true){
     if(s.kind==='sharepoint'){
       const dst=`${target.path.replace(/\/+$/,'')}/${name}`;
       await apiPost(move?'/api/sp/move':'/api/sp/copy',{source_server_relative_url:s.path,target_server_relative_url:dst,is_folder:s.isDir,overwrite:shouldOverwrite,site_relative_url:s.site||target.site||null});
+      if(move) recordMigration('move',s.isDir?'folder':'file',s.path,dst,s.site||'',target.site||s.site||'');
     }else{
       if(s.isDir) throw new Error('local_folder_to_sp_not_supported');
       await apiPost('/api/transfer/local-to-sp',{site_relative_url:target.site||null,source_paths:[s.path],destination_server_relative_url:target.path,move,overwrite:shouldOverwrite});
@@ -1530,6 +1535,8 @@ async function renameSelected(){
     else{
       const it=p.items.find(x=>x.path===path);
       await apiPost('/api/sp/rename',{server_relative_url:path,new_name:newName,is_folder:!!it?.isDir,site_relative_url:p.site||null});
+      const parent=normalizeSpPath(path).split('/').slice(0,-1).join('/')||'/';
+      recordMigration('rename',it?.isDir?'folder':'file',path,`${parent}/${newName}`,p.site||'',p.site||'');
     }
     await loadPane(p.key,p.path); setStatus('Renamed.');
   }catch(e){ setStatus(`Rename failed: ${err(e)}`); }
@@ -1565,6 +1572,7 @@ async function applyTranslationRename(){
         const isDir=!!(match&&match.it&&match.it.isDir);
         await apiPost('/api/sp/rename',{server_relative_url:before,new_name:r.new_name,is_folder:isDir,site_relative_url:p.site||null});
         const parent=before.replace(/\/+$/,'').split('/').slice(0,-1).join('/')||'/';
+        recordMigration('rename',isDir?'folder':'file',before,`${parent}/${r.new_name}`,p.site||'',p.site||'');
         undo.push({site:p.site||'',oldPath:before,newPath:`${parent}/${r.new_name}`,isDir});
       }
       if(undo.length) state.spRenameUndoStack.push(undo);
@@ -1580,7 +1588,10 @@ async function undoRename(){
     else{
       const batch=state.spRenameUndoStack.pop();
       if(!batch||!batch.length) return setStatus('No SharePoint rename batch to undo.');
-      for(const op of batch.reverse()) await apiPost('/api/sp/rename',{server_relative_url:op.newPath,new_name:basename(op.oldPath),is_folder:op.isDir,site_relative_url:op.site||null});
+      for(const op of batch.reverse()){
+        await apiPost('/api/sp/rename',{server_relative_url:op.newPath,new_name:basename(op.oldPath),is_folder:op.isDir,site_relative_url:op.site||null});
+        recordMigration('rename',op.isDir?'folder':'file',op.newPath,op.oldPath,op.site||'',op.site||'');
+      }
     }
     await loadPane('left',state.left.path); await loadPane('right',state.right.path); setStatus('Undo complete.');
   }catch(e){ setStatus(`Undo failed: ${err(e)}`); }
@@ -1755,7 +1766,254 @@ async function spRestoreVersion(){ const p=activePane(), path=selectedSinglePath
 
 function loadFavorites(){ try{ state.favorites=JSON.parse(localStorage.getItem('smx_web_favorites')||'[]'); if(!Array.isArray(state.favorites)) state.favorites=[]; }catch{ state.favorites=[]; } }
 function saveFavorites(){ localStorage.setItem('smx_web_favorites',JSON.stringify(state.favorites)); }
-function renderFavorites(){ el.favoritesList.innerHTML=''; state.favorites.forEach((f,i)=>{ const row=document.createElement('div'); row.className='favorite'; row.innerHTML=`<div><strong>${f.label||f.path}</strong><small>${f.kind}${f.site?` | ${f.site}`:''}</small></div>`; const act=document.createElement('div'); const open=document.createElement('button'); open.textContent='Open'; open.onclick=async()=>{ const p=activePane(); p.kind=f.kind; p.site=f.site||''; p.path=f.path; if(p.kind==='sharepoint'){ await loadSitesForPane(p); await loadLibrariesForPane(p);} updatePaneControls(p.key); await loadPane(p.key,p.path); }; const del=document.createElement('button'); del.textContent='X'; del.onclick=()=>{ state.favorites.splice(i,1); saveFavorites(); renderFavorites(); }; act.appendChild(open); act.appendChild(del); row.appendChild(act); el.favoritesList.appendChild(row); }); }
+function normalizeSpPath(path){ let v=String(path||'').trim(); if(!v) return ''; if(!v.startsWith('/')) v='/'+v; return v.replace(/\/+$/,'')||'/'; }
+function loadMigrationLog(){ try{ state.migrationLog=JSON.parse(localStorage.getItem('smx_web_link_migrations')||'[]'); if(!Array.isArray(state.migrationLog)) state.migrationLog=[]; }catch{ state.migrationLog=[]; } }
+function saveMigrationLog(){ localStorage.setItem('smx_web_link_migrations',JSON.stringify(state.migrationLog)); }
+function buildWebUrlFromPath(path){
+  const base=String(el.spBaseUrlInput?.value||'').trim();
+  if(!base) return '';
+  try{
+    const u=new URL(base);
+    return new URL(normalizeSpPath(path), `${u.protocol}//${u.host}`).toString();
+  }catch{
+    return '';
+  }
+}
+function toCsvValue(value){
+  const text=String(value ?? '');
+  if(/[",\n]/.test(text)) return `"${text.replace(/"/g,'""')}"`;
+  return text;
+}
+function downloadBlob(filename, content, type){
+  const blob=new Blob([content],{type});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+function resolveMigrationTarget(path,site){
+  let current=normalizeSpPath(path);
+  let currentSite=String(site||'').trim();
+  let changed=false;
+  for(let i=0;i<20;i++){
+    let next=null;
+    for(let idx=state.migrationLog.length-1; idx>=0; idx--){
+      const r=state.migrationLog[idx]||{};
+      if(String(r.status||'').toLowerCase()!=='completed') continue;
+      const oldPath=normalizeSpPath(r.old_server_relative_url||'');
+      const newPath=normalizeSpPath(r.new_server_relative_url||'');
+      const srcSite=String(r.source_site_relative_url||'').trim();
+      if(currentSite && srcSite && currentSite!==srcSite) continue;
+      if(!oldPath || !newPath) continue;
+      if(current===oldPath){
+        next={path:newPath,site:String(r.target_site_relative_url||currentSite||'').trim()};
+        break;
+      }
+      if(current.startsWith(oldPath.replace(/\/+$/,'') + '/')){
+        next={path:newPath.replace(/\/+$/,'') + current.slice(oldPath.length),site:String(r.target_site_relative_url||currentSite||'').trim()};
+        break;
+      }
+    }
+    if(!next || next.path===current) break;
+    current=next.path;
+    currentSite=next.site;
+    changed=true;
+  }
+  return changed ? {path:current,site:currentSite} : null;
+}
+function renderMigrationPanel(){
+  if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.disabled=true;
+  if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.disabled=true;
+  if(el.migrationLogList){
+    el.migrationLogList.innerHTML='';
+    const query=String(el.migrationFilterInput?.value||'').trim().toLowerCase();
+    let rows=state.migrationLog.slice().reverse();
+    if(query){
+      rows=rows.filter((r)=>{
+        const hay=[r.timestamp,r.operation_type,r.item_type,r.old_server_relative_url,r.new_server_relative_url,r.source_site_relative_url,r.target_site_relative_url,r.status].map((x)=>String(x||'').toLowerCase()).join(' ');
+        return hay.includes(query);
+      });
+    }
+    rows=rows.slice(0,50);
+    if(!rows.length){
+      el.migrationLogList.innerHTML='<div class="rounded-lg border border-slate-200 p-2 text-xs text-slate-500 dark:border-slate-700">No migration records yet.</div>';
+    }else{
+      rows.forEach((r)=>{
+        const item=document.createElement('div');
+        item.className='rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700';
+        item.innerHTML=`<div class="font-semibold">${escapeHtml(r.operation_type||'move')} · ${escapeHtml(r.item_type||'item')}</div><div class="mt-1 text-slate-500">${escapeHtml(r.old_server_relative_url||'')}</div><div class="mt-1 text-primary">${escapeHtml(r.new_server_relative_url||'')}</div>`;
+        el.migrationLogList.appendChild(item);
+      });
+    }
+  }
+  if(el.migrationResolveOutput && !el.migrationResolveOutput.dataset.touched){
+    el.migrationResolveOutput.textContent=`${state.migrationLog.length} migration record(s) available locally.`;
+  }
+}
+function resolveMigrationInput(){
+  const raw=String(el.migrationResolveInput?.value||'').trim();
+  if(!raw){
+    if(el.migrationResolveOutput){
+      el.migrationResolveOutput.dataset.touched='1';
+      el.migrationResolveOutput.textContent='Paste an old SharePoint URL or path first.';
+    }
+    return;
+  }
+  let path=raw;
+  try{
+    const u=new URL(raw);
+    path=u.pathname||raw;
+  }catch{}
+  const resolved=resolveMigrationTarget(path,'');
+  if(!el.migrationResolveOutput) return;
+  el.migrationResolveOutput.dataset.touched='1';
+  if(!resolved){
+    el.migrationResolveOutput.textContent='No migration record matched that link.';
+    if(el.migrationResolveOutput) el.migrationResolveOutput.dataset.value='';
+    if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.disabled=true;
+    if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.disabled=true;
+    return;
+  }
+  const resolvedUrl=buildWebUrlFromPath(resolved.path);
+  const outputValue=resolvedUrl||resolved.path;
+  el.migrationResolveOutput.textContent=outputValue;
+  el.migrationResolveOutput.dataset.value=outputValue;
+  if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.disabled=!outputValue;
+  if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.disabled=!resolvedUrl;
+}
+async function copyResolvedMigrationValue(){
+  const value=String(el.migrationResolveOutput?.dataset?.value||'').trim();
+  if(!value) return setStatus('Resolve a link first.');
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(value);
+    }else{
+      const tmp=document.createElement('textarea');
+      tmp.value=value;
+      document.body.appendChild(tmp);
+      tmp.select();
+      document.execCommand('copy');
+      tmp.remove();
+    }
+    setStatus('Resolved link copied.');
+  }catch(e){
+    setStatus(`Copy failed: ${err(e)}`);
+  }
+}
+function openResolvedMigrationValue(){
+  const value=String(el.migrationResolveOutput?.dataset?.value||'').trim();
+  if(!value) return setStatus('Resolve a link first.');
+  try{
+    const u=new URL(value);
+    window.open(u.toString(), '_blank', 'noopener,noreferrer');
+    setStatus('Resolved link opened in a new tab.');
+  }catch{
+    setStatus('Resolved value is not a browser URL.');
+  }
+}
+function exportMigrationLogJson(){
+  downloadBlob(`smx-link-migrations-${Date.now()}.json`,JSON.stringify(state.migrationLog,null,2),'application/json');
+  setStatus('Migration log exported as JSON.');
+}
+function exportMigrationLogCsv(){
+  const headers=['timestamp','operation_type','item_type','source_site_relative_url','target_site_relative_url','old_server_relative_url','new_server_relative_url','old_web_url','new_web_url','status'];
+  const lines=[headers.join(',')];
+  state.migrationLog.forEach((r)=>{
+    lines.push(headers.map((h)=>toCsvValue(r?.[h] ?? '')).join(','));
+  });
+  downloadBlob(`smx-link-migrations-${Date.now()}.csv`,lines.join('\n'),'text/csv');
+  setStatus('Migration log exported as CSV.');
+}
+async function importMigrationLogFile(file){
+  if(!file) return;
+  try{
+    const txt=await file.text();
+    const rows=JSON.parse(txt);
+    if(!Array.isArray(rows)) throw new Error('Import file must contain a JSON array.');
+    const seen=new Set(state.migrationLog.map((r)=>`${r.operation_type||''}|${r.source_site_relative_url||''}|${normalizeSpPath(r.old_server_relative_url||'')}|${r.target_site_relative_url||''}|${normalizeSpPath(r.new_server_relative_url||'')}`));
+    const existingSources=new Map();
+    state.migrationLog.forEach((r)=>{
+      const sourceKey=`${r?.operation_type||''}|${r?.source_site_relative_url||''}|${normalizeSpPath(r?.old_server_relative_url||'')}`;
+      const targetKey=`${r?.target_site_relative_url||''}|${normalizeSpPath(r?.new_server_relative_url||'')}`;
+      if(!existingSources.has(sourceKey)) existingSources.set(sourceKey,new Set());
+      existingSources.get(sourceKey).add(targetKey);
+    });
+    let added=0;
+    let duplicates=0;
+    let conflicts=0;
+    rows.forEach((r)=>{
+      const oldPath=normalizeSpPath(r?.old_server_relative_url||'');
+      const newPath=normalizeSpPath(r?.new_server_relative_url||'');
+      const key=`${r?.operation_type||''}|${r?.source_site_relative_url||''}|${normalizeSpPath(r?.old_server_relative_url||'')}|${r?.target_site_relative_url||''}|${normalizeSpPath(r?.new_server_relative_url||'')}`;
+      if(!oldPath||!newPath) return;
+      if(seen.has(key)){ duplicates++; return; }
+      const sourceKey=`${r?.operation_type||''}|${r?.source_site_relative_url||''}|${oldPath}`;
+      const targetKey=`${r?.target_site_relative_url||''}|${newPath}`;
+      if(!existingSources.has(sourceKey)) existingSources.set(sourceKey,new Set());
+      const priorTargets=existingSources.get(sourceKey);
+      if(Array.from(priorTargets).some((value)=>value!==targetKey)) conflicts++;
+      seen.add(key);
+      priorTargets.add(targetKey);
+      state.migrationLog.push(r);
+      added++;
+    });
+    state.migrationLog=state.migrationLog.slice(-5000);
+    saveMigrationLog();
+    renderMigrationPanel();
+    setStatus(`Imported ${added} migration record(s), skipped ${duplicates} duplicate(s), detected ${conflicts} conflict(s).`);
+  }catch(e){
+    setStatus(`Migration import failed: ${err(e)}`);
+  }
+}
+function rewriteFavoritePaths(oldPath,newPath,oldSite,newSite){
+  const oldNorm=normalizeSpPath(oldPath), newNorm=normalizeSpPath(newPath);
+  if(!oldNorm || !newNorm) return 0;
+  let updated=0;
+  state.favorites.forEach((f)=>{
+    if(f.kind!=='sharepoint') return;
+    const cur=normalizeSpPath(f.path||'');
+    const favSite=String(f.site||'').trim();
+    if(oldSite && favSite && favSite!==String(oldSite||'').trim()) return;
+    if(cur===oldNorm){
+      f.path=newNorm;
+      if(newSite) f.site=newSite;
+      updated++;
+      return;
+    }
+    if(cur.startsWith(oldNorm.replace(/\/+$/,'') + '/')){
+      f.path=newNorm.replace(/\/+$/,'') + cur.slice(oldNorm.length);
+      if(newSite) f.site=newSite;
+      updated++;
+    }
+  });
+  if(updated) saveFavorites();
+  return updated;
+}
+function recordMigration(operationType,itemType,oldPath,newPath,sourceSite,targetSite){
+  const oldNorm=normalizeSpPath(oldPath), newNorm=normalizeSpPath(newPath);
+  if(!oldNorm || !newNorm || oldNorm===newNorm) return;
+  state.migrationLog.push({
+    id:`mig-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+    timestamp:new Date().toISOString(),
+    operation_type:operationType,
+    item_type:itemType,
+    source_site_relative_url:sourceSite||'',
+    target_site_relative_url:targetSite||sourceSite||'',
+    old_server_relative_url:oldNorm,
+    new_server_relative_url:newNorm,
+    old_web_url:buildWebUrlFromPath(oldNorm),
+    new_web_url:buildWebUrlFromPath(newNorm),
+    status:'completed',
+  });
+  state.migrationLog=state.migrationLog.slice(-5000);
+  saveMigrationLog();
+  const updated=rewriteFavoritePaths(oldNorm,newNorm,sourceSite,targetSite||sourceSite);
+  renderMigrationPanel();
+  if(updated) renderFavorites();
+}
+function renderFavorites(){ el.favoritesList.innerHTML=''; state.favorites.forEach((f,i)=>{ const row=document.createElement('div'); row.className='favorite'; row.innerHTML=`<div><strong>${f.label||f.path}</strong><small>${f.kind}${f.site?` | ${f.site}`:''}</small></div>`; const act=document.createElement('div'); const open=document.createElement('button'); open.textContent='Open'; open.onclick=async()=>{ const target=(f.kind==='sharepoint'&&f.path)?(resolveMigrationTarget(f.path,f.site)||{path:f.path,site:f.site||''}):{path:f.path,site:f.site||''}; if(f.kind==='sharepoint' && target.path!==f.path){ f.path=target.path; f.site=target.site||f.site||''; saveFavorites(); renderFavorites(); } const p=activePane(); p.kind=f.kind; p.site=target.site||f.site||''; p.path=target.path; if(p.kind==='sharepoint'){ await loadSitesForPane(p); await loadLibrariesForPane(p);} updatePaneControls(p.key); await loadPane(p.key,p.path); }; const del=document.createElement('button'); del.textContent='X'; del.onclick=()=>{ state.favorites.splice(i,1); saveFavorites(); renderFavorites(); }; act.appendChild(open); act.appendChild(del); row.appendChild(act); el.favoritesList.appendChild(row); }); }
 function addFavorite(){ const p=activePane(); if(!p.path) return; state.favorites.unshift({label:(el.favoriteNameInput.value||'').trim(),kind:p.kind,path:p.path,site:p.site||''}); state.favorites=state.favorites.slice(0,40); saveFavorites(); renderFavorites(); el.favoriteNameInput.value=''; setStatus('Favorite saved.'); }
 
 function loadLayouts(){ try{ state.layouts=JSON.parse(localStorage.getItem('smx_web_layouts')||'[]'); if(!Array.isArray(state.layouts)) state.layouts=[]; }catch{ state.layouts=[]; } }
@@ -1795,6 +2053,7 @@ function exportConfig(){
     language:state.language,
     translationEnabled:state.translationEnabled,
     favorites:state.favorites,
+    migrationLog:state.migrationLog,
     layouts:state.layouts,
     recent:state.recent,
     sessions:state.sessions,
@@ -1817,6 +2076,7 @@ async function importConfigFromFile(file){
     state.language=(data.language||state.language||'English');
     state.translationEnabled=!!data.translationEnabled;
     state.favorites=Array.isArray(data.favorites)?data.favorites:[];
+    state.migrationLog=Array.isArray(data.migrationLog)?data.migrationLog:[];
     state.layouts=Array.isArray(data.layouts)?data.layouts:[];
     state.recent=Array.isArray(data.recent)?data.recent:[];
     state.sessions=Array.isArray(data.sessions)?data.sessions:[];
@@ -1825,7 +2085,7 @@ async function importConfigFromFile(file){
       state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}];
       state.activeSessionId=state.sessions[0].id;
     }
-    saveFavorites(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
+    saveFavorites(); saveMigrationLog(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
     persistSessions();
     el.langInput.value=state.language;
     el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`;
@@ -1891,6 +2151,15 @@ function wireGlobalEvents(){
   if(el.duplicateSessionBtn) el.duplicateSessionBtn.onclick=duplicateSession;
   if(el.renameSessionBtn) el.renameSessionBtn.onclick=renameSession;
   if(el.closeSessionBtn) el.closeSessionBtn.onclick=closeSession;
+  if(el.migrationResolveBtn) el.migrationResolveBtn.onclick=resolveMigrationInput;
+  if(el.migrationResolveInput) el.migrationResolveInput.onkeydown=(e)=>{ if(e.key==='Enter') resolveMigrationInput(); };
+  if(el.migrationFilterInput) el.migrationFilterInput.oninput=renderMigrationPanel;
+  if(el.migrationImportBtn) el.migrationImportBtn.onclick=()=>el.migrationImportInput?.click();
+  if(el.migrationImportInput) el.migrationImportInput.onchange=async()=>{ const f=el.migrationImportInput.files&&el.migrationImportInput.files[0]; await importMigrationLogFile(f); el.migrationImportInput.value=''; };
+  if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.onclick=copyResolvedMigrationValue;
+  if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.onclick=openResolvedMigrationValue;
+  if(el.migrationExportJsonBtn) el.migrationExportJsonBtn.onclick=exportMigrationLogJson;
+  if(el.migrationExportCsvBtn) el.migrationExportCsvBtn.onclick=exportMigrationLogCsv;
   el.exportConfigBtn.onclick=exportConfig;
   el.importConfigBtn.onclick=()=>el.importConfigInput.click();
   el.importConfigInput.onchange=async()=>{ const f=el.importConfigInput.files&&el.importConfigInput.files[0]; await importConfigFromFile(f); el.importConfigInput.value=''; };
@@ -1914,7 +2183,7 @@ async function init(){
   loadAutomationRules(); renderAutomationRules();
   loadSearchFilters(); renderSearchFilters(); renderSearchResults();
   loadJobsState(); renderJobs();
-  loadFavorites(); renderFavorites(); loadLayouts(); renderLayouts(); loadRecent(); renderRecent();
+  loadFavorites(); loadMigrationLog(); renderFavorites(); renderMigrationPanel(); loadLayouts(); renderLayouts(); loadRecent(); renderRecent();
   loadSessions(); renderSessionTabs();
   const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
   await applyWorkspaceSnapshot(active.snapshot || currentWorkspaceSnapshot());

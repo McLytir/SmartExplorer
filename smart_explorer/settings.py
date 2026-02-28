@@ -38,6 +38,8 @@ class AppConfig:
     libretranslate_url: Optional[str] = None  # e.g., https://libretranslate.de
     # User shortcuts (action -> key sequence string)
     shortcuts: Optional[Dict[str, str]] = None
+    # Recent "Resolve Old Link" history
+    recent_resolved_links: Optional[list[dict]] = None
 
 
 def _config_path() -> str:
@@ -67,6 +69,8 @@ def load_config() -> AppConfig:
         cfg.favorites = []
     if cfg.saved_layouts is None:
         cfg.saved_layouts = []
+    if cfg.recent_resolved_links is None:
+        cfg.recent_resolved_links = []
     if getattr(cfg, "theme", None) not in {"light", "dark", "solarized_light", "solarized_dark"}:
         cfg.theme = "light"
     if getattr(cfg, "translator_provider", None) not in {"auto", "openai", "backend", "google_free", "libretranslate", "identity"}:

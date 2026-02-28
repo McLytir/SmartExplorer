@@ -253,6 +253,43 @@ class FavoritesManager:
         self._favorites[favorite.id] = favorite
         self._prune_invalid()
 
+    def rewrite_sharepoint_paths(
+        self,
+        *,
+        old_server_relative_url: str,
+        new_server_relative_url: str,
+        old_site_relative_url: Optional[str] = None,
+        new_site_relative_url: Optional[str] = None,
+    ) -> int:
+        old_path = self._normalize_sharepoint_path(old_server_relative_url)
+        new_path = self._normalize_sharepoint_path(new_server_relative_url)
+        if not old_path or not new_path:
+            return 0
+        updated = 0
+        for favorite in self._favorites.values():
+            if favorite.kind != "sharepoint":
+                continue
+            current = self._normalize_sharepoint_path(favorite.server_relative_url)
+            if not current:
+                continue
+            fav_site = (favorite.site_relative_url or "").strip() or None
+            if old_site_relative_url and fav_site and fav_site != old_site_relative_url:
+                continue
+            replacement = None
+            if current == old_path:
+                replacement = new_path
+            elif current.startswith(old_path.rstrip("/") + "/"):
+                replacement = new_path.rstrip("/") + current[len(old_path):]
+            if not replacement:
+                continue
+            favorite.server_relative_url = replacement
+            if new_site_relative_url:
+                favorite.site_relative_url = new_site_relative_url
+            updated += 1
+        if updated:
+            self._prune_invalid()
+        return updated
+
     def reorder_before(self, source_id: str, target_id: Optional[str]) -> None:
         order = [fav for fav in self._favorites.values()]
         ids = [fav.id for fav in order]
@@ -303,6 +340,15 @@ class FavoritesManager:
         if favorite.kind == "sharepoint":
             return bool(favorite.site_relative_url and favorite.server_relative_url)
         return False
+
+    @staticmethod
+    def _normalize_sharepoint_path(path: Optional[str]) -> str:
+        value = str(path or "").strip()
+        if not value:
+            return ""
+        if not value.startswith("/"):
+            value = "/" + value
+        return value.rstrip("/") or "/"
 
 
 class LayoutManager:
