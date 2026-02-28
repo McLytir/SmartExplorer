@@ -39,7 +39,8 @@ smart_explorer_cache.json
 sp_cookies.json
 preview_cache/
 
-#cache
-__pycache__
+# Python cache
+__pycache__/
+*.py[cod]
 
 
