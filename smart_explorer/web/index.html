@@ -169,6 +169,7 @@
             <button id="cutBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Cut</button>
             <button id="pasteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Paste</button>
             <button id="renameBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Rename</button>
+            <button id="aiRenameBtn" class="rounded-md border border-primary/30 bg-primary/10 p-2 text-primary">AI Rename</button>
             <button id="deleteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Delete</button>
             <button id="mkdirBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">New Folder</button>
             <button id="openBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Open</button>
@@ -180,6 +181,16 @@
           <div class="mt-4 rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-800">
             <div class="mb-2 font-semibold text-slate-500">Current Task Cost</div>
             <div class="font-semibold text-primary">$0.00 (Idle)</div>
+          </div>
+
+          <div class="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+            <div class="mb-2 text-sm font-semibold">AI Rename Batch Log</div>
+            <div class="flex gap-2">
+              <input id="aiRenameFilterInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Filter AI rename batches" />
+              <button id="aiRenameExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
+              <button id="aiRenameExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
+            </div>
+            <div id="aiRenameLogList" class="se-scroll mt-3 max-h-48 space-y-2 overflow-auto"></div>
           </div>
 
           <div class="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
@@ -231,6 +242,18 @@
       <div class="row">
         <button id="renamePreviewCancelBtn">Cancel</button>
         <button id="renamePreviewProceedBtn">Proceed Safe Renames</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="aiRenamePreviewModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <h3>AI Rename & Organize Preview</h3>
+      <p id="aiRenamePreviewSummary"></p>
+      <pre id="aiRenamePreviewConflicts"></pre>
+      <div class="row">
+        <button id="aiRenamePreviewCancelBtn">Cancel</button>
+        <button id="aiRenamePreviewProceedBtn">Proceed Safe Operations</button>
       </div>
     </div>
   </div>

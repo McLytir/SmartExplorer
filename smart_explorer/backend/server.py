@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from ..settings import load_config, save_config, AppConfig
 from ..services.ai_summary import AISummarizer, SummaryError, extract_text_snippet
+from ..services.ai_rename_planner import AIRenamePlanner, RenamePlanningError
 from ..services.tag_store import TagStore
 from ..translation_cache import TranslationCache
 from ..translators.base import IdentityTranslator, Translator
@@ -225,6 +226,20 @@ class ItemAIRequest(BaseModel):
     question: Optional[str] = None
 
 
+class AIRenamePlanItem(BaseModel):
+    source_path: str
+    current_relative_path: str
+    is_folder: bool = False
+
+
+class AIRenamePlanRequest(BaseModel):
+    kind: str = "local"  # local | sharepoint
+    site_relative_url: Optional[str] = None
+    root_name: Optional[str] = None
+    instruction: Optional[str] = None
+    items: List[AIRenamePlanItem]
+
+
 class TranslateItem(BaseModel):
     name: str
     path: Optional[str] = None
@@ -277,6 +292,23 @@ def create_translator(cfg: AppConfig) -> Translator:
     if api_key and OpenAITranslator is not None:
         return OpenAITranslator(api_key=api_key, model=cfg.model)
     return IdentityTranslator()
+
+
+def create_rename_planner(cfg: AppConfig) -> Optional[AIRenamePlanner]:
+    api_key = (cfg.api_key or "").strip()
+    if not api_key:
+        try:
+            from ..services import secret_store
+
+            api_key = secret_store.get_secret("OPENAI_API_KEY") or ""
+        except Exception:
+            api_key = ""
+    if not api_key:
+        return None
+    try:
+        return AIRenamePlanner(api_key=api_key, model=cfg.model)
+    except Exception:
+        return None
 
 
 cfg = load_config()
@@ -659,7 +691,42 @@ def _prepare_item_for_ai(kind: str, path: str, site_relative_url: Optional[str])
     raise HTTPException(status_code=400, detail=f"Unsupported kind: {kind}")
 
 
+def _prepare_rename_plan_item(
+    kind: str,
+    path: str,
+    current_relative_path: str,
+    is_folder: bool,
+    site_relative_url: Optional[str],
+) -> tuple[dict, Optional[str]]:
+    if not rename_planner:
+        raise HTTPException(status_code=400, detail="OpenAI key is not configured.")
+    item_kind = (kind or "local").strip().lower()
+    temp_path: Optional[str] = None
+    excerpt_path: Optional[str] = None
+    if not is_folder:
+        try:
+            excerpt_path, temp_path = _prepare_item_for_ai(item_kind, path, site_relative_url)
+        except HTTPException:
+            excerpt_path = None
+            temp_path = None
+    planner_item = rename_planner.build_item(
+        source_path=path,
+        current_relative_path=current_relative_path,
+        is_dir=is_folder,
+        text_source_path=excerpt_path,
+    )
+    return {
+        "source_path": planner_item.source_path,
+        "current_relative_path": planner_item.current_relative_path,
+        "name": planner_item.name,
+        "is_dir": planner_item.is_dir,
+        "parent_relative_path": planner_item.parent_relative_path,
+        "text_excerpt": planner_item.text_excerpt,
+    }, temp_path
+
+
 translator = create_translator(cfg)
+rename_planner = create_rename_planner(cfg)
 cache = TranslationCache()
 tag_store = TagStore()
 _local_rename_undo_stack: List[List[Dict[str, str]]] = []
@@ -1327,6 +1394,56 @@ def ai_question_item(req: ItemAIRequest):
                 pass
 
 
+@app.post("/api/ai/rename-plan")
+def ai_rename_plan(req: AIRenamePlanRequest):
+    if not rename_planner:
+        raise HTTPException(status_code=400, detail="OpenAI key is not configured.")
+    if not req.items:
+        return {"summary": "", "warnings": ["No items were provided."], "operations": []}
+    from ..services.ai_rename_planner import RenamePlannerItem
+
+    planner_items: list[dict] = []
+    temp_paths: list[str] = []
+    try:
+        for item in req.items:
+            planner_item, temp_path = _prepare_rename_plan_item(
+                req.kind,
+                item.source_path,
+                item.current_relative_path,
+                bool(item.is_folder),
+                req.site_relative_url,
+            )
+            planner_items.append(planner_item)
+            if temp_path:
+                temp_paths.append(temp_path)
+        plan = rename_planner.plan(
+            [
+                RenamePlannerItem(
+                    source_path=entry["source_path"],
+                    current_relative_path=entry["current_relative_path"],
+                    name=entry["name"],
+                    is_dir=bool(entry["is_dir"]),
+                    parent_relative_path=entry["parent_relative_path"],
+                    text_excerpt=entry["text_excerpt"],
+                )
+                for entry in planner_items
+            ],
+            instruction=req.instruction or "",
+            root_name=req.root_name or "",
+        )
+        return plan
+    except RenamePlanningError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Rename planning failed: {exc}")
+    finally:
+        for temp_path in temp_paths:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
 @app.get("/api/local/extract-text")
 def local_extract_text(path: str = Query(...), limit: int = Query(8000)):
     normalized = _normalize_local_path(path)
@@ -1365,6 +1482,7 @@ def get_settings():
 @app.post("/api/settings", response_model=SettingsResponse)
 def update_settings(update: SettingsUpdateRequest):
     global translator
+    global rename_planner
     global sp_client
     changed_translator = False
     if update.target_language is not None:
@@ -1397,6 +1515,7 @@ def update_settings(update: SettingsUpdateRequest):
     save_config(cfg)
     if changed_translator:
         translator = create_translator(cfg)
+        rename_planner = create_rename_planner(cfg)
         # Clear in-memory translation LRU when key/model changes
         _mem_cache.clear()
     return get_settings()

@@ -3,6 +3,7 @@
 import base64
 import colorsys
 import os
+import shutil
 import sys
 import subprocess
 import uuid
@@ -37,6 +38,7 @@ from ..services.tag_store import TagStore
 from ..services.ai_summary import AISummarizer
 from ..services.ai_tagging import AITagger, TaggingError
 from ..services.link_migration_log import LinkMigrationLog
+from ..services.ai_rename_batch_log import AIRenameBatchLog
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
@@ -66,6 +68,8 @@ from .tag_flyout_panel import TagFlyoutPanel
 from .smart_actions_panel import SmartActionsPanel
 from .link_migration_log_dialog import LinkMigrationLogDialog
 from .resolve_old_link_dialog import ResolveOldLinkDialog
+from .ai_rename_plan_dialog import AIRenamePlanDialog, AIRenamePlanCandidate
+from .ai_rename_log_dialog import AIRenameLogDialog
 from ..services import edit_session
 from ..logging_setup import get_log_file_path
 
@@ -86,6 +90,7 @@ class MainWindow(QMainWindow):
         self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
         self._tag_store = TagStore()
         self._link_migration_log = LinkMigrationLog()
+        self._ai_rename_log = AIRenameBatchLog()
 
         self._translator: Translator = self._create_translator()
         self._summarizer: Optional[AISummarizer] = self._create_summarizer()
@@ -247,6 +252,10 @@ class MainWindow(QMainWindow):
         rename_action.triggered.connect(self._apply_translated_rename)
         tb.addAction(rename_action)
 
+        ai_rename_action = QAction("AI Rename & Organize...", self)
+        ai_rename_action.triggered.connect(self._ai_rename_and_organize)
+        tb.addAction(ai_rename_action)
+
         copy_action = QAction("Copy", self)
         copy_action.setShortcut(QKeySequence.Copy)
         copy_action.triggered.connect(lambda: self._clipboard_copy(False))
@@ -302,6 +311,14 @@ class MainWindow(QMainWindow):
         import_link_log = QAction("Import Link Log...", self)
         import_link_log.triggered.connect(self._import_link_migration_log)
         tb.addAction(import_link_log)
+
+        view_ai_log = QAction("View AI Rename Log...", self)
+        view_ai_log.triggered.connect(self._open_ai_rename_log)
+        tb.addAction(view_ai_log)
+
+        export_ai_log = QAction("Export AI Rename Log...", self)
+        export_ai_log.triggered.connect(self._export_ai_rename_log)
+        tb.addAction(export_ai_log)
 
         # Toggle preview pane (off by default to avoid clutter)
         toggle_preview = QAction("Preview Pane", self)
@@ -382,6 +399,18 @@ class MainWindow(QMainWindow):
         resolve_old_link = QAction("Resolve Old Link...", self)
         resolve_old_link.triggered.connect(self._open_resolve_old_link_dialog)
         tools_menu.addAction(resolve_old_link)
+
+        ai_rename = QAction("AI Rename & Organize...", self)
+        ai_rename.triggered.connect(self._ai_rename_and_organize)
+        tools_menu.addAction(ai_rename)
+
+        view_ai_log = QAction("View AI Rename Log...", self)
+        view_ai_log.triggered.connect(self._open_ai_rename_log)
+        tools_menu.addAction(view_ai_log)
+
+        export_ai_log = QAction("Export AI Rename Log...", self)
+        export_ai_log.triggered.connect(self._export_ai_rename_log)
+        tools_menu.addAction(export_ai_log)
 
         view_link_log = QAction("View Link Log...", self)
         view_link_log.triggered.connect(self._open_link_migration_log)
@@ -1481,6 +1510,29 @@ QLabel#SmartCostLabel {{
         dlg = LinkMigrationLogDialog(self._link_migration_log, self)
         dlg.exec()
 
+    def _export_ai_rename_log(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export AI Rename Log",
+            "smart_explorer_ai_rename_batches.json",
+            "JSON Files (*.json);;CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                self._ai_rename_log.export_csv(path)
+            else:
+                self._ai_rename_log.export_json(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export AI Rename Log", f"Failed to export AI rename log: {exc}")
+            return
+        self.statusBar().showMessage(f"Exported AI rename log to {path}", 5000)
+
+    def _open_ai_rename_log(self) -> None:
+        dlg = AIRenameLogDialog(self._ai_rename_log, self)
+        dlg.exec()
+
     def _open_resolve_old_link_dialog(self) -> None:
         dlg = ResolveOldLinkDialog(self._link_migration_log, self._cfg, self)
         dlg.open_in_app_requested.connect(self._open_resolved_sharepoint_location)
@@ -1824,6 +1876,7 @@ QLabel#SmartCostLabel {{
         if pane.definition.kind != "translation":
             translate_more.setEnabled(False)
         add_action("Apply Translation Rename", self._apply_translated_rename)
+        add_action("AI Rename & Organize...", self._ai_rename_and_organize)
         add_action("", separator=True)
         # SharePoint group
         add_action("Copy Share Link", self._copy_share_link)
@@ -3347,6 +3400,569 @@ QLabel#SmartCostLabel {{
             QMessageBox.information(self, "Translation", "No items selected to translate.")
             return
         pane.allow_translation_scopes(paths, depth_limit=None)
+
+    def _ai_rename_and_organize(self) -> None:
+        pane = self._active_pane()
+        if not pane:
+            return
+        op_pane = pane
+        if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
+            base_pane = self._workspace_panes.get(pane.definition.base_workspace_id)
+            if base_pane:
+                op_pane = base_pane
+        if op_pane.definition.kind not in {"local", "sharepoint"}:
+            QMessageBox.information(self, "AI Rename", "AI rename is only available for local and SharePoint panes.")
+            return
+
+        selected_items = self._filter_nested_selected_items(op_pane.current_items())
+        current_path = (op_pane.current_path() or "").strip()
+        scope_mode = self._choose_ai_rename_scope(bool(selected_items), current_path)
+        if not scope_mode:
+            return
+        recursive = scope_mode != "selected"
+        include_root = scope_mode == "folder_with_root"
+        scope_root_path = current_path if scope_mode in {"folder", "folder_with_root"} else None
+        if scope_mode in {"folder", "folder_with_root"}:
+            if not current_path:
+                QMessageBox.information(self, "AI Rename", "Open the folder you want to scan first.")
+                return
+            current_name = os.path.basename(current_path.rstrip("/\\")) or current_path
+            selected_items = [{"path": current_path, "is_dir": True, "name": current_name}]
+        items = self._expand_items_for_ai_plan(op_pane, selected_items, recursive, include_root=include_root)
+        if not items:
+            QMessageBox.information(self, "AI Rename", "Select the files or folders to organize first.")
+            return
+
+        default_goal = (
+            "Rename items consistently and organize related content into clear folders. "
+            "If they look like episodes, group them by series and Season 01, Season 02, etc."
+        )
+        instruction, ok = QInputDialog.getMultiLineText(
+            self,
+            "AI Rename & Organize",
+            "Describe the naming and sorting goal:",
+            default_goal,
+        )
+        if not ok:
+            return
+        instruction = (instruction or "").strip() or default_goal
+
+        context = self._build_ai_rename_context(
+            op_pane,
+            items,
+            instruction=instruction,
+            recursive=recursive,
+            include_root=include_root,
+            root_override=scope_root_path,
+            scope_mode=scope_mode,
+        )
+        progress = QProgressDialog("Generating AI organization plan...", None, 0, 0, self)
+        progress.setWindowTitle("AI Rename")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        QApplication.processEvents()
+        try:
+            plan = self._backend.ai_rename_plan(
+                kind=context["kind"],
+                site_relative_url=context["site_relative_url"],
+                root_name=context["root_name"],
+                instruction=instruction,
+                items=context["request_items"],
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.warning(self, "AI Rename", f"Failed to generate AI plan: {exc}")
+            return
+        progress.close()
+
+        candidates = self._build_ai_plan_candidates(context, plan)
+        if not candidates:
+            QMessageBox.information(self, "AI Rename", "AI did not return any actionable changes.")
+            return
+
+        dlg = AIRenamePlanDialog(
+            candidates,
+            summary=str(plan.get("summary") or ""),
+            warnings=list(plan.get("warnings") or []),
+            validator=lambda rows: self._validate_ai_plan_candidates(context, rows),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        selected = dlg.selected_candidates()
+        if not selected:
+            QMessageBox.information(self, "AI Rename", "No safe operations were selected.")
+            return
+        self._apply_ai_plan(context, selected, summary=str(plan.get("summary") or ""), warnings=list(plan.get("warnings") or []))
+
+    def _build_ai_rename_context(
+        self,
+        pane: WorkspacePane,
+        items: List[dict],
+        *,
+        instruction: str,
+        recursive: bool,
+        include_root: bool,
+        root_override: Optional[str],
+        scope_mode: str,
+    ) -> dict:
+        kind = pane.definition.kind
+        root_path = (root_override or "").strip() or self._common_parent_for_items(items, sharepoint=(kind == "sharepoint"))
+        request_items = []
+        item_map: dict[str, dict] = {}
+        for item in items:
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            rel_path = self._relative_under_root(root_path, path, sharepoint=(kind == "sharepoint"))
+            request_items.append(
+                {
+                    "source_path": path,
+                    "current_relative_path": rel_path,
+                    "is_folder": bool(item.get("is_dir")),
+                }
+            )
+            item_map[path] = item
+        root_name = os.path.basename(root_path.rstrip("/\\")) or root_path
+        return {
+            "pane": pane,
+            "kind": kind,
+            "site_relative_url": pane.definition.site_relative_url,
+            "root_path": root_path,
+            "root_name": root_name,
+            "request_items": request_items,
+            "item_map": item_map,
+            "instruction": instruction,
+            "recursive": recursive,
+            "include_root": include_root,
+            "scope_mode": scope_mode,
+        }
+
+    def _build_ai_plan_candidates(self, context: dict, plan: dict) -> List[AIRenamePlanCandidate]:
+        current_map = {item["source_path"]: item for item in context["request_items"]}
+        candidates: List[AIRenamePlanCandidate] = []
+        for entry in plan.get("operations") or []:
+            if not isinstance(entry, dict):
+                continue
+            source_path = str(entry.get("source_path") or "").strip()
+            current = current_map.get(source_path)
+            if not current:
+                continue
+            current_rel = str(current.get("current_relative_path") or "")
+            target_rel = str(entry.get("target_relative_path") or current_rel).strip().replace("\\", "/").strip("/")
+            if not target_rel:
+                target_rel = current_rel
+            current_dir = os.path.dirname(current_rel.replace("/", os.sep)).replace(os.sep, "/")
+            target_dir = os.path.dirname(target_rel.replace("/", os.sep)).replace(os.sep, "/")
+            current_name = os.path.basename(current_rel)
+            target_name = os.path.basename(target_rel)
+            if target_rel == current_rel:
+                action = "Keep"
+            elif current_dir == target_dir:
+                action = "Rename"
+            elif current_name == target_name:
+                action = "Move"
+            else:
+                action = "Move + Rename"
+            candidates.append(
+                AIRenamePlanCandidate(
+                    source_path=source_path,
+                    current_relative_path=current_rel,
+                    target_relative_path=target_rel,
+                    action=action,
+                    reason=str(entry.get("reason") or "").strip() or "AI suggestion",
+                    is_dir=bool(current.get("is_folder")),
+                    include=action != "Keep",
+                )
+            )
+        return candidates
+
+    def _validate_ai_plan_candidates(self, context: dict, rows: List[AIRenamePlanCandidate]) -> dict[str, tuple[str, bool]]:
+        statuses: dict[str, tuple[str, bool]] = {}
+        root_path = context["root_path"]
+        kind = context["kind"]
+        site = context["site_relative_url"]
+        target_map: dict[str, str] = {}
+        sp_name_cache: dict[str, set[str]] = {}
+
+        for cand in rows:
+            if cand.action == "Keep":
+                statuses[cand.source_path] = ("No change", False)
+                continue
+            target_path = self._join_root_relative(root_path, cand.target_relative_path, sharepoint=(kind == "sharepoint"))
+            source_path = str(cand.source_path or "")
+            if target_path == source_path:
+                statuses[cand.source_path] = ("No change", False)
+                continue
+            if not self._is_target_within_root(root_path, target_path, sharepoint=(kind == "sharepoint")):
+                statuses[cand.source_path] = ("Blocked: target escapes selected root", True)
+                continue
+            if target_path in target_map and target_map[target_path] != source_path:
+                statuses[cand.source_path] = ("Blocked: duplicate target in plan", True)
+                continue
+            target_map[target_path] = source_path
+            if kind == "local":
+                if os.path.exists(target_path) and os.path.normcase(target_path) != os.path.normcase(source_path):
+                    statuses[cand.source_path] = ("Blocked: target already exists", True)
+                    continue
+            else:
+                parent = target_path.rsplit("/", 1)[0] if "/" in target_path.rstrip("/") else "/"
+                name = target_path.rstrip("/").rsplit("/", 1)[-1]
+                names = self._sharepoint_child_names(parent, site, sp_name_cache)
+                if name in names and target_path != source_path:
+                    statuses[cand.source_path] = ("Blocked: target already exists", True)
+                    continue
+            statuses[cand.source_path] = ("Ready", False)
+        return statuses
+
+    def _apply_ai_plan(self, context: dict, candidates: List[AIRenamePlanCandidate], *, summary: str, warnings: List[str]) -> None:
+        pane = context["pane"]
+        kind = context["kind"]
+        root_path = context["root_path"]
+        site = context["site_relative_url"]
+        undo_batch: List[dict] = []
+        errors = 0
+        log_operations: List[dict] = []
+
+        target_paths = {
+            cand.source_path: self._join_root_relative(root_path, cand.target_relative_path, sharepoint=(kind == "sharepoint"))
+            for cand in candidates
+        }
+        folder_targets = sorted(
+            {
+                os.path.dirname(target).replace("\\", "/") if kind == "sharepoint" else os.path.dirname(target)
+                for target in target_paths.values()
+            },
+            key=lambda value: len(value or ""),
+        )
+
+        try:
+            if kind == "local":
+                for folder in folder_targets:
+                    if folder:
+                        os.makedirs(folder, exist_ok=True)
+            else:
+                folder_cache: dict[str, set[str]] = {}
+                for folder in folder_targets:
+                    if folder:
+                        self._ensure_sharepoint_folder_tree(folder, site, root_path, folder_cache)
+
+            for cand in candidates:
+                source_path = cand.source_path
+                target_path = target_paths[source_path]
+                if source_path == target_path:
+                    continue
+                try:
+                    if kind == "local":
+                        shutil.move(source_path, target_path)
+                        undo_batch.append(
+                            {
+                                "type": "local",
+                                "old_path": source_path,
+                                "new_path": target_path,
+                                "is_dir": cand.is_dir,
+                            }
+                        )
+                        log_operations.append(
+                            {
+                                "source_path": source_path,
+                                "target_path": target_path,
+                                "action": cand.action,
+                                "reason": cand.reason,
+                                "is_dir": cand.is_dir,
+                                "status": "applied",
+                            }
+                        )
+                    else:
+                        current_parent = source_path.rsplit("/", 1)[0] if "/" in source_path.rstrip("/") else "/"
+                        target_parent = target_path.rsplit("/", 1)[0] if "/" in target_path.rstrip("/") else "/"
+                        current_name = source_path.rstrip("/").rsplit("/", 1)[-1]
+                        target_name = target_path.rstrip("/").rsplit("/", 1)[-1]
+                        if current_parent == target_parent and current_name != target_name:
+                            resp = self._backend.sp_rename(
+                                server_relative_url=source_path,
+                                new_name=target_name,
+                                is_folder=cand.is_dir,
+                                site_relative_url=site,
+                            )
+                            if isinstance(resp, dict) and resp.get("newPath"):
+                                target_path = resp["newPath"]
+                        else:
+                            self._backend.sp_move(
+                                source_path,
+                                target_path,
+                                is_folder=cand.is_dir,
+                                overwrite=False,
+                                site_relative_url=site,
+                            )
+                        operation_type = "move_and_rename" if cand.action == "Move + Rename" else cand.action.lower()
+                        self._record_sharepoint_migration(
+                            old_server_relative_url=source_path,
+                            new_server_relative_url=target_path,
+                            is_folder=cand.is_dir,
+                            source_site_relative_url=site,
+                            target_site_relative_url=site,
+                            operation_type=operation_type,
+                            workspace_id=pane.id,
+                        )
+                        undo_batch.append(
+                            {
+                                "type": "sp",
+                                "old_path": source_path,
+                                "new_path": target_path,
+                                "is_dir": cand.is_dir,
+                                "site": site,
+                            }
+                        )
+                        log_operations.append(
+                            {
+                                "source_path": source_path,
+                                "target_path": target_path,
+                                "action": cand.action,
+                                "reason": cand.reason,
+                                "is_dir": cand.is_dir,
+                                "status": "applied",
+                            }
+                        )
+                except Exception as exc:
+                    errors += 1
+                    log_operations.append(
+                        {
+                            "source_path": source_path,
+                            "target_path": target_path,
+                            "action": cand.action,
+                            "reason": cand.reason,
+                            "is_dir": cand.is_dir,
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                    )
+        finally:
+            if undo_batch:
+                self._rename_undo_stack.append(undo_batch)
+            if log_operations:
+                self._ai_rename_log.record(
+                    kind=kind,
+                    site_relative_url=site,
+                    root_path=root_path,
+                    instruction=context.get("instruction") or "",
+                    recursive=bool(context.get("recursive")),
+                    summary=summary,
+                    warnings=warnings,
+                    operations=log_operations,
+                )
+            for ws_pane in self._workspace_panes.values():
+                try:
+                    ws_pane.refresh()
+                except Exception:
+                    pass
+
+        if errors:
+            QMessageBox.warning(self, "AI Rename", f"Applied with {errors} failed operation(s).")
+        else:
+            QMessageBox.information(self, "AI Rename", f"Applied {len(undo_batch)} AI rename/organize operation(s).")
+
+    def _expand_items_for_ai_plan(self, pane: WorkspacePane, items: List[dict], recursive: bool, *, include_root: bool = False) -> List[dict]:
+        if not recursive:
+            return items
+        expanded: List[dict] = []
+        seen: set[str] = set()
+        if pane.definition.kind == "local":
+            for item in items:
+                path = str(item.get("path") or "")
+                if include_root and path and path not in seen:
+                    expanded.append(item)
+                    seen.add(path)
+                if not item.get("is_dir"):
+                    if path and path not in seen:
+                        expanded.append(item)
+                        seen.add(path)
+                    continue
+                folder = str(item.get("path") or "")
+                if not os.path.isdir(folder):
+                    continue
+                for root, dirs, files in os.walk(folder):
+                    rel_dirs = sorted(dirs)
+                    rel_files = sorted(files)
+                    for name in rel_dirs:
+                        path = os.path.join(root, name)
+                        if path not in seen:
+                            expanded.append({"path": path, "is_dir": True, "name": name})
+                            seen.add(path)
+                    for name in rel_files:
+                        path = os.path.join(root, name)
+                        if path not in seen:
+                            expanded.append({"path": path, "is_dir": False, "name": name})
+                            seen.add(path)
+        else:
+            for item in items:
+                path = str(item.get("path") or "")
+                if include_root and path and path not in seen:
+                    expanded.append(item)
+                    seen.add(path)
+                if not item.get("is_dir"):
+                    if path and path not in seen:
+                        expanded.append(item)
+                        seen.add(path)
+                    continue
+                self._collect_sharepoint_descendants(str(item.get("path") or ""), pane.definition.site_relative_url, expanded, seen)
+        return expanded
+
+    def _choose_ai_rename_scope(self, has_selection: bool, current_path: str) -> Optional[str]:
+        options: List[tuple[str, str]] = []
+        if has_selection:
+            options.append(("selected", "Scan selected items"))
+        if current_path:
+            options.append(("folder", "Scan current folder"))
+            options.append(("folder_with_root", "Scan current folder and rename root folder too"))
+        if not options:
+            QMessageBox.information(self, "AI Rename", "Select files/folders or open the folder you want to scan first.")
+            return None
+        labels = [label for _, label in options]
+        chosen, ok = QInputDialog.getItem(
+            self,
+            "AI Rename Scope",
+            "Choose the scan scope:",
+            labels,
+            0,
+            False,
+        )
+        if not ok or not chosen:
+            return None
+        for value, label in options:
+            if label == chosen:
+                return value
+        return None
+
+    def _collect_sharepoint_descendants(self, folder_path: str, site_relative_url: Optional[str], out: List[dict], seen: set[str]) -> None:
+        try:
+            data = self._backend.sp_list(site_relative_url or "", folder_path)
+        except Exception:
+            return
+        for item in (data.get("items") or []):
+            path = str(item.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            entry = {"path": path, "is_dir": bool(item.get("isDir")), "name": item.get("name") or os.path.basename(path.rstrip("/"))}
+            out.append(entry)
+            seen.add(path)
+            if entry["is_dir"]:
+                self._collect_sharepoint_descendants(path, site_relative_url, out, seen)
+
+    def _filter_nested_selected_items(self, items: List[dict]) -> List[dict]:
+        normalized: List[dict] = []
+        for item in sorted(items, key=lambda value: len(str(value.get("path") or ""))):
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            if any(self._path_contains(selected["path"], path) for selected in normalized):
+                continue
+            normalized.append(item)
+        return normalized
+
+    def _path_contains(self, parent: str, child: str) -> bool:
+        parent_value = str(parent or "").rstrip("/\\")
+        child_value = str(child or "").rstrip("/\\")
+        if not parent_value or not child_value or parent_value == child_value:
+            return parent_value == child_value
+        if parent_value.startswith("/"):
+            return child_value.startswith(parent_value + "/")
+        try:
+            return os.path.commonpath([os.path.normcase(parent_value), os.path.normcase(child_value)]) == os.path.normcase(parent_value)
+        except Exception:
+            return False
+
+    def _common_parent_for_items(self, items: List[dict], *, sharepoint: bool) -> str:
+        parents: List[str] = []
+        for item in items:
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            if sharepoint:
+                trimmed = path.rstrip("/")
+                parent = trimmed.rsplit("/", 1)[0] if "/" in trimmed else "/"
+                parents.append(parent or "/")
+            else:
+                parents.append(os.path.dirname(path.rstrip("\\/")) or path)
+        if not parents:
+            return "/" if sharepoint else os.path.expanduser("~")
+        if sharepoint:
+            common = parents[0].rstrip("/") or "/"
+            for parent in parents[1:]:
+                while common not in {"", "/"} and not (parent == common or parent.startswith(common + "/")):
+                    common = common.rsplit("/", 1)[0] or "/"
+            return common or "/"
+        try:
+            return os.path.commonpath(parents)
+        except Exception:
+            return parents[0]
+
+    def _relative_under_root(self, root_path: str, target_path: str, *, sharepoint: bool) -> str:
+        if sharepoint:
+            root = root_path.rstrip("/")
+            target = target_path.strip().rstrip("/")
+            rel = target[len(root):].lstrip("/") if root and target.startswith(root) else target.lstrip("/")
+            return rel
+        return os.path.relpath(target_path, root_path).replace("\\", "/")
+
+    def _join_root_relative(self, root_path: str, relative_path: str, *, sharepoint: bool) -> str:
+        rel = str(relative_path or "").strip().replace("\\", "/").strip("/")
+        if sharepoint:
+            base = root_path.rstrip("/")
+            return f"{base}/{rel}" if rel else base or "/"
+        return os.path.normpath(os.path.join(root_path, rel))
+
+    def _is_target_within_root(self, root_path: str, target_path: str, *, sharepoint: bool) -> bool:
+        if sharepoint:
+            base = root_path.rstrip("/") or "/"
+            target = target_path.rstrip("/") or "/"
+            return target == base or target.startswith(base + "/")
+        try:
+            return os.path.commonpath([os.path.abspath(root_path), os.path.abspath(target_path)]) == os.path.abspath(root_path)
+        except Exception:
+            return False
+
+    def _sharepoint_child_names(self, parent_path: str, site_relative_url: Optional[str], cache: dict[str, set[str]]) -> set[str]:
+        key = parent_path or "/"
+        if key in cache:
+            return cache[key]
+        try:
+            data = self._backend.sp_list(site_relative_url or "", key)
+            names = {
+                str(item.get("name") or item.get("Name") or "").strip()
+                for item in (data.get("items") or [])
+                if str(item.get("name") or item.get("Name") or "").strip()
+            }
+        except Exception:
+            names = set()
+        cache[key] = names
+        return names
+
+    def _ensure_sharepoint_folder_tree(
+        self,
+        target_folder: str,
+        site_relative_url: Optional[str],
+        root_path: str,
+        cache: dict[str, set[str]],
+    ) -> None:
+        base = root_path.rstrip("/") or "/"
+        target = target_folder.rstrip("/") or "/"
+        if target == base:
+            return
+        rel = target[len(base):].strip("/") if target.startswith(base) else target.strip("/")
+        if not rel:
+            return
+        parent = base
+        for segment in rel.split("/"):
+            if not segment:
+                continue
+            names = self._sharepoint_child_names(parent, site_relative_url, cache)
+            if segment not in names:
+                self._backend.sp_create_folder(parent, segment, site_relative_url=site_relative_url)
+                names.add(segment)
+            parent = f"{parent.rstrip('/')}/{segment}" if parent != "/" else f"/{segment}"
 
     def _apply_translated_rename(self) -> None:
         pane = self._active_pane()

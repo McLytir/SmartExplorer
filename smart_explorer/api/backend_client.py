@@ -220,3 +220,21 @@ class BackendClient:
             "site_relative_url": site_relative_url,
         }
         return self.post("/api/permissions/probe", json=payload)
+
+    def ai_rename_plan(
+        self,
+        *,
+        kind: str,
+        items: list[dict],
+        instruction: Optional[str] = None,
+        site_relative_url: Optional[str] = None,
+        root_name: Optional[str] = None,
+    ) -> dict:
+        payload = {
+            "kind": kind,
+            "items": items,
+            "instruction": instruction,
+            "site_relative_url": site_relative_url,
+            "root_name": root_name,
+        }
+        return self.post("/api/ai/rename-plan", json=payload)

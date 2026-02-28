@@ -39,6 +39,8 @@ const state = {
   translationLocalCache: {},
   pdfBookmarks: [],
   migrationLog: [],
+  aiRenameLog: [],
+  aiRenameUndoStack: [],
 };
 
 function paneState(key){
@@ -48,7 +50,7 @@ function paneState(key){
 const el = {
   status: id('status'), uiVersionSelect:id('uiVersionSelect'), langInput: id('langInput'), toggleTranslateBtn: id('toggleTranslateBtn'),
   renameTranslatedBtn: id('renameTranslatedBtn'), undoRenameBtn: id('undoRenameBtn'), copyBtn: id('copyBtn'), cutBtn: id('cutBtn'), pasteBtn: id('pasteBtn'),
-  renameBtn: id('renameBtn'), deleteBtn: id('deleteBtn'), mkdirBtn: id('mkdirBtn'), openBtn: id('openBtn'), revealBtn: id('revealBtn'), addFavoriteBtn: id('addFavoriteBtn'), exportConfigBtn:id('exportConfigBtn'), importConfigBtn:id('importConfigBtn'), importConfigInput:id('importConfigInput'),
+  renameBtn: id('renameBtn'), aiRenameBtn:id('aiRenameBtn'), deleteBtn: id('deleteBtn'), mkdirBtn: id('mkdirBtn'), openBtn: id('openBtn'), revealBtn: id('revealBtn'), addFavoriteBtn: id('addFavoriteBtn'), exportConfigBtn:id('exportConfigBtn'), importConfigBtn:id('importConfigBtn'), importConfigInput:id('importConfigInput'),
   layoutTabs:id('layoutTabs'),
   sessionTabs:id('sessionTabs'), newSessionBtn:id('newSessionBtn'), duplicateSessionBtn:id('duplicateSessionBtn'), renameSessionBtn:id('renameSessionBtn'), closeSessionBtn:id('closeSessionBtn'),
   leftKind:id('leftKind'), leftSite:id('leftSite'), leftLibrary:id('leftLibrary'), leftPath:id('leftPath'), leftGo:id('leftGo'), leftList:id('leftList'), leftUploadBtn:id('leftUploadBtn'), leftUploadInput:id('leftUploadInput'), leftFilterInput:id('leftFilterInput'),
@@ -67,11 +69,13 @@ const el = {
   propertiesBtn:id('propertiesBtn'), permissionsBtn:id('permissionsBtn'), propertiesOutput:id('propertiesOutput'), permissionsOutput:id('permissionsOutput'),
   metadataLoadBtn:id('metadataLoadBtn'), metadataApplyBtn:id('metadataApplyBtn'), metadataInput:id('metadataInput'), metadataOutput:id('metadataOutput'), metadataForm:id('metadataForm'), metadataValidation:id('metadataValidation'), metadataDiff:id('metadataDiff'),
   renamePreviewModal:id('renamePreviewModal'), renamePreviewSummary:id('renamePreviewSummary'), renamePreviewConflicts:id('renamePreviewConflicts'), renamePreviewCancelBtn:id('renamePreviewCancelBtn'), renamePreviewProceedBtn:id('renamePreviewProceedBtn'),
+  aiRenamePreviewModal:id('aiRenamePreviewModal'), aiRenamePreviewSummary:id('aiRenamePreviewSummary'), aiRenamePreviewConflicts:id('aiRenamePreviewConflicts'), aiRenamePreviewCancelBtn:id('aiRenamePreviewCancelBtn'), aiRenamePreviewProceedBtn:id('aiRenamePreviewProceedBtn'),
   transferPreviewModal:id('transferPreviewModal'), transferPreviewSummary:id('transferPreviewSummary'), transferPreviewList:id('transferPreviewList'), transferSelectSafeBtn:id('transferSelectSafeBtn'), transferSelectNoneBtn:id('transferSelectNoneBtn'), transferPreviewConflicts:id('transferPreviewConflicts'), transferPreviewCancelBtn:id('transferPreviewCancelBtn'), transferPreviewProceedBtn:id('transferPreviewProceedBtn'),
   previewBtn:id('previewBtn'), extractBtn:id('extractBtn'), summaryBtn:id('summaryBtn'), questionInput:id('questionInput'), askBtn:id('askBtn'), previewFrame:id('previewFrame'), previewText:id('previewText'),
   pdfPageInput:id('pdfPageInput'), pdfJumpBtn:id('pdfJumpBtn'), pdfBookmarkAddBtn:id('pdfBookmarkAddBtn'), pdfBookmarksList:id('pdfBookmarksList'),
   checkoutBtn:id('checkoutBtn'), checkinBtn:id('checkinBtn'), undoCheckoutBtn:id('undoCheckoutBtn'), loadVersionsBtn:id('loadVersionsBtn'), versionsSelect:id('versionsSelect'), downloadVersionBtn:id('downloadVersionBtn'), restoreVersionBtn:id('restoreVersionBtn'), versionsOutput:id('versionsOutput'),
   migrationResolveInput:id('migrationResolveInput'), migrationResolveBtn:id('migrationResolveBtn'), migrationFilterInput:id('migrationFilterInput'), migrationImportBtn:id('migrationImportBtn'), migrationImportInput:id('migrationImportInput'), migrationResolveOutput:id('migrationResolveOutput'), migrationCopyResolvedBtn:id('migrationCopyResolvedBtn'), migrationOpenResolvedBtn:id('migrationOpenResolvedBtn'), migrationExportJsonBtn:id('migrationExportJsonBtn'), migrationExportCsvBtn:id('migrationExportCsvBtn'), migrationLogList:id('migrationLogList'),
+  aiRenameFilterInput:id('aiRenameFilterInput'), aiRenameExportJsonBtn:id('aiRenameExportJsonBtn'), aiRenameExportCsvBtn:id('aiRenameExportCsvBtn'), aiRenameLogList:id('aiRenameLogList'),
 };
 
 function id(x){ return document.getElementById(x); }
@@ -177,6 +181,7 @@ function extname(p){ const n=basename(p).toLowerCase(); const i=n.lastIndexOf('.
 function activePane(){ return state[state.activePane]; }
 function selectedItems(p){ return p.items.filter(i=>p.selected.has(i.path)); }
 function selectedSinglePath(){ const a=Array.from(activePane().selected); return a.length===1?a[0]:null; }
+function csvCell(v){ const s=String(v??''); return `"${s.replaceAll('"','""')}"`; }
 function fmtSize(bytes){ if(!bytes) return ''; const u=['B','KB','MB','GB','TB']; let n=Number(bytes),i=0; while(n>=1024&&i<u.length-1){ n/=1024;i++; } return `${n.toFixed(i?1:0)} ${u[i]}`; }
 function parentPath(path){ if(!path||/^[A-Za-z]:\\?$/.test(path)) return path; const c=path.replace(/[\\/]$/,''); const i=Math.max(c.lastIndexOf('/'),c.lastIndexOf('\\')); return i<=0?c:c.slice(0,i); }
 function isMedia(path){ const e=extname(path); return EXT_IMAGE.has(e)||EXT_VIDEO.has(e)||EXT_AUDIO.has(e)||EXT_PDF.has(e); }
@@ -417,6 +422,38 @@ function showRenamePreviewModal(okRows,badRows){
     document.addEventListener('keydown',onKey);
     el.renamePreviewProceedBtn.onclick=()=>close(true);
     el.renamePreviewCancelBtn.onclick=()=>close(false);
+  });
+}
+function showAiRenamePreviewModal(rows,summary,warnings){
+  if(!el.aiRenamePreviewModal||!el.aiRenamePreviewProceedBtn||!el.aiRenamePreviewCancelBtn){
+    const okRows=(rows||[]).filter((r)=>!r.conflict && r.action!=='Keep');
+    const badRows=(rows||[]).filter((r)=>r.conflict);
+    return Promise.resolve(confirm(`${summary}\n\n${okRows.length} safe operation(s) ready. ${badRows.length} blocked operation(s). Continue?`));
+  }
+  return new Promise((resolve)=>{
+    const okRows=(rows||[]).filter((r)=>!r.conflict && r.action!=='Keep');
+    const badRows=(rows||[]).filter((r)=>r.conflict);
+    const warnLines=Array.isArray(warnings)?warnings:[];
+    const lines=[
+      ...warnLines.map((w)=>`[warn] ${w}`),
+      ...rows.slice(0,160).map((r)=>`${r.conflict?'[blocked]':'[ready]'} ${r.action}: ${r.currentRelativePath||'.'} -> ${r.targetRelativePath||'.'} | ${r.status||''} | ${r.reason||''}`)
+    ].join('\n');
+    el.aiRenamePreviewSummary.textContent=`${summary||'AI rename plan ready.'} ${okRows.length} safe operation(s). ${badRows.length} blocked operation(s).`;
+    el.aiRenamePreviewConflicts.textContent=lines||'No details.';
+    el.aiRenamePreviewModal.classList.remove('hidden');
+    el.aiRenamePreviewModal.setAttribute('aria-hidden','false');
+    const close=(approved)=>{
+      el.aiRenamePreviewModal.classList.add('hidden');
+      el.aiRenamePreviewModal.setAttribute('aria-hidden','true');
+      el.aiRenamePreviewProceedBtn.onclick=null;
+      el.aiRenamePreviewCancelBtn.onclick=null;
+      document.removeEventListener('keydown',onKey);
+      resolve(approved);
+    };
+    const onKey=(ev)=>{ if(ev.key==='Escape') close(false); };
+    document.addEventListener('keydown',onKey);
+    el.aiRenamePreviewProceedBtn.onclick=()=>close(true);
+    el.aiRenamePreviewCancelBtn.onclick=()=>close(false);
   });
 }
 function showTransferPreviewModal(rows,sourceMap,operationLabel){
@@ -1526,6 +1563,249 @@ async function uploadToPane(key,file){
     await loadPane(key,p.path); setStatus(`Uploaded: ${file.name}`);
   }catch(e){ setStatus(`Upload failed: ${err(e)}`); }
 }
+async function collectAiRenameItems(p,items,recursive,includeRoot=false){
+  if(!recursive) return items.slice();
+  const out=[], seen=new Set();
+  for(const it of items){
+    if(includeRoot && it?.path && !seen.has(it.path)){
+      out.push(it);
+      seen.add(it.path);
+    }
+    if(!it?.isDir){
+      if(it?.path&&!seen.has(it.path)){ out.push(it); seen.add(it.path); }
+      continue;
+    }
+    if(p.kind==='local') await collectLocalDescendants(it.path,out,seen);
+    else await collectSpDescendants(p.site||'',it.path,out,seen);
+  }
+  return out;
+}
+async function collectLocalDescendants(path,out,seen){
+  const d=await apiGet(`/api/local/list?${new URLSearchParams({path}).toString()}`);
+  for(const it of (d.items||[])){
+    if(!it?.path||seen.has(it.path)) continue;
+    out.push(it); seen.add(it.path);
+    if(it.isDir) await collectLocalDescendants(it.path,out,seen);
+  }
+}
+async function collectSpDescendants(site,path,out,seen){
+  const d=await apiGet(`/api/sp/list?${new URLSearchParams({site_relative_url:site||'',folder_server_relative_url:path}).toString()}`);
+  for(const it of (d.items||[])){
+    if(!it?.path||seen.has(it.path)) continue;
+    out.push(it); seen.add(it.path);
+    if(it.isDir) await collectSpDescendants(site,it.path,out,seen);
+  }
+}
+function commonParentForAi(paths,sharepoint){
+  if(!paths.length) return sharepoint?'/':'';
+  if(sharepoint){
+    let common=(parentPath(paths[0]).replace(/\\/g,'/')||'/').replace(/\/+$/,'')||'/';
+    for(const p of paths.slice(1)){
+      const parent=(parentPath(p).replace(/\\/g,'/')||'/').replace(/\/+$/,'')||'/';
+      while(common!=='/' && !(parent===common || parent.startsWith(common+'/'))){
+        common=common.split('/').slice(0,-1).join('/')||'/';
+      }
+    }
+    return common||'/';
+  }
+  const parts=paths.map((p)=>parentPath(p).split(/[\\/]+/));
+  const common=[];
+  for(let i=0;;i++){
+    const token=parts[0][i];
+    if(token===undefined) break;
+    if(parts.every((row)=>row[i]===token)) common.push(token); else break;
+  }
+  return common.join('\\') || parentPath(paths[0]);
+}
+function relativeUnderRoot(rootPath,targetPath,sharepoint){
+  if(sharepoint){
+    const root=String(rootPath||'').replace(/\/+$/,'');
+    const target=String(targetPath||'').replace(/\/+$/,'');
+    return target.startsWith(root)?target.slice(root.length).replace(/^\/+/,''):target.replace(/^\/+/,'');
+  }
+  return targetPath.replace(rootPath,'').replace(/^[\\/]+/,'').replace(/\\/g,'/');
+}
+function joinRootRelative(rootPath,relativePath,sharepoint){
+  const rel=String(relativePath||'').trim().replace(/\\/g,'/').replace(/^\/+|\/+$/g,'');
+  if(sharepoint){
+    const base=String(rootPath||'').replace(/\/+$/,'')||'/';
+    return rel?`${base}/${rel}`:base;
+  }
+  const base=String(rootPath||'');
+  return rel?`${base.replace(/[\\/]+$/,'')}\\${rel.replace(/\//g,'\\')}`:base;
+}
+function isTargetWithinRoot(rootPath,targetPath,sharepoint){
+  if(sharepoint){
+    const root=(String(rootPath||'').replace(/\/+$/,'')||'/');
+    const target=(String(targetPath||'').replace(/\/+$/,'')||'/');
+    return target===root || target.startsWith(root+'/');
+  }
+  const root=String(rootPath||'').toLowerCase().replace(/[\\/]+$/,'');
+  const target=String(targetPath||'').toLowerCase();
+  return target===root || target.startsWith(root+'\\') || target.startsWith(root+'/');
+}
+async function listChildNamesForAi(kind,site,parentPath,cache){
+  const key=`${kind}|${site||''}|${parentPath||''}`;
+  if(cache.has(key)) return cache.get(key);
+  let items=[];
+  try{
+    if(kind==='local'){
+      const d=await apiGet(`/api/local/list?${new URLSearchParams({path:parentPath}).toString()}`);
+      items=d.items||[];
+    }else{
+      const d=await apiGet(`/api/sp/list?${new URLSearchParams({site_relative_url:site||'',folder_server_relative_url:parentPath}).toString()}`);
+      items=d.items||[];
+    }
+  }catch{}
+  const names=new Set(items.map((it)=>String(it?.name||'').trim()).filter(Boolean));
+  cache.set(key,names);
+  return names;
+}
+async function ensureLocalFolderTree(rootPath,targetFolder){
+  const root=String(rootPath||'').replace(/[\\/]+$/,'');
+  const target=String(targetFolder||'');
+  if(!target || target===root) return;
+  const rel=target.replace(root,'').replace(/^[\\/]+/,'').split(/[\\/]+/).filter(Boolean);
+  let current=root;
+  for(const seg of rel){
+    try{ await apiPost('/api/local/mkdir',{path:current,name:seg}); }catch{}
+    current=`${current}\\${seg}`;
+  }
+}
+async function ensureSpFolderTree(site,rootPath,targetFolder){
+  const root=String(rootPath||'').replace(/\/+$/,'')||'/';
+  const target=String(targetFolder||'').replace(/\/+$/,'')||'/';
+  if(!target || target===root) return;
+  const rel=target.startsWith(root)?target.slice(root.length).replace(/^\/+/,''):target.replace(/^\/+/,'');
+  let current=root;
+  for(const seg of rel.split('/').filter(Boolean)){
+    try{ await apiPost('/api/sp/folder',{site_relative_url:site||null,parent_server_relative_url:current,name:seg}); }catch{}
+    current=current==='/'?`/${seg}`:`${current}/${seg}`;
+  }
+}
+async function validateAiRenameCandidates(planRows,ctx){
+  const targetMap=new Map(), parentCache=new Map();
+  for(const row of planRows){
+    if(row.action==='Keep'){ row.status='No change'; row.conflict=false; continue; }
+    const targetPath=joinRootRelative(ctx.rootPath,row.targetRelativePath,ctx.kind==='sharepoint');
+    row.targetPath=targetPath;
+    if(targetPath===row.sourcePath){ row.status='No change'; row.conflict=false; continue; }
+    if(!isTargetWithinRoot(ctx.rootPath,targetPath,ctx.kind==='sharepoint')){ row.status='Blocked: target escapes selected root'; row.conflict=true; continue; }
+    if(targetMap.has(targetPath) && targetMap.get(targetPath)!==row.sourcePath){ row.status='Blocked: duplicate target in plan'; row.conflict=true; continue; }
+    targetMap.set(targetPath,row.sourcePath);
+    const parent=parentPath(targetPath);
+    const name=basename(targetPath);
+    const names=await listChildNamesForAi(ctx.kind,ctx.site,parent,parentCache);
+    if(names.has(name) && targetPath!==row.sourcePath){ row.status='Blocked: target already exists'; row.conflict=true; continue; }
+    row.status='Ready'; row.conflict=false;
+  }
+  return planRows;
+}
+function recordAiRenameBatch(entry){
+  state.aiRenameLog.push(entry);
+  state.aiRenameLog=state.aiRenameLog.slice(-200);
+  saveAiRenameLog();
+  renderAiRenameLogPanel();
+}
+async function aiRenameAndOrganize(){
+  const p=activePane();
+  let items=selectedItems(p);
+  const scopeMode=chooseAiRenameScope(items.length>0,p.path);
+  if(!scopeMode) return;
+  const recursive=scopeMode!=='selected';
+  const includeRoot=scopeMode==='folder_with_root';
+  if(scopeMode!=='selected'){
+    if(!p.path) return setStatus('Open the folder you want to scan first.');
+    items=[{path:p.path,isDir:true,name:basename(p.path)}];
+  }
+  const instruction=(prompt('Describe the naming and sorting goal:','Rename items consistently and organize related content into clear folders. If they look like episodes, group them by series and Season 01, Season 02, etc.')||'').trim();
+  if(!instruction) return;
+  try{
+    items=await collectAiRenameItems(p,items,recursive,includeRoot);
+    if(!items.length) return setStatus('No items available after recursive expansion.');
+    const rootPath=scopeMode==='selected' ? commonParentForAi(items.map((it)=>it.path),p.kind==='sharepoint') : p.path;
+    const requestItems=items.map((it)=>({source_path:it.path,current_relative_path:relativeUnderRoot(rootPath,it.path,p.kind==='sharepoint'),is_folder:!!it.isDir}));
+    const plan=await apiPost('/api/ai/rename-plan',{kind:p.kind,site_relative_url:p.kind==='sharepoint'?p.site||null:null,root_name:basename(rootPath)||rootPath,instruction,items:requestItems});
+    let rows=(plan.operations||[]).map((op)=>{
+      const current=requestItems.find((it)=>it.source_path===op.source_path);
+      const currentRelativePath=current?.current_relative_path||'';
+      const targetRelativePath=String(op?.target_relative_path||currentRelativePath||'').replace(/\\/g,'/').replace(/^\/+|\/+$/g,'')||currentRelativePath;
+      const currentName=basename(currentRelativePath), targetName=basename(targetRelativePath);
+      const currentDir=parentPath(currentRelativePath).replace(/\\/g,'/'), targetDir=parentPath(targetRelativePath).replace(/\\/g,'/');
+      const action=targetRelativePath===currentRelativePath?'Keep':(currentDir===targetDir?'Rename':(currentName===targetName?'Move':'Move + Rename'));
+      return {sourcePath:op.source_path,currentRelativePath,targetRelativePath,reason:String(op?.reason||'').trim()||'AI suggestion',action,isDir:!!current?.is_folder,status:'',conflict:false};
+    });
+    const ctx={kind:p.kind,site:p.site||'',rootPath,instruction,recursive,includeRoot,scopeMode,summary:String(plan.summary||''),warnings:Array.isArray(plan.warnings)?plan.warnings:[]};
+    rows=await validateAiRenameCandidates(rows,ctx);
+    const safeRows=rows.filter((r)=>!r.conflict && r.action!=='Keep');
+    if(!safeRows.length) return setStatus('AI plan produced no safe operations.');
+    const approved=await showAiRenamePreviewModal(rows,ctx.summary,ctx.warnings);
+    if(!approved) return;
+    await applyAiRenamePlan(p,ctx,safeRows);
+  }catch(e){ setStatus(`AI rename failed: ${err(e)}`); }
+}
+function chooseAiRenameScope(hasSelection,currentPath){
+  const options=[];
+  if(hasSelection) options.push({value:'selected',label:'1. Scan selected items'});
+  if(currentPath){
+    options.push({value:'folder',label:'2. Scan current folder'});
+    options.push({value:'folder_with_root',label:'3. Scan current folder and rename root folder too'});
+  }
+  if(!options.length){ setStatus('Select files/folders or open the folder you want to scan first.'); return null; }
+  const message=`Choose AI rename scope:\n${options.map((o)=>o.label).join('\n')}\n\nEnter 1, 2, or 3.`;
+  const raw=(prompt(message, options[0].label.charAt(0))||'').trim();
+  const chosen=options.find((o)=>o.label.startsWith(`${raw}.`));
+  return chosen ? chosen.value : null;
+}
+async function applyAiRenamePlan(p,ctx,rows){
+  const logOps=[], undoBatch=[];
+  const folderTargets=[...new Set(rows.map((r)=>parentPath(r.targetPath)))].sort((a,b)=>String(a).length-String(b).length);
+  try{
+    if(ctx.kind==='local'){
+      for(const folder of folderTargets){ if(folder) await ensureLocalFolderTree(ctx.rootPath,folder); }
+    }else{
+      for(const folder of folderTargets){ if(folder) await ensureSpFolderTree(ctx.site,ctx.rootPath,folder.replace(/\\/g,'/')); }
+    }
+    for(const row of rows){
+      try{
+        if(ctx.kind==='local'){
+          const sourceParent=parentPath(row.sourcePath), targetParent=parentPath(row.targetPath), targetName=basename(row.targetPath);
+          if(sourceParent===targetParent){
+            await apiPost('/api/local/rename',{path:row.sourcePath,new_name:targetName});
+          }else{
+            await apiPost('/api/local/move',{sources:[row.sourcePath],destination:targetParent});
+            const movedPath=`${targetParent}\\${basename(row.sourcePath)}`;
+            if(basename(movedPath)!==targetName){
+              await apiPost('/api/local/rename',{path:movedPath,new_name:targetName});
+            }
+          }
+        }else{
+          const sourceParent=(row.sourcePath||'').replace(/\/+$/,'').split('/').slice(0,-1).join('/')||'/';
+          const targetParent=(row.targetPath||'').replace(/\/+$/,'').split('/').slice(0,-1).join('/')||'/';
+          const targetName=basename(row.targetPath);
+          if(sourceParent===targetParent && basename(row.sourcePath)!==targetName){
+            await apiPost('/api/sp/rename',{server_relative_url:row.sourcePath,new_name:targetName,is_folder:!!row.isDir,site_relative_url:ctx.site||null});
+          }else{
+            await apiPost('/api/sp/move',{source_server_relative_url:row.sourcePath,target_server_relative_url:row.targetPath,is_folder:!!row.isDir,overwrite:false,site_relative_url:ctx.site||null});
+          }
+          recordMigration(row.action==='Rename'?'rename':'move',row.isDir?'folder':'file',row.sourcePath,row.targetPath,ctx.site||'',ctx.site||'');
+        }
+        row.status='applied';
+        undoBatch.push({kind:ctx.kind,site:ctx.site||'',oldPath:row.sourcePath,newPath:row.targetPath,isDir:!!row.isDir});
+        logOps.push({source_path:row.sourcePath,target_path:row.targetPath,action:row.action,reason:row.reason,is_dir:!!row.isDir,status:'applied'});
+      }catch(e){
+        row.status='failed';
+        logOps.push({source_path:row.sourcePath,target_path:row.targetPath,action:row.action,reason:row.reason,is_dir:!!row.isDir,status:'failed',error:err(e)});
+      }
+    }
+  }finally{
+    if(undoBatch.length) state.aiRenameUndoStack.push(undoBatch);
+    recordAiRenameBatch({id:`ai-batch-${Date.now()}`,timestamp:new Date().toISOString(),kind:ctx.kind,site_relative_url:ctx.site||'',root_path:ctx.rootPath,instruction:ctx.instruction,recursive:!!ctx.recursive,summary:ctx.summary||'AI rename batch',warnings:ctx.warnings||[],operations:logOps});
+    await loadPane('left',state.left.path); await loadPane('right',state.right.path);
+  }
+  const applied=logOps.filter((op)=>op.status==='applied').length, failed=logOps.filter((op)=>op.status==='failed').length;
+  setStatus(`AI rename applied ${applied} operation(s).${failed?` ${failed} failed.`:''}`);
+}
 async function renameSelected(){
   const p=activePane(), path=selectedSinglePath();
   if(!path) return setStatus('Select exactly one item.');
@@ -1584,6 +1864,32 @@ async function applyTranslationRename(){
 async function undoRename(){
   const p=activePane();
   try{
+    const aiBatch=state.aiRenameUndoStack.pop();
+    if(aiBatch&&aiBatch.length){
+      for(const op of aiBatch.reverse()){
+        if(op.kind==='local'){
+          const targetParent=parentPath(op.oldPath), targetName=basename(op.oldPath);
+          await ensureLocalFolderTree(commonParentForAi([op.oldPath],false),targetParent);
+          await apiPost('/api/local/move',{sources:[op.newPath],destination:targetParent});
+          const movedPath=`${targetParent}\\${basename(op.newPath)}`;
+          if(basename(movedPath)!==targetName){
+            await apiPost('/api/local/rename',{path:movedPath,new_name:targetName});
+          }
+        }else{
+          const oldParent=(op.oldPath||'').replace(/\/+$/,'').split('/').slice(0,-1).join('/')||'/';
+          const newParent=(op.newPath||'').replace(/\/+$/,'').split('/').slice(0,-1).join('/')||'/';
+          const oldName=basename(op.oldPath);
+          if(oldParent===newParent && basename(op.newPath)!==oldName){
+            await apiPost('/api/sp/rename',{server_relative_url:op.newPath,new_name:oldName,is_folder:op.isDir,site_relative_url:op.site||null});
+          }else{
+            await ensureSpFolderTree(op.site||'', commonParentForAi([op.oldPath],true), oldParent);
+            await apiPost('/api/sp/move',{source_server_relative_url:op.newPath,target_server_relative_url:op.oldPath,is_folder:op.isDir,overwrite:false,site_relative_url:op.site||null});
+          }
+          recordMigration('move',op.isDir?'folder':'file',op.newPath,op.oldPath,op.site||'',op.site||'');
+        }
+      }
+      await loadPane('left',state.left.path); await loadPane('right',state.right.path); return setStatus('AI rename undo complete.');
+    }
     if(p.kind==='local') await apiPost('/api/local/undo-rename',{});
     else{
       const batch=state.spRenameUndoStack.pop();
@@ -1769,6 +2075,8 @@ function saveFavorites(){ localStorage.setItem('smx_web_favorites',JSON.stringif
 function normalizeSpPath(path){ let v=String(path||'').trim(); if(!v) return ''; if(!v.startsWith('/')) v='/'+v; return v.replace(/\/+$/,'')||'/'; }
 function loadMigrationLog(){ try{ state.migrationLog=JSON.parse(localStorage.getItem('smx_web_link_migrations')||'[]'); if(!Array.isArray(state.migrationLog)) state.migrationLog=[]; }catch{ state.migrationLog=[]; } }
 function saveMigrationLog(){ localStorage.setItem('smx_web_link_migrations',JSON.stringify(state.migrationLog)); }
+function loadAiRenameLog(){ try{ state.aiRenameLog=JSON.parse(localStorage.getItem('smx_web_ai_rename_log')||'[]'); if(!Array.isArray(state.aiRenameLog)) state.aiRenameLog=[]; }catch{ state.aiRenameLog=[]; } }
+function saveAiRenameLog(){ localStorage.setItem('smx_web_ai_rename_log',JSON.stringify(state.aiRenameLog)); }
 function buildWebUrlFromPath(path){
   const base=String(el.spBaseUrlInput?.value||'').trim();
   if(!base) return '';
@@ -1851,6 +2159,56 @@ function renderMigrationPanel(){
   if(el.migrationResolveOutput && !el.migrationResolveOutput.dataset.touched){
     el.migrationResolveOutput.textContent=`${state.migrationLog.length} migration record(s) available locally.`;
   }
+}
+function renderAiRenameLogPanel(){
+  if(!el.aiRenameLogList) return;
+  el.aiRenameLogList.innerHTML='';
+  const query=String(el.aiRenameFilterInput?.value||'').trim().toLowerCase();
+  let rows=state.aiRenameLog.slice().reverse();
+  if(query){
+    rows=rows.filter((row)=>{
+      const ops=Array.isArray(row?.operations)?row.operations:[];
+      const blob=[
+        row?.timestamp||'', row?.kind||'', row?.root_path||'', row?.summary||'', row?.instruction||'', row?.site_relative_url||'',
+        ...ops.flatMap((op)=>[op?.source_path||'', op?.target_path||'', op?.status||'', op?.action||'', op?.reason||''])
+      ].join(' ').toLowerCase();
+      return blob.includes(query);
+    });
+  }
+  if(!rows.length){
+    el.aiRenameLogList.innerHTML='<div class="rounded-lg border border-slate-200 p-2 text-xs text-slate-500 dark:border-slate-700">No AI rename batches logged yet.</div>';
+    return;
+  }
+  rows.slice(0,20).forEach((row)=>{
+    const ops=Array.isArray(row?.operations)?row.operations:[];
+    const applied=ops.filter((op)=>String(op?.status||'')==='applied').length;
+    const failed=ops.filter((op)=>String(op?.status||'')==='failed').length;
+    const item=document.createElement('div');
+    item.className='rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700';
+    item.innerHTML=`
+      <div class="font-semibold">${escapeHtml(row?.summary||'AI rename batch')}</div>
+      <div class="mt-1 text-slate-500">${escapeHtml(row?.timestamp||'')} | ${escapeHtml(row?.kind||'')} | ${row?.recursive?'recursive':'flat'} | ${applied} applied${failed?`, ${failed} failed`:''}</div>
+      <div class="mt-1 text-slate-500">${escapeHtml(row?.root_path||'')}</div>
+    `;
+    el.aiRenameLogList.appendChild(item);
+  });
+}
+function exportAiRenameLogJson(){
+  downloadBlob(`smx-ai-rename-log-${Date.now()}.json`,JSON.stringify(state.aiRenameLog,null,2),'application/json');
+}
+function exportAiRenameLogCsv(){
+  const lines=[['batch_id','timestamp','kind','site_relative_url','root_path','recursive','summary','instruction','source_path','target_path','action','reason','is_dir','status','error'].join(',')];
+  state.aiRenameLog.forEach((row)=>{
+    const ops=Array.isArray(row?.operations)?row.operations:[];
+    ops.forEach((op)=>{
+      lines.push([
+        csvCell(row?.id||''),csvCell(row?.timestamp||''),csvCell(row?.kind||''),csvCell(row?.site_relative_url||''),csvCell(row?.root_path||''),
+        csvCell(String(!!row?.recursive)),csvCell(row?.summary||''),csvCell(row?.instruction||''),csvCell(op?.source_path||''),csvCell(op?.target_path||''),
+        csvCell(op?.action||''),csvCell(op?.reason||''),csvCell(String(!!op?.is_dir)),csvCell(op?.status||''),csvCell(op?.error||'')
+      ].join(','));
+    });
+  });
+  downloadBlob(`smx-ai-rename-log-${Date.now()}.csv`,lines.join('\n'),'text/csv');
 }
 function resolveMigrationInput(){
   const raw=String(el.migrationResolveInput?.value||'').trim();
@@ -2054,6 +2412,7 @@ function exportConfig(){
     translationEnabled:state.translationEnabled,
     favorites:state.favorites,
     migrationLog:state.migrationLog,
+    aiRenameLog:state.aiRenameLog,
     layouts:state.layouts,
     recent:state.recent,
     sessions:state.sessions,
@@ -2077,6 +2436,7 @@ async function importConfigFromFile(file){
     state.translationEnabled=!!data.translationEnabled;
     state.favorites=Array.isArray(data.favorites)?data.favorites:[];
     state.migrationLog=Array.isArray(data.migrationLog)?data.migrationLog:[];
+    state.aiRenameLog=Array.isArray(data.aiRenameLog)?data.aiRenameLog:[];
     state.layouts=Array.isArray(data.layouts)?data.layouts:[];
     state.recent=Array.isArray(data.recent)?data.recent:[];
     state.sessions=Array.isArray(data.sessions)?data.sessions:[];
@@ -2085,11 +2445,11 @@ async function importConfigFromFile(file){
       state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}];
       state.activeSessionId=state.sessions[0].id;
     }
-    saveFavorites(); saveMigrationLog(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
+    saveFavorites(); saveMigrationLog(); saveAiRenameLog(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
     persistSessions();
     el.langInput.value=state.language;
     el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`;
-    renderFavorites(); renderLayouts(); renderLayoutTabs(); renderRecent(); renderSessionTabs();
+    renderFavorites(); renderLayouts(); renderLayoutTabs(); renderRecent(); renderSessionTabs(); renderMigrationPanel(); renderAiRenameLogPanel();
     const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
     await applyWorkspaceSnapshot(active.snapshot||currentWorkspaceSnapshot());
     setStatus('Config imported.');
@@ -2112,7 +2472,7 @@ function wirePaneEvents(key){
 
 function wireGlobalEvents(){
   el.copyBtn.onclick=()=>setClipboard('copy'); el.cutBtn.onclick=()=>setClipboard('cut'); el.pasteBtn.onclick=pasteClipboard;
-  el.renameBtn.onclick=renameSelected; el.deleteBtn.onclick=deleteSelected; el.mkdirBtn.onclick=createFolder; el.openBtn.onclick=()=>openSelected(false); el.revealBtn.onclick=()=>openSelected(true);
+  el.renameBtn.onclick=renameSelected; if(el.aiRenameBtn) el.aiRenameBtn.onclick=aiRenameAndOrganize; el.deleteBtn.onclick=deleteSelected; el.mkdirBtn.onclick=createFolder; el.openBtn.onclick=()=>openSelected(false); el.revealBtn.onclick=()=>openSelected(true);
   el.toggleTranslateBtn.onclick=toggleTranslation; el.renameTranslatedBtn.onclick=applyTranslationRename; el.undoRenameBtn.onclick=undoRename;
   el.previewBtn.onclick=previewSelected; el.extractBtn.onclick=extractText; el.summaryBtn.onclick=summarizeSelected; el.askBtn.onclick=askQuestion;
   el.saveTagsBtn.onclick=saveTags; el.searchTagsBtn.onclick=searchTags; el.propertiesBtn.onclick=loadProperties;
@@ -2154,12 +2514,15 @@ function wireGlobalEvents(){
   if(el.migrationResolveBtn) el.migrationResolveBtn.onclick=resolveMigrationInput;
   if(el.migrationResolveInput) el.migrationResolveInput.onkeydown=(e)=>{ if(e.key==='Enter') resolveMigrationInput(); };
   if(el.migrationFilterInput) el.migrationFilterInput.oninput=renderMigrationPanel;
+  if(el.aiRenameFilterInput) el.aiRenameFilterInput.oninput=renderAiRenameLogPanel;
   if(el.migrationImportBtn) el.migrationImportBtn.onclick=()=>el.migrationImportInput?.click();
   if(el.migrationImportInput) el.migrationImportInput.onchange=async()=>{ const f=el.migrationImportInput.files&&el.migrationImportInput.files[0]; await importMigrationLogFile(f); el.migrationImportInput.value=''; };
   if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.onclick=copyResolvedMigrationValue;
   if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.onclick=openResolvedMigrationValue;
   if(el.migrationExportJsonBtn) el.migrationExportJsonBtn.onclick=exportMigrationLogJson;
   if(el.migrationExportCsvBtn) el.migrationExportCsvBtn.onclick=exportMigrationLogCsv;
+  if(el.aiRenameExportJsonBtn) el.aiRenameExportJsonBtn.onclick=exportAiRenameLogJson;
+  if(el.aiRenameExportCsvBtn) el.aiRenameExportCsvBtn.onclick=exportAiRenameLogCsv;
   el.exportConfigBtn.onclick=exportConfig;
   el.importConfigBtn.onclick=()=>el.importConfigInput.click();
   el.importConfigInput.onchange=async()=>{ const f=el.importConfigInput.files&&el.importConfigInput.files[0]; await importConfigFromFile(f); el.importConfigInput.value=''; };
@@ -2183,7 +2546,7 @@ async function init(){
   loadAutomationRules(); renderAutomationRules();
   loadSearchFilters(); renderSearchFilters(); renderSearchResults();
   loadJobsState(); renderJobs();
-  loadFavorites(); loadMigrationLog(); renderFavorites(); renderMigrationPanel(); loadLayouts(); renderLayouts(); loadRecent(); renderRecent();
+  loadFavorites(); loadMigrationLog(); loadAiRenameLog(); renderFavorites(); renderMigrationPanel(); renderAiRenameLogPanel(); loadLayouts(); renderLayouts(); loadRecent(); renderRecent();
   loadSessions(); renderSessionTabs();
   const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
   await applyWorkspaceSnapshot(active.snapshot || currentWorkspaceSnapshot());
