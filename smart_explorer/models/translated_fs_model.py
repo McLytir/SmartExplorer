@@ -11,6 +11,7 @@ from ..translation_cache import TranslationCache
 
 # Optional role used by non-QFileSystemModel sources to provide a path
 PATH_ROLE = Qt.UserRole + 1
+TRANSLATION_ROLE = Qt.UserRole + 2
 
 
 class _TranslateJobSignals(QObject):
@@ -41,10 +42,14 @@ class _TranslateJob(QRunnable):
 class TranslatedProxyModel(QIdentityProxyModel):
     def __init__(self, translator: Translator, target_language: str, parent=None, *,
                  cache: Optional[TranslationCache] = None,
-                 ignore_patterns: Optional[list[str]] = None):
+                 ignore_patterns: Optional[list[str]] = None,
+                 display_mode: str = "replace",
+                 enabled: bool = True):
         super().__init__(parent)
         self._translator = translator
         self._target_language = target_language
+        self._display_mode = display_mode
+        self._enabled = enabled
         self._cache: Dict[str, str] = {}
         self._pending: Dict[str, bool] = {}
         self._pool = QThreadPool.globalInstance()
@@ -78,6 +83,20 @@ class TranslatedProxyModel(QIdentityProxyModel):
             top_left = self.index(0, 0)
             bottom_right = self.index(self.rowCount() - 1, 0)
             self.dataChanged.emit(top_left, bottom_right)
+
+    def set_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._enabled:
+            return
+        self._enabled = enabled
+        self._refresh_all_rows()
+
+    def set_display_mode(self, mode: str) -> None:
+        mode = mode or "replace"
+        if mode == self._display_mode:
+            return
+        self._display_mode = mode
+        self._refresh_all_rows()
 
     def set_translator(self, translator: Translator) -> None:
         self._translator = translator
@@ -118,7 +137,9 @@ class TranslatedProxyModel(QIdentityProxyModel):
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return super().data(index, role)
-        if role == Qt.DisplayRole:
+        if index.column() != 0:
+            return super().data(index, role)
+        if role in (Qt.DisplayRole, TRANSLATION_ROLE):
             src_idx = self.mapToSource(index)
             # Try QFileSystemModel-style API first
             path = None
@@ -136,6 +157,13 @@ class TranslatedProxyModel(QIdentityProxyModel):
                 path = src_model.data(src_idx, PATH_ROLE)
             if name is None:
                 name = src_model.data(src_idx, Qt.DisplayRole)
+            name = str(name or "")
+
+            if role == TRANSLATION_ROLE:
+                if not self._enabled or self._is_ignored(path, name) or not self._is_in_scope(path):
+                    return ""
+                translated = self._translated_value(path, name)
+                return translated if translated and translated != name else ""
 
             # Skip translating ignored paths
             if self._is_ignored(path, name):
@@ -144,35 +172,40 @@ class TranslatedProxyModel(QIdentityProxyModel):
             if not self._is_in_scope(path):
                 return name
 
-            if path in self._cache:
-                return self._cache[path]
+            if not self._enabled:
+                return name
 
-            # Try disk cache first
-            mtime = 0.0
-            try:
-                mtime = os.path.getmtime(path)
-            except Exception:
-                pass
-            if self._disk_cache:
-                namespace = self._cache_namespace()
-                cached = self._disk_cache.get(namespace, path, name, mtime)
-                if not cached:
-                    # Fallback to name-only cache (common names across locations)
-                    cached = self._disk_cache.get_by_name(namespace, name)
-                if cached:
-                    self._cache[path] = cached
-                    return cached
-
-            # Queue translation if not pending
-            if path not in self._pending:
-                self._pending[path] = True
-                job = _TranslateJob(path, name, self._target_language, self._translator, self._signals)
-                self._pool.start(job)
-
-            # Fallback: show original name while loading
-            return name
-
+            translated = self._translated_value(path, name)
+            if not translated or translated == name:
+                return name
+            if self._display_mode == "below_name":
+                return f"{name}\n{translated}"
+            return translated
         return super().data(index, role)
+
+    def _translated_value(self, path: str, name: str) -> str:
+        if path in self._cache:
+            return self._cache[path]
+
+        mtime = 0.0
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            pass
+        if self._disk_cache:
+            namespace = self._cache_namespace()
+            cached = self._disk_cache.get(namespace, path, name, mtime)
+            if not cached:
+                cached = self._disk_cache.get_by_name(namespace, name)
+            if cached:
+                self._cache[path] = cached
+                return cached
+
+        if path not in self._pending:
+            self._pending[path] = True
+            job = _TranslateJob(path, name, self._target_language, self._translator, self._signals)
+            self._pool.start(job)
+        return ""
 
     def _on_done(self, path: str, translated: str) -> None:
         self._cache[path] = translated

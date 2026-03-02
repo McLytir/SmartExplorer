@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
@@ -19,6 +20,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..services.bookmark_export_converter import (
+    convert_bookmark_html,
+    export_converted_bookmarks_csv,
+    export_converted_bookmarks_json,
+)
 from ..services.link_migration_log import LinkMigrationLog
 from ..settings import AppConfig, save_config
 
@@ -69,6 +75,7 @@ class ResolveOldLinkDialog(QDialog):
         self._copy_btn = QPushButton("Copy Result", self)
         self._open_in_app_btn = QPushButton("Open in SmartExplorer", self)
         self._open_btn = QPushButton("Open Resolved", self)
+        self._convert_bookmarks_btn = QPushButton("Convert Bookmark HTML", self)
         self._copy_btn.setEnabled(False)
         self._open_in_app_btn.setEnabled(False)
         self._open_btn.setEnabled(False)
@@ -76,6 +83,7 @@ class ResolveOldLinkDialog(QDialog):
         actions.addWidget(self._copy_btn)
         actions.addWidget(self._open_in_app_btn)
         actions.addWidget(self._open_btn)
+        actions.addWidget(self._convert_bookmarks_btn)
         actions.addStretch(1)
         root.addLayout(actions)
 
@@ -87,6 +95,7 @@ class ResolveOldLinkDialog(QDialog):
         self._copy_btn.clicked.connect(self._copy_result)
         self._open_in_app_btn.clicked.connect(self._open_in_app)
         self._open_btn.clicked.connect(self._open_result)
+        self._convert_bookmarks_btn.clicked.connect(self._convert_bookmark_export)
         self._input.returnPressed.connect(self._resolve)
         self._load_recent_entries()
 
@@ -156,6 +165,46 @@ class ResolveOldLinkDialog(QDialog):
             return
         self.open_in_app_requested.emit(path, site)
         self.accept()
+
+    def _convert_bookmark_export(self) -> None:
+        source_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Bookmark Export",
+            "",
+            "HTML Files (*.html *.htm)",
+        )
+        if not source_path:
+            return
+        target_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Converted Bookmark Export",
+            "smart_explorer_bookmark_resolution.json",
+            "JSON Files (*.json);;CSV Files (*.csv)",
+        )
+        if not target_path:
+            return
+        try:
+            rows = convert_bookmark_html(source_path, self._log, self._cfg.sp_base_url)
+            if target_path.lower().endswith(".csv"):
+                export_converted_bookmarks_csv(target_path, rows)
+            else:
+                export_converted_bookmarks_json(target_path, rows)
+        except Exception as exc:
+            QMessageBox.warning(self, "Convert Bookmark HTML", f"Failed to convert bookmark export: {exc}")
+            return
+        resolved = sum(1 for row in rows if row.status == "resolved")
+        unchanged = sum(1 for row in rows if row.status == "unchanged")
+        external = sum(1 for row in rows if row.status == "external")
+        QMessageBox.information(
+            self,
+            "Convert Bookmark HTML",
+            (
+                f"Converted {len(rows)} bookmark(s) to {target_path}.\n"
+                f"Resolved: {resolved}\n"
+                f"Unchanged: {unchanged}\n"
+                f"External: {external}"
+            ),
+        )
 
     def _load_recent_entries(self) -> None:
         self._recent_list.clear()

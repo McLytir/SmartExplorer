@@ -121,14 +121,7 @@ class WorkspaceManager:
             name="Local",
             root_path=root,
         )
-        translation = WorkspaceDefinition(
-            id="ws-local-en",
-            kind="translation",
-            name="Local (Translated)",
-            base_workspace_id=base.id,
-            language=self._cfg.target_language or "English",
-        )
-        self._definitions = {base.id: base, translation.id: translation}
+        self._definitions = {base.id: base}
 
     def definitions(self) -> List[WorkspaceDefinition]:
         # Preserve insertion order

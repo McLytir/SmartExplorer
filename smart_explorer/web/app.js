@@ -41,6 +41,11 @@ const state = {
   migrationLog: [],
   aiRenameLog: [],
   aiRenameUndoStack: [],
+  splitViewEnabled: false,
+  splitCompareSessionId: '',
+  splitRuntime: {},
+  splitTransferMode: 'copy',
+  migrationBookmarkExportFormat: 'json',
 };
 
 function paneState(key){
@@ -48,6 +53,8 @@ function paneState(key){
 }
 
 const el = {
+  splitViewToggleBtn:id('splitViewToggleBtn'), splitTransferModeBtn:id('splitTransferModeBtn'), splitCompareSessionSelect:id('splitCompareSessionSelect'), splitSessionsHost:id('splitSessionsHost'), mainWorkspaceView:id('mainWorkspaceView'),
+  openSettingsBtn:id('openSettingsBtn'), settingsModal:id('settingsModal'), settingsCloseBtn:id('settingsCloseBtn'), settingsApplyBtn:id('settingsApplyBtn'),
   status: id('status'), uiVersionSelect:id('uiVersionSelect'), langInput: id('langInput'), toggleTranslateBtn: id('toggleTranslateBtn'),
   renameTranslatedBtn: id('renameTranslatedBtn'), undoRenameBtn: id('undoRenameBtn'), copyBtn: id('copyBtn'), cutBtn: id('cutBtn'), pasteBtn: id('pasteBtn'),
   renameBtn: id('renameBtn'), aiRenameBtn:id('aiRenameBtn'), deleteBtn: id('deleteBtn'), mkdirBtn: id('mkdirBtn'), openBtn: id('openBtn'), revealBtn: id('revealBtn'), addFavoriteBtn: id('addFavoriteBtn'), exportConfigBtn:id('exportConfigBtn'), importConfigBtn:id('importConfigBtn'), importConfigInput:id('importConfigInput'),
@@ -71,15 +78,84 @@ const el = {
   renamePreviewModal:id('renamePreviewModal'), renamePreviewSummary:id('renamePreviewSummary'), renamePreviewConflicts:id('renamePreviewConflicts'), renamePreviewCancelBtn:id('renamePreviewCancelBtn'), renamePreviewProceedBtn:id('renamePreviewProceedBtn'),
   aiRenamePreviewModal:id('aiRenamePreviewModal'), aiRenamePreviewSummary:id('aiRenamePreviewSummary'), aiRenamePreviewConflicts:id('aiRenamePreviewConflicts'), aiRenamePreviewCancelBtn:id('aiRenamePreviewCancelBtn'), aiRenamePreviewProceedBtn:id('aiRenamePreviewProceedBtn'),
   transferPreviewModal:id('transferPreviewModal'), transferPreviewSummary:id('transferPreviewSummary'), transferPreviewList:id('transferPreviewList'), transferSelectSafeBtn:id('transferSelectSafeBtn'), transferSelectNoneBtn:id('transferSelectNoneBtn'), transferPreviewConflicts:id('transferPreviewConflicts'), transferPreviewCancelBtn:id('transferPreviewCancelBtn'), transferPreviewProceedBtn:id('transferPreviewProceedBtn'),
+  newFolderModal:id('newFolderModal'), newFolderSummary:id('newFolderSummary'), newFolderNameInput:id('newFolderNameInput'), newFolderCancelBtn:id('newFolderCancelBtn'), newFolderCreateBtn:id('newFolderCreateBtn'),
   previewBtn:id('previewBtn'), extractBtn:id('extractBtn'), summaryBtn:id('summaryBtn'), questionInput:id('questionInput'), askBtn:id('askBtn'), previewFrame:id('previewFrame'), previewText:id('previewText'),
   pdfPageInput:id('pdfPageInput'), pdfJumpBtn:id('pdfJumpBtn'), pdfBookmarkAddBtn:id('pdfBookmarkAddBtn'), pdfBookmarksList:id('pdfBookmarksList'),
   checkoutBtn:id('checkoutBtn'), checkinBtn:id('checkinBtn'), undoCheckoutBtn:id('undoCheckoutBtn'), loadVersionsBtn:id('loadVersionsBtn'), versionsSelect:id('versionsSelect'), downloadVersionBtn:id('downloadVersionBtn'), restoreVersionBtn:id('restoreVersionBtn'), versionsOutput:id('versionsOutput'),
-  migrationResolveInput:id('migrationResolveInput'), migrationResolveBtn:id('migrationResolveBtn'), migrationFilterInput:id('migrationFilterInput'), migrationImportBtn:id('migrationImportBtn'), migrationImportInput:id('migrationImportInput'), migrationResolveOutput:id('migrationResolveOutput'), migrationCopyResolvedBtn:id('migrationCopyResolvedBtn'), migrationOpenResolvedBtn:id('migrationOpenResolvedBtn'), migrationExportJsonBtn:id('migrationExportJsonBtn'), migrationExportCsvBtn:id('migrationExportCsvBtn'), migrationLogList:id('migrationLogList'),
+  migrationResolveInput:id('migrationResolveInput'), migrationResolveBtn:id('migrationResolveBtn'), migrationFilterInput:id('migrationFilterInput'), migrationImportBtn:id('migrationImportBtn'), migrationImportInput:id('migrationImportInput'), migrationBookmarkInput:id('migrationBookmarkInput'), migrationConvertBookmarkJsonBtn:id('migrationConvertBookmarkJsonBtn'), migrationConvertBookmarkCsvBtn:id('migrationConvertBookmarkCsvBtn'), migrationResolveOutput:id('migrationResolveOutput'), migrationCopyResolvedBtn:id('migrationCopyResolvedBtn'), migrationOpenResolvedBtn:id('migrationOpenResolvedBtn'), migrationExportJsonBtn:id('migrationExportJsonBtn'), migrationExportCsvBtn:id('migrationExportCsvBtn'), migrationLogList:id('migrationLogList'),
   aiRenameFilterInput:id('aiRenameFilterInput'), aiRenameExportJsonBtn:id('aiRenameExportJsonBtn'), aiRenameExportCsvBtn:id('aiRenameExportCsvBtn'), aiRenameLogList:id('aiRenameLogList'),
 };
 
 function id(x){ return document.getElementById(x); }
 function paneEls(key){ return key==='left' ? {kind:el.leftKind,site:el.leftSite,library:el.leftLibrary,path:el.leftPath,go:el.leftGo,list:el.leftList,uploadBtn:el.leftUploadBtn,uploadInput:el.leftUploadInput,filter:el.leftFilterInput} : {kind:el.rightKind,site:el.rightSite,library:el.rightLibrary,path:el.rightPath,go:el.rightGo,list:el.rightList,uploadBtn:el.rightUploadBtn,uploadInput:el.rightUploadInput,filter:el.rightFilterInput}; }
+function setModalOpen(node, open){
+  if(!node) return;
+  node.classList.toggle('hidden', !open);
+  node.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+function isSettingsModalOpen(){
+  return !!(el.settingsModal && !el.settingsModal.classList.contains('hidden'));
+}
+function isNewFolderModalOpen(){
+  return !!(el.newFolderModal && !el.newFolderModal.classList.contains('hidden'));
+}
+function syncSettingsUi(){
+  if(el.langInput) el.langInput.value=state.language||'English';
+  if(el.uiVersionSelect) el.uiVersionSelect.value=document.body.getAttribute('data-ui-version')||'v1';
+  renderShortcuts();
+  renderNotifications();
+}
+async function applySettingsFromModal(){
+  const nextLanguage=(el.langInput?.value||'English').trim()||'English';
+  const languageChanged=nextLanguage!==state.language;
+  state.language=nextLanguage;
+  saveCurrentSessionSnapshot();
+  persistSessions();
+  if(languageChanged && state.translationEnabled){
+    await refreshTranslations('left');
+    await refreshTranslations('right');
+    renderPane('left');
+    renderPane('right');
+  }
+  setStatus(languageChanged?'Settings applied and translation language updated.':'Settings applied.');
+}
+async function openSettingsModal(){
+  if(!el.settingsModal) return;
+  syncSettingsUi();
+  await refreshSpAuthPanel();
+  el.settingsModal.classList.remove('hidden');
+  el.settingsModal.setAttribute('aria-hidden','false');
+}
+function closeSettingsModal(){
+  if(!el.settingsModal) return;
+  setModalOpen(el.settingsModal, false);
+}
+function resolveCreateFolderContext(){
+  const p=activePane();
+  const selection=selectedItems(p);
+  const selectedDir=selection.length===1 && selection[0]?.isDir ? selection[0].path : '';
+  const targetParent=p.kind==='local'
+    ? (selectedDir || p.path)
+    : normalizeSpPath(selectedDir || p.path || p.library || '/');
+  return { pane:p, targetParent };
+}
+function openNewFolderModal(){
+  const ctx=resolveCreateFolderContext();
+  if(!ctx.targetParent) return setStatus('No target folder is available.');
+  if(el.newFolderSummary){
+    const label=ctx.pane.kind==='sharepoint'
+      ? `Create a SharePoint folder in ${ctx.targetParent}`
+      : `Create a folder in ${ctx.targetParent}`;
+    el.newFolderSummary.textContent=label;
+  }
+  if(el.newFolderNameInput) el.newFolderNameInput.value='';
+  setModalOpen(el.newFolderModal, true);
+  if(el.newFolderNameInput) el.newFolderNameInput.focus();
+  setStatus(`Ready to create folder in ${ctx.targetParent}`);
+}
+function closeNewFolderModal(){
+  setModalOpen(el.newFolderModal, false);
+}
 function loadNotificationPrefs(){
   state.desktopNotify=localStorage.getItem('smx_web_desktop_notify')==='1';
 }
@@ -183,7 +259,28 @@ function selectedItems(p){ return p.items.filter(i=>p.selected.has(i.path)); }
 function selectedSinglePath(){ const a=Array.from(activePane().selected); return a.length===1?a[0]:null; }
 function csvCell(v){ const s=String(v??''); return `"${s.replaceAll('"','""')}"`; }
 function fmtSize(bytes){ if(!bytes) return ''; const u=['B','KB','MB','GB','TB']; let n=Number(bytes),i=0; while(n>=1024&&i<u.length-1){ n/=1024;i++; } return `${n.toFixed(i?1:0)} ${u[i]}`; }
-function parentPath(path){ if(!path||/^[A-Za-z]:\\?$/.test(path)) return path; const c=path.replace(/[\\/]$/,''); const i=Math.max(c.lastIndexOf('/'),c.lastIndexOf('\\')); return i<=0?c:c.slice(0,i); }
+function parentPath(path){
+  const raw=String(path||'').trim();
+  if(!raw) return raw;
+  if(/^[A-Za-z]:\\?$/.test(raw)) return raw.endsWith('\\') ? raw : `${raw}\\`;
+  if(raw.includes('\\') || /^[A-Za-z]:/.test(raw)){
+    const trimmed=raw.replace(/[\\\/]+$/,'');
+    if(/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}\\`;
+    const idx=trimmed.lastIndexOf('\\');
+    if(idx<0) return trimmed;
+    if(idx===2 && /^[A-Za-z]:/.test(trimmed)) return `${trimmed.slice(0,3)}`;
+    return trimmed.slice(0, idx);
+  }
+  if(raw.startsWith('/')){
+    const trimmed=raw.replace(/\/+$/,'') || '/';
+    if(trimmed==='/') return '/';
+    const idx=trimmed.lastIndexOf('/');
+    return idx<=0 ? '/' : trimmed.slice(0, idx);
+  }
+  const trimmed=raw.replace(/[\\\/]+$/,'');
+  const idx=Math.max(trimmed.lastIndexOf('/'),trimmed.lastIndexOf('\\'));
+  return idx<=0 ? trimmed : trimmed.slice(0, idx);
+}
 function isMedia(path){ const e=extname(path); return EXT_IMAGE.has(e)||EXT_VIDEO.has(e)||EXT_AUDIO.has(e)||EXT_PDF.has(e); }
 function normalizeSpFieldType(t){ return String(t||'').toLowerCase(); }
 function escapeHtml(s){ return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
@@ -525,6 +622,44 @@ function dirnameForKind(kind,path){
   const p=String(path).replace(/\/+$/,'');
   const i=p.lastIndexOf('/');
   return i<=0?'/':p.slice(0,i);
+}
+function upPathForPaneState(pane){
+  if(!pane) return '';
+  if(pane.kind==='sharepoint'){
+    const current=normalizeSpPath(pane.path||pane.library||'/');
+    return dirnameForKind('sharepoint', current);
+  }
+  return dirnameForKind('local', String(pane.path||'').trim());
+}
+async function navigatePaneUp(key){
+  const pane=state[key];
+  if(!pane) return;
+  const target=upPathForPaneState(pane);
+  if(!target || target===pane.path) return setStatus('Already at the top folder.');
+  await loadPane(key, target);
+}
+
+function focusSplitSession(sessionId){
+  const runtime=hydrateSplitRuntime(sessionId);
+  if(sessionId===state.activeSessionId){
+    syncActiveSessionFromSplitRuntime(runtime);
+    return runtime;
+  }
+  saveCurrentSessionSnapshot();
+  state.activeSessionId=sessionId;
+  syncActiveSessionFromSplitRuntime(runtime);
+  persistSessions();
+  renderSessionTabs();
+  return runtime;
+}
+
+async function navigateSplitPaneUp(sessionId, side){
+  const runtime=focusSplitSession(sessionId);
+  const pane=runtime?.[side];
+  if(!pane) return;
+  const target=upPathForPaneState(pane);
+  if(!target || target===pane.path) return setStatus('Already at the top folder.');
+  await loadSplitPane(sessionId, side, target);
 }
 function sleep(ms){ return new Promise((resolve)=>setTimeout(resolve,ms)); }
 const DEFAULT_RETRY_POLICY={max_attempts:3,base_delay_ms:1500,max_delay_ms:30000};
@@ -1166,8 +1301,19 @@ async function executeSingleJobItem(job,item){
     if(item.kind==='local'){
       return apiPost(type==='move'?'/api/local/move':'/api/local/copy',{sources:[item.path],destination:targetPath});
     }
-    if(item.isDir) throw new Error('sp_folder_to_local_not_supported');
-    return apiPost('/api/transfer/sp-to-local',{site_relative_url:item.site||null,server_relative_urls:[item.path],destination_dir:targetPath,move:type==='move'});
+    return apiPost('/api/transfer/sp-to-local',{
+      site_relative_url:item.site||null,
+      server_relative_urls:[item.path],
+      source_items:[{
+        kind:'sharepoint',
+        path:item.path,
+        isDir:!!item.isDir,
+        name:targetName,
+        site_relative_url:item.site||null,
+      }],
+      destination_dir:targetPath,
+      move:type==='move',
+    });
   }
   if(item.kind==='sharepoint'){
     const dst=`${(targetPath||'/').replace(/\/+$/,'')}/${targetName}`;
@@ -1405,7 +1551,7 @@ async function refreshTranslations(key){
   }
 }
 
-async function loadPane(key,path){
+async function loadPane(key,path,quiet=false){
   const p=state[key];
   try{
     let d;
@@ -1417,7 +1563,8 @@ async function loadPane(key,path){
     p.path=d.path; p.items=d.items||[]; p.selected.clear(); p.translations.clear();
     updatePaneControls(key); await refreshTranslations(key); renderPane(key); rememberRecent(p);
     saveCurrentSessionSnapshot();
-    setStatus(`Loaded ${key} (${p.kind}): ${p.path}`);
+    if(state.splitViewEnabled) void refreshSplitView(true);
+    if(!quiet) setStatus(`Loaded ${key} (${p.kind}): ${p.path}`);
   }catch(e){ setStatus(`Load failed: ${err(e)}`); }
 }
 
@@ -1427,7 +1574,7 @@ function renderPane(key){
   list.ondragleave=()=>{ list.classList.remove('drag-target'); };
   list.ondrop=async(ev)=>{ ev.preventDefault(); list.classList.remove('drag-target'); await handleDropToTarget(key,p.path,ev); };
   const up=document.createElement('div');
-  up.className='item up'; up.innerHTML='<span></span><span class="name">..</span><span class="meta">Up</span>'; up.onclick=()=>loadPane(key,parentPath(p.path)); list.appendChild(up);
+  up.className='item up'; up.innerHTML='<span></span><span class="name">..</span><span class="meta">Up</span>'; up.onclick=()=>navigatePaneUp(key); list.appendChild(up);
 
   const query=(p.filterText||'').trim().toLowerCase();
   p.items.filter((it)=>!query||String(it.name||'').toLowerCase().includes(query)).forEach(it=>{
@@ -1440,15 +1587,405 @@ function renderPane(key){
     nm.innerHTML=`${it.isDir?'📁':'📄'} ${it.name}${trHtml}`;
     const meta=document.createElement('span'); meta.className='meta'; meta.textContent=it.isDir?'Dir':fmtSize(it.size);
     row.appendChild(cb); row.appendChild(nm); row.appendChild(meta);
-    row.onclick=(ev)=>{ state.activePane=key; if(!ev.ctrlKey&&!ev.metaKey) p.selected.clear(); p.selected.add(it.path); renderPane(key); renderPane(key==='left'?'right':'left'); loadTagsForSelection(); };
+    row.onclick=(ev)=>{ state.activePane=key; saveCurrentSessionSnapshot(); if(!ev.ctrlKey&&!ev.metaKey) p.selected.clear(); p.selected.add(it.path); renderPane(key); renderPane(key==='left'?'right':'left'); loadTagsForSelection(); };
     row.ondblclick=()=>it.isDir?loadPane(key,it.path):openSelected(false);
-    row.ondragstart=(ev)=>{ state.activePane=key; startDragFromItem(key,it.path,ev); };
+    row.ondragstart=(ev)=>{ state.activePane=key; saveCurrentSessionSnapshot(); startDragFromItem(key,it.path,ev); };
     if(it.isDir){
       row.ondragover=(ev)=>{ ev.preventDefault(); row.classList.add('drop-folder'); };
       row.ondragleave=()=>{ row.classList.remove('drop-folder'); };
       row.ondrop=async(ev)=>{ ev.preventDefault(); row.classList.remove('drop-folder'); await handleDropToTarget(key,it.path,ev); };
     }
     list.appendChild(row);
+  });
+}
+
+function createSplitPaneState(sessionId, side, source){
+  return {
+    key:`split:${sessionId}:${side}`,
+    side,
+    sessionId,
+    kind:source?.kind||'local',
+    path:source?.path||'',
+    items:[],
+    selected:new Set(),
+    translations:new Map(),
+    site:source?.site||'',
+    library:source?.library||'',
+    sites:[],
+    libraries:[],
+    filterText:source?.filterText||'',
+  };
+}
+
+function sessionRecordById(sessionId){
+  return state.sessions.find((s)=>s.id===sessionId) || null;
+}
+
+function splitSessionIds(){
+  if(!state.splitViewEnabled) return [];
+  return state.sessions.map((s)=>s.id).filter(Boolean);
+}
+
+function splitSnapshotForSession(sessionId){
+  if(sessionId===state.activeSessionId){
+    const runtime=state.splitRuntime[sessionId];
+    if(state.splitViewEnabled && runtime) return splitRuntimeSnapshot(runtime);
+    return currentWorkspaceSnapshot();
+  }
+  return sessionRecordById(sessionId)?.snapshot || currentWorkspaceSnapshot();
+}
+
+function preferredSplitSide(snapshot){
+  const preferred=String(snapshot?.activePane||'').toLowerCase();
+  if(preferred==='left' || preferred==='right') return preferred;
+  const left=snapshot?.left||{};
+  const right=snapshot?.right||{};
+  const leftReady=!!String(left.path||'').trim() || left.kind==='sharepoint';
+  const rightReady=!!String(right.path||'').trim() || right.kind==='sharepoint';
+  if(leftReady && !rightReady) return 'left';
+  if(rightReady && !leftReady) return 'right';
+  if(left.kind==='sharepoint' && right.kind!=='sharepoint') return 'left';
+  if(right.kind==='sharepoint' && left.kind!=='sharepoint') return 'right';
+  return 'left';
+}
+
+function splitPrimarySideForSession(sessionId){
+  const runtime=state.splitRuntime[sessionId];
+  if(runtime?.activePane==='left' || runtime?.activePane==='right') return runtime.activePane;
+  return preferredSplitSide(splitSnapshotForSession(sessionId));
+}
+
+function hydrateSplitRuntime(sessionId){
+  const record=sessionRecordById(sessionId);
+  const snap=splitSnapshotForSession(sessionId);
+  let runtime=state.splitRuntime[sessionId];
+  if(!runtime){
+    runtime={
+      id:sessionId,
+      name:record?.name||'Session',
+      language:snap.language||state.language||'English',
+      translationEnabled:!!snap.translationEnabled,
+      activePane:preferredSplitSide(snap),
+      left:createSplitPaneState(sessionId,'left',snap.left||{}),
+      right:createSplitPaneState(sessionId,'right',snap.right||{}),
+    };
+    state.splitRuntime[sessionId]=runtime;
+    return runtime;
+  }
+  runtime.name=record?.name||runtime.name||'Session';
+  runtime.language=snap.language||state.language||'English';
+  runtime.translationEnabled=!!snap.translationEnabled;
+  runtime.activePane=preferredSplitSide(snap);
+  for(const side of ['left','right']){
+    const pane=runtime[side];
+    const src=snap[side]||{};
+    const pathChanged=pane.path!==String(src.path||'');
+    const kindChanged=pane.kind!==String(src.kind||'local');
+    const siteChanged=pane.site!==String(src.site||'');
+    const libraryChanged=pane.library!==String(src.library||'');
+    pane.kind=src.kind||'local';
+    pane.site=src.site||'';
+    pane.library=src.library||'';
+    pane.path=src.path||'';
+    pane.filterText=src.filterText||'';
+    if(pathChanged||kindChanged||siteChanged||libraryChanged){
+      pane.items=[];
+      pane.selected.clear();
+      pane.translations.clear();
+    }
+  }
+  return runtime;
+}
+
+function saveSessionSnapshotById(sessionId, snapshot){
+  const idx=state.sessions.findIndex((s)=>s.id===sessionId);
+  if(idx<0) return;
+  state.sessions[idx].snapshot=snapshot;
+  persistSessions();
+}
+
+function splitRuntimeSnapshot(runtime){
+  return {
+    language:runtime.language||state.language||'English',
+    translationEnabled:!!runtime.translationEnabled,
+    activePane:(runtime.activePane==='right'?'right':'left'),
+    left:{kind:runtime.left.kind,site:runtime.left.site||'',library:runtime.left.library||'',path:runtime.left.path||'',filterText:runtime.left.filterText||''},
+    right:{kind:runtime.right.kind,site:runtime.right.site||'',library:runtime.right.library||'',path:runtime.right.path||'',filterText:runtime.right.filterText||''},
+  };
+}
+
+function syncActiveSessionFromSplitRuntime(runtime){
+  if(!runtime) return;
+  const snapshot=splitRuntimeSnapshot(runtime);
+  state.language=snapshot.language||state.language||'English';
+  state.translationEnabled=!!snapshot.translationEnabled;
+  state.activePane=(snapshot.activePane==='right'?'right':'left');
+  for(const side of ['left','right']){
+    const src=snapshot[side]||{};
+    const target=state[side];
+    target.kind=src.kind||'local';
+    target.site=src.site||'';
+    target.library=src.library||'';
+    target.path=src.path||'';
+    target.filterText=src.filterText||'';
+    target.items=(runtime[side]?.items||[]).slice();
+    target.selected=new Set(runtime[side]?.selected||[]);
+    target.translations=new Map(runtime[side]?.translations||[]);
+  }
+  saveCurrentSessionSnapshot();
+}
+
+function persistSplitRuntimeSession(sessionId){
+  const runtime=state.splitRuntime[sessionId];
+  if(!runtime) return;
+  if(sessionId===state.activeSessionId){
+    syncActiveSessionFromSplitRuntime(runtime);
+    return;
+  }
+  saveSessionSnapshotById(sessionId, splitRuntimeSnapshot(runtime));
+}
+
+function splitPaneDomId(sessionId, side, part){
+  const token=String(sessionId||'session').replace(/[^a-zA-Z0-9_-]/g,'_');
+  return `split-${token}-${side}-${part}`;
+}
+
+function splitPaneElements(sessionId, side){
+  return {
+    list:id(splitPaneDomId(sessionId,side,'list')),
+    filter:id(splitPaneDomId(sessionId,side,'filter')),
+    path:id(splitPaneDomId(sessionId,side,'path')),
+    pathInput:id(splitPaneDomId(sessionId,side,'path-input')),
+    go:id(splitPaneDomId(sessionId,side,'go')),
+    up:id(splitPaneDomId(sessionId,side,'up')),
+    refresh:id(splitPaneDomId(sessionId,side,'refresh')),
+  };
+}
+
+async function refreshSplitTranslations(sessionId, side){
+  const runtime=hydrateSplitRuntime(sessionId);
+  const pane=runtime[side];
+  pane.translations.clear();
+  if(!runtime.translationEnabled || !pane.items.length) return;
+  try{
+    const d=await apiPost('/api/translate',{language:runtime.language,items:pane.items.map((it)=>({name:it.name,path:it.path,mtime:it.mtime||0}))});
+    (d.translations||[]).forEach((t,i)=>{
+      const name=pane.items[i]?.name||'';
+      const translated=applyGlossary(t||name);
+      pane.translations.set(pane.items[i].path,translated);
+      rememberTranslation(runtime.language,name,translated);
+    });
+    persistTranslationLocalCache();
+  }catch(e){
+    pane.items.forEach((it)=>{
+      const cached=getCachedTranslation(runtime.language,it.name);
+      if(cached) pane.translations.set(it.path,applyGlossary(cached));
+    });
+  }
+}
+
+async function loadSplitPane(sessionId, side, path, quiet=false){
+  const runtime=hydrateSplitRuntime(sessionId);
+  const pane=runtime[side];
+  try{
+    let d;
+    if(pane.kind==='local'){
+      const q=new URLSearchParams();
+      if(path) q.set('path',path);
+      d=await apiGet(`/api/local/list?${q.toString()}`);
+    }else{
+      d=await apiGet(`/api/sp/list?${new URLSearchParams({site_relative_url:pane.site||'',folder_server_relative_url:path||pane.library||'/'}).toString()}`);
+    }
+    pane.path=d.path;
+    pane.items=d.items||[];
+    pane.selected.clear();
+    pane.translations.clear();
+    await refreshSplitTranslations(sessionId, side);
+    persistSplitRuntimeSession(sessionId);
+    renderSplitPane(sessionId, side);
+    if(!quiet) setStatus(`Loaded ${runtime.name} ${side} (${pane.kind}): ${pane.path}`);
+  }catch(e){
+    setStatus(`Split load failed: ${err(e)}`);
+  }
+}
+
+function selectedItemsFromPane(pane){
+  return (pane.items||[]).filter((it)=>pane.selected.has(it.path));
+}
+
+function renderSplitPane(sessionId, side){
+  const runtime=hydrateSplitRuntime(sessionId);
+  const pane=runtime[side];
+  const ui=splitPaneElements(sessionId, side);
+  if(!ui.list) return;
+  if(ui.path) ui.path.textContent=pane.path||'(empty)';
+  if(ui.pathInput && document.activeElement!==ui.pathInput) ui.pathInput.value=pane.path||'';
+  if(ui.filter && document.activeElement!==ui.filter) ui.filter.value=pane.filterText||'';
+  ui.list.innerHTML='';
+  ui.list.ondragover=(ev)=>{ ev.preventDefault(); ui.list.classList.add('drag-target'); };
+  ui.list.ondragleave=()=>{ ui.list.classList.remove('drag-target'); };
+  ui.list.ondrop=async(ev)=>{ ev.preventDefault(); ui.list.classList.remove('drag-target'); await handleSplitDrop(sessionId, side, pane.path, ev); };
+  const up=document.createElement('div');
+  up.className='item up';
+  up.innerHTML='<span></span><span class="name">..</span><span class="meta">Up</span>';
+  up.onclick=()=>navigateSplitPaneUp(sessionId, side);
+  ui.list.appendChild(up);
+  const query=(pane.filterText||'').trim().toLowerCase();
+  pane.items.filter((it)=>!query||String(it.name||'').toLowerCase().includes(query)).forEach((it)=>{
+    const row=document.createElement('div');
+    row.className=`item${pane.selected.has(it.path)?' active':''}`;
+    row.draggable=true;
+    const cb=document.createElement('input');
+    cb.type='checkbox';
+    cb.checked=pane.selected.has(it.path);
+    cb.onchange=()=>{ cb.checked?pane.selected.add(it.path):pane.selected.delete(it.path); renderSplitPane(sessionId, side); };
+    const nm=document.createElement('span');
+    nm.className='name';
+    const tr=pane.translations.get(it.path);
+    const trHtml=runtime.translationEnabled&&tr&&tr!==it.name?`<span class="translated">${tr}</span>`:'';
+    nm.innerHTML=`${it.isDir?'📁':'📄'} ${it.name}${trHtml}`;
+    const meta=document.createElement('span');
+    meta.className='meta';
+    meta.textContent=it.isDir?'Dir':fmtSize(it.size);
+    row.appendChild(cb); row.appendChild(nm); row.appendChild(meta);
+    row.onclick=(ev)=>{ focusSplitSession(sessionId); if(!ev.ctrlKey&&!ev.metaKey) pane.selected.clear(); pane.selected.add(it.path); persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
+    row.ondblclick=()=>{ focusSplitSession(sessionId); return it.isDir?loadSplitPane(sessionId, side, it.path):window.open(downloadUrl(pane,it.path),'_blank'); };
+    row.ondragstart=(ev)=>startSplitDrag(sessionId, side, it.path, ev);
+    if(it.isDir){
+      row.ondragover=(ev)=>{ ev.preventDefault(); row.classList.add('drop-folder'); };
+      row.ondragleave=()=>{ row.classList.remove('drop-folder'); };
+      row.ondrop=async(ev)=>{ ev.preventDefault(); row.classList.remove('drop-folder'); await handleSplitDrop(sessionId, side, it.path, ev); };
+    }
+    ui.list.appendChild(row);
+  });
+}
+
+function startSplitDrag(sessionId, side, itemPath, ev){
+  const runtime=hydrateSplitRuntime(sessionId);
+  const pane=runtime[side];
+  const selected=selectedItemsFromPane(pane);
+  const anchorSelected=selected.some((it)=>it.path===itemPath);
+  const use=anchorSelected&&selected.length?selected:(pane.items.filter((it)=>it.path===itemPath));
+  const sources=use.map((it)=>({kind:pane.kind,path:it.path,isDir:!!it.isDir,site:pane.site||''}));
+  state.dragPayload={from:`split:${sessionId}:${side}`,sources};
+  try{
+    ev.dataTransfer.effectAllowed='copyMove';
+    ev.dataTransfer.setData('application/x-smx-drag',JSON.stringify(state.dragPayload));
+  }catch{}
+}
+
+async function refreshSplitView(quiet=true){
+  if(!state.splitViewEnabled || !el.splitSessionsHost) return;
+  const ids=splitSessionIds();
+  if(!ids.length) return;
+  renderSplitSessions();
+  for(const sessionId of ids){
+    const runtime=hydrateSplitRuntime(sessionId);
+    const side=splitPrimarySideForSession(sessionId);
+    const pane=runtime[side];
+    if(!pane.path && pane.kind==='sharepoint') pane.path=pane.library||'/';
+    await loadSplitPane(sessionId, side, pane.path||(pane.kind==='local'?'':pane.library||'/'), quiet);
+  }
+}
+
+async function handleSplitDrop(sessionId, side, targetPath, ev){
+  const runtime=hydrateSplitRuntime(sessionId);
+  const pane=runtime[side];
+  if(!pane || !targetPath) return;
+  let payload=state.dragPayload;
+  try{
+    const raw=ev.dataTransfer?.getData('application/x-smx-drag');
+    if(raw) payload=JSON.parse(raw);
+  }catch{}
+  if(!payload||!Array.isArray(payload.sources)||!payload.sources.length) return;
+  const move=state.splitTransferMode==='move';
+  try{
+    await executeTransfer(payload.sources,{kind:pane.kind,path:targetPath,site:pane.site||''},move,true);
+    await loadPane('left',state.left.path,true);
+    await loadPane('right',state.right.path,true);
+    await refreshSplitView(true);
+    setStatus(`${move?'Move':'Copy'} via split drag-and-drop complete.`);
+  }catch(e){
+    setStatus(`Split drag-and-drop failed: ${err(e)}`);
+    pushNotification(`Split drag-and-drop failed: ${err(e)}`,'error',true);
+  }finally{
+    state.dragPayload=null;
+  }
+}
+
+function toggleSplitTransferMode(){
+  state.splitTransferMode=state.splitTransferMode==='move' ? 'copy' : 'move';
+  renderSplitSessionOptions();
+  setStatus(`Split drag-and-drop mode: ${state.splitTransferMode}.`);
+}
+
+function renderSplitSessionOptions(){
+  if(el.splitViewToggleBtn) el.splitViewToggleBtn.textContent=`Split View: ${state.splitViewEnabled?'On':'Off'}`;
+  if(el.splitTransferModeBtn){
+    el.splitTransferModeBtn.textContent=`Split Drop: ${state.splitTransferMode==='move'?'Move':'Copy'}`;
+    el.splitTransferModeBtn.classList.toggle('hidden', !state.splitViewEnabled);
+  }
+  if(el.splitCompareSessionSelect){
+    el.splitCompareSessionSelect.classList.add('hidden');
+    el.splitCompareSessionSelect.disabled=true;
+  }
+}
+
+function renderSplitSessions(){
+  renderSplitSessionOptions();
+  if(!el.splitSessionsHost) return;
+  const ids=splitSessionIds();
+  const shouldShow=state.splitViewEnabled && ids.length>0;
+  if(el.mainWorkspaceView) el.mainWorkspaceView.classList.toggle('hidden', shouldShow);
+  el.splitSessionsHost.classList.toggle('hidden', !shouldShow);
+  if(!shouldShow){
+    el.splitSessionsHost.innerHTML='';
+    return;
+  }
+  el.splitSessionsHost.className='split-sessions-host min-h-0 flex-1 overflow-auto border-b border-slate-200 px-4 py-3 dark:border-slate-800';
+  const splitTiles=[];
+  for(const sessionId of ids){
+    const runtime=hydrateSplitRuntime(sessionId);
+    const side=splitPrimarySideForSession(sessionId);
+    const pane=runtime[side];
+    splitTiles.push(`
+      <section class="split-pane-card${sessionId===state.activeSessionId?' active':''}" data-split-session="${sessionId}" data-split-side="${side}">
+        <div class="split-pane-head">
+          <div>
+            <strong>${escapeHtml(runtime.name||'Session')} · ${escapeHtml(pane.kind)}</strong>
+            <small id="${splitPaneDomId(sessionId,side,'path')}">${escapeHtml(pane.path||'(empty)')}</small>
+          </div>
+          <div class="split-pane-actions">
+            <button id="${splitPaneDomId(sessionId,'session','focus')}" type="button">Focus</button>
+            <button id="${splitPaneDomId(sessionId,side,'up')}" type="button">Up</button>
+            <button id="${splitPaneDomId(sessionId,side,'refresh')}" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="split-pane-pathbar">
+          <input id="${splitPaneDomId(sessionId,side,'path-input')}" type="text" spellcheck="false" placeholder="${pane.kind==='sharepoint'?'SharePoint path...':'Local path...'}" value="${escapeHtml(pane.path||'')}" />
+          <button id="${splitPaneDomId(sessionId,side,'go')}" type="button">Go</button>
+        </div>
+        <div class="split-pane-filter">
+          <input id="${splitPaneDomId(sessionId,side,'filter')}" type="text" spellcheck="false" placeholder="Filter..." value="${escapeHtml(pane.filterText||'')}" />
+        </div>
+        <div id="${splitPaneDomId(sessionId,side,'list')}" class="list se-list se-scroll split-pane-list"></div>
+      </section>
+    `);
+  }
+  el.splitSessionsHost.innerHTML=splitTiles.join('');
+  ids.forEach((sessionId)=>{
+    const runtime=hydrateSplitRuntime(sessionId);
+    const side=splitPrimarySideForSession(sessionId);
+    const pane=runtime[side];
+    const focusBtn=id(splitPaneDomId(sessionId,'session','focus'));
+    if(focusBtn) focusBtn.onclick=()=>focusSplitSession(sessionId);
+    const ui=splitPaneElements(sessionId, side);
+    if(ui.filter) ui.filter.oninput=()=>{ focusSplitSession(sessionId); pane.filterText=ui.filter.value||''; persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
+    if(ui.pathInput) ui.pathInput.onkeydown=async(ev)=>{ if(ev.key==='Enter'){ focusSplitSession(sessionId); await loadSplitPane(sessionId, side, (ui.pathInput.value||'').trim()); } };
+    if(ui.go) ui.go.onclick=()=>{ focusSplitSession(sessionId); return loadSplitPane(sessionId, side, (ui.pathInput?.value||'').trim()); };
+    if(ui.up) ui.up.onclick=()=>navigateSplitPaneUp(sessionId, side);
+    if(ui.refresh) ui.refresh.onclick=()=>{ focusSplitSession(sessionId); return loadSplitPane(sessionId, side, pane.path); };
+    renderSplitPane(sessionId, side);
   });
 }
 
@@ -1491,23 +2028,51 @@ async function executeTransfer(sources,target,move,withPreview=true){
     effectiveSources=effectiveSources.filter((s)=>decision.selectedPaths.has(String(s.path||'')));
     if(!effectiveSources.length) throw new Error('transfer_no_items_selected');
   }
-  for(const s of effectiveSources){
-    const name=basename(s.path);
-    const shouldOverwrite=overwritePaths.has(String(s.path||''));
-    if(target.kind==='local'){
+  if(target.kind==='local'){
+    const localSources=effectiveSources.filter((s)=>s.kind==='local');
+    const sharepointSources=effectiveSources.filter((s)=>s.kind==='sharepoint');
+    for(const s of localSources){
+      const name=basename(s.path);
+      const shouldOverwrite=overwritePaths.has(String(s.path||''));
       const sep=(target.path.includes('\\')?'\\':'/');
       const destFull=target.path.replace(/[\\\/]+$/,'') + (target.path.endsWith('\\')||target.path.endsWith('/')?'':sep) + name;
       if(shouldOverwrite){
         try{ await apiPost('/api/local/delete',{sources:[destFull]}); }catch{}
       }
-      if(s.kind==='local'){
-        await apiPost(move?'/api/local/move':'/api/local/copy',{sources:[s.path],destination:target.path});
-      }else{
-        if(s.isDir) throw new Error('sp_folder_to_local_not_supported');
-        await apiPost('/api/transfer/sp-to-local',{site_relative_url:s.site||null,server_relative_urls:[s.path],destination_dir:target.path,move});
-      }
-      continue;
+      await apiPost(move?'/api/local/move':'/api/local/copy',{sources:[s.path],destination:target.path});
     }
+    const spBySite=new Map();
+    for(const s of sharepointSources){
+      const siteKey=String(s.site||'');
+      if(!spBySite.has(siteKey)) spBySite.set(siteKey,[]);
+      spBySite.get(siteKey).push(s);
+      if(overwritePaths.has(String(s.path||''))){
+        const name=basename(s.path);
+        const sep=(target.path.includes('\\')?'\\':'/');
+        const destFull=target.path.replace(/[\\\/]+$/,'') + (target.path.endsWith('\\')||target.path.endsWith('/')?'':sep) + name;
+        try{ await apiPost('/api/local/delete',{sources:[destFull]}); }catch{}
+      }
+    }
+    for(const [siteKey, rows] of spBySite.entries()){
+      await apiPost('/api/transfer/sp-to-local',{
+        site_relative_url:siteKey||null,
+        server_relative_urls:rows.map((s)=>s.path),
+        source_items:rows.map((s)=>({
+          kind:'sharepoint',
+          path:s.path,
+          isDir:!!s.isDir,
+          name:basename(s.path),
+          site_relative_url:siteKey||null,
+        })),
+        destination_dir:target.path,
+        move,
+      });
+    }
+    return;
+  }
+  for(const s of effectiveSources){
+    const name=basename(s.path);
+    const shouldOverwrite=overwritePaths.has(String(s.path||''));
     if(s.kind==='sharepoint'){
       const dst=`${target.path.replace(/\/+$/,'')}/${name}`;
       await apiPost(move?'/api/sp/move':'/api/sp/copy',{source_server_relative_url:s.path,target_server_relative_url:dst,is_folder:s.isDir,overwrite:shouldOverwrite,site_relative_url:s.site||target.site||null});
@@ -1530,7 +2095,8 @@ async function handleDropToTarget(targetKey,targetPath,ev){
   const move=!!ev.shiftKey;
   try{
     await executeTransfer(payload.sources,{kind:pane.kind,path:targetPath,site:pane.site||''},move,true);
-    await loadPane('left',state.left.path); await loadPane('right',state.right.path);
+    await loadPane('left',state.left.path,true); await loadPane('right',state.right.path,true);
+    await refreshSplitView(true);
     setStatus(`${move?'Move':'Copy'} via drag-and-drop complete.`);
   }catch(e){ setStatus(`Drag-and-drop failed: ${err(e)}`); pushNotification(`Drag-and-drop failed: ${err(e)}`,'error',true); }
   finally{ state.dragPayload=null; }
@@ -1543,7 +2109,8 @@ async function pasteClipboard(){
   try{
     await executeTransfer(c.sources,target,move,true);
     if(move) state.clipboard={op:null,sources:[]};
-    await loadPane('left',state.left.path); await loadPane('right',state.right.path);
+    await loadPane('left',state.left.path,true); await loadPane('right',state.right.path,true);
+    await refreshSplitView(true);
     setStatus('Paste complete.');
   }catch(e){ setStatus(`Paste failed: ${err(e)}`); pushNotification(`Paste failed: ${err(e)}`,'error',true); }
 }
@@ -1914,11 +2481,14 @@ async function deleteSelected(){
 }
 
 async function createFolder(){
-  const p=activePane(), name=prompt('Folder name:');
-  if(!name) return;
+  const { pane:p, targetParent } = resolveCreateFolderContext();
+  const name=String(el.newFolderNameInput?.value||'').trim();
+  if(!name) return setStatus('Enter a folder name.');
+  if(!targetParent) return setStatus('No target folder is available.');
   try{
-    if(p.kind==='local') await apiPost('/api/local/mkdir',{path:p.path,name});
-    else await apiPost('/api/sp/folder',{site_relative_url:p.site||null,parent_server_relative_url:p.path,name});
+    if(p.kind==='local') await apiPost('/api/local/mkdir',{path:targetParent,name});
+    else await apiPost('/api/sp/folder',{site_relative_url:p.site||null,parent_server_relative_url:targetParent,name});
+    closeNewFolderModal();
     await loadPane(p.key,p.path); setStatus('Folder created.');
   }catch(e){ setStatus(`Create failed: ${err(e)}`); }
 }
@@ -2092,6 +2662,17 @@ function toCsvValue(value){
   if(/[",\n]/.test(text)) return `"${text.replace(/"/g,'""')}"`;
   return text;
 }
+function extractServerRelativeBookmarkPath(value){
+  const raw=String(value||'').trim();
+  if(!raw) return '';
+  if(raw.startsWith('/')) return normalizeSpPath(raw);
+  try{
+    const url=new URL(raw);
+    return normalizeSpPath(decodeURIComponent(url.pathname||''));
+  }catch{
+    return '';
+  }
+}
 function downloadBlob(filename, content, type){
   const blob=new Blob([content],{type});
   const url=URL.createObjectURL(blob);
@@ -2100,6 +2681,108 @@ function downloadBlob(filename, content, type){
   a.download=filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+function parseBookmarkExportHtml(html){
+  const parser=new DOMParser();
+  const doc=parser.parseFromString(html,'text/html');
+  const rows=[];
+  function textOf(node){
+    return String(node?.textContent||'').replace(/\s+/g,' ').trim();
+  }
+  function walkDl(dl, folderStack){
+    if(!dl) return;
+    const children=Array.from(dl.children||[]);
+    for(let i=0;i<children.length;i++){
+      const child=children[i];
+      if(String(child.tagName||'').toUpperCase()!=='DT') continue;
+      const folder=child.querySelector(':scope > h3');
+      const anchor=child.querySelector(':scope > a[href]');
+      if(anchor){
+        rows.push({
+          title:textOf(anchor)||String(anchor.getAttribute('href')||'').trim(),
+          folder_path:folderStack.join(' / '),
+          url:String(anchor.getAttribute('href')||'').trim(),
+        });
+        continue;
+      }
+      if(folder){
+        const name=textOf(folder);
+        const next=children[i+1];
+        if(next && String(next.tagName||'').toUpperCase()==='DL'){
+          walkDl(next, name ? folderStack.concat(name) : folderStack.slice());
+        }
+      }
+    }
+  }
+  walkDl(doc.querySelector('dl'), []);
+  if(!rows.length){
+    doc.querySelectorAll('a[href]').forEach((anchor)=>{
+      rows.push({
+        title:textOf(anchor)||String(anchor.getAttribute('href')||'').trim(),
+        folder_path:'',
+        url:String(anchor.getAttribute('href')||'').trim(),
+      });
+    });
+  }
+  return rows;
+}
+function convertBookmarkRows(rows){
+  return (rows||[]).map((row)=>{
+    const originalUrl=String(row?.url||'').trim();
+    const originalPath=extractServerRelativeBookmarkPath(originalUrl);
+    if(!originalPath){
+      return {
+        title:String(row?.title||originalUrl||'').trim(),
+        folder_path:String(row?.folder_path||'').trim(),
+        original_url:originalUrl,
+        original_server_relative_url:'',
+        current_url:originalUrl,
+        current_server_relative_url:'',
+        current_site_relative_url:'',
+        status:'external',
+        notes:'Bookmark does not contain a SharePoint-style server-relative path.',
+      };
+    }
+    const resolved=resolveMigrationTarget(originalPath,'');
+    const currentPath=String(resolved?.path||originalPath);
+    const currentSite=String(resolved?.site||'').trim();
+    return {
+      title:String(row?.title||originalUrl||'').trim(),
+      folder_path:String(row?.folder_path||'').trim(),
+      original_url:originalUrl,
+      original_server_relative_url:originalPath,
+      current_url:buildWebUrlFromPath(currentPath)||originalUrl,
+      current_server_relative_url:currentPath,
+      current_site_relative_url:currentSite,
+      status:resolved?'resolved':'unchanged',
+      notes:resolved?'':'No migration record matched this bookmark path.',
+    };
+  }).filter((row)=>row.original_url);
+}
+function exportConvertedBookmarkRows(rows, format){
+  const safeFormat=format==='csv'?'csv':'json';
+  if(safeFormat==='csv'){
+    const headers=['title','folder_path','original_url','original_server_relative_url','current_url','current_server_relative_url','current_site_relative_url','status','notes'];
+    const lines=[headers.join(',')];
+    rows.forEach((row)=>lines.push(headers.map((h)=>toCsvValue(row?.[h] ?? '')).join(',')));
+    downloadBlob(`smx-bookmark-resolution-${Date.now()}.csv`,lines.join('\n'),'text/csv');
+    return;
+  }
+  downloadBlob(`smx-bookmark-resolution-${Date.now()}.json`,JSON.stringify(rows,null,2),'application/json');
+}
+async function convertBookmarkExportFile(file, format){
+  if(!file) return;
+  try{
+    const html=await file.text();
+    const rows=convertBookmarkRows(parseBookmarkExportHtml(html));
+    exportConvertedBookmarkRows(rows, format);
+    const resolved=rows.filter((row)=>row.status==='resolved').length;
+    const unchanged=rows.filter((row)=>row.status==='unchanged').length;
+    const external=rows.filter((row)=>row.status==='external').length;
+    setStatus(`Converted ${rows.length} bookmark(s) to ${format.toUpperCase()}. Resolved ${resolved}, unchanged ${unchanged}, external ${external}.`);
+  }catch(e){
+    setStatus(`Bookmark HTML conversion failed: ${err(e)}`);
+  }
 }
 function resolveMigrationTarget(path,site){
   let current=normalizeSpPath(path);
@@ -2393,17 +3076,36 @@ function saveCurrentLayout(){ state.layouts.unshift({name:(el.layoutNameInput.va
 function loadRecent(){ try{ state.recent=JSON.parse(localStorage.getItem('smx_web_recent')||'[]'); if(!Array.isArray(state.recent)) state.recent=[]; }catch{ state.recent=[]; } }
 function renderRecent(){ el.recentList.innerHTML=''; state.recent.forEach((r,i)=>{ const row=document.createElement('div'); row.className='favorite'; row.innerHTML=`<div><strong>${r.path}</strong><small>${r.kind}${r.site?` | ${r.site}`:''}</small></div>`; const act=document.createElement('div'); const open=document.createElement('button'); open.textContent='Open'; open.onclick=async()=>{ const p=activePane(); p.kind=r.kind; p.site=r.site||''; p.path=r.path; if(p.kind==='sharepoint'){ await loadSitesForPane(p); await loadLibrariesForPane(p);} updatePaneControls(p.key); await loadPane(p.key,p.path); }; const del=document.createElement('button'); del.textContent='X'; del.onclick=()=>{ state.recent.splice(i,1); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent)); renderRecent(); }; act.appendChild(open); act.appendChild(del); row.appendChild(act); el.recentList.appendChild(row); }); }
 
-function currentWorkspaceSnapshot(){ return { language:state.language, translationEnabled:state.translationEnabled, left:{kind:state.left.kind,site:state.left.site||'',library:state.left.library||'',path:state.left.path||'',filterText:state.left.filterText||''}, right:{kind:state.right.kind,site:state.right.site||'',library:state.right.library||'',path:state.right.path||'',filterText:state.right.filterText||''} }; }
-async function applyWorkspaceSnapshot(s){ if(!s) return; state.language=s.language||state.language||'English'; state.translationEnabled=!!s.translationEnabled; el.langInput.value=state.language; el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`; for(const key of ['left','right']){ const pane=state[key], src=s[key]||{}; pane.kind=src.kind||'local'; pane.site=src.site||''; pane.library=src.library||''; pane.path=src.path||''; pane.filterText=src.filterText||''; if(pane.kind==='sharepoint'){ await loadSitesForPane(pane); await loadLibrariesForPane(pane); } updatePaneControls(key); await loadPane(key,pane.path||(pane.kind==='local'?'':pane.library||'/')); } }
-function loadSessions(){ try{ state.sessions=JSON.parse(localStorage.getItem('smx_web_sessions')||'[]'); if(!Array.isArray(state.sessions)) state.sessions=[]; }catch{ state.sessions=[]; } if(!state.sessions.length){ state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}]; } state.activeSessionId=localStorage.getItem('smx_web_active_session')||state.sessions[0].id; if(!state.sessions.find(s=>s.id===state.activeSessionId)) state.activeSessionId=state.sessions[0].id; }
-function persistSessions(){ localStorage.setItem('smx_web_sessions',JSON.stringify(state.sessions)); localStorage.setItem('smx_web_active_session',state.activeSessionId||''); }
-function saveCurrentSessionSnapshot(){ const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; state.sessions[idx].snapshot=currentWorkspaceSnapshot(); persistSessions(); }
-async function activateSession(id){ saveCurrentSessionSnapshot(); const s=state.sessions.find(x=>x.id===id); if(!s) return; state.activeSessionId=id; renderSessionTabs(); await applyWorkspaceSnapshot(s.snapshot||{}); persistSessions(); setStatus(`Session active: ${s.name}`); }
-function newSession(){ saveCurrentSessionSnapshot(); const s={id:`s-${Date.now()}`,name:`Session ${state.sessions.length+1}`,snapshot:currentWorkspaceSnapshot()}; state.sessions.unshift(s); state.activeSessionId=s.id; persistSessions(); renderSessionTabs(); setStatus(`Created ${s.name}`); }
-function duplicateSession(){ const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const cp={id:`s-${Date.now()}`,name:`${src.name||'Session'} Copy`,snapshot:JSON.parse(JSON.stringify(src.snapshot||currentWorkspaceSnapshot()))}; state.sessions.unshift(cp); state.activeSessionId=cp.id; persistSessions(); renderSessionTabs(); setStatus(`Duplicated session: ${cp.name}`); }
-function renameSession(){ const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const next=(prompt('Session name:',src.name||'Session')||'').trim(); if(!next) return; src.name=next; persistSessions(); renderSessionTabs(); setStatus(`Renamed session to: ${next}`); }
-async function closeSession(){ if(state.sessions.length<=1) return setStatus('At least one session is required.'); const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; const removed=state.sessions.splice(idx,1)[0]; state.activeSessionId=state.sessions[0].id; persistSessions(); renderSessionTabs(); await activateSession(state.activeSessionId); setStatus(`Closed ${removed.name}`); }
-function renderSessionTabs(){ if(!el.sessionTabs) return; el.sessionTabs.innerHTML=''; state.sessions.forEach((s)=>{ const b=document.createElement('button'); b.className=`layout-tab${s.id===state.activeSessionId?' active':''}`; b.textContent=s.name||'Session'; b.onclick=()=>activateSession(s.id); el.sessionTabs.appendChild(b); }); }
+function currentWorkspaceSnapshot(){ return { language:state.language, translationEnabled:state.translationEnabled, activePane:state.activePane||'left', left:{kind:state.left.kind,site:state.left.site||'',library:state.left.library||'',path:state.left.path||'',filterText:state.left.filterText||''}, right:{kind:state.right.kind,site:state.right.site||'',library:state.right.library||'',path:state.right.path||'',filterText:state.right.filterText||''} }; }
+async function applyWorkspaceSnapshot(s){ if(!s) return; state.language=s.language||state.language||'English'; state.translationEnabled=!!s.translationEnabled; state.activePane=(s.activePane==='right'?'right':'left'); el.langInput.value=state.language; el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`; for(const key of ['left','right']){ const pane=state[key], src=s[key]||{}; pane.kind=src.kind||'local'; pane.site=src.site||''; pane.library=src.library||''; pane.path=src.path||''; pane.filterText=src.filterText||''; if(pane.kind==='sharepoint'){ await loadSitesForPane(pane); await loadLibrariesForPane(pane); } updatePaneControls(key); await loadPane(key,pane.path||(pane.kind==='local'?'':pane.library||'/')); } }
+function ensureSplitCompareSelection(){ return; }
+function activeSessionSnapshot(){
+  const runtime=state.splitRuntime[state.activeSessionId];
+  if(state.splitViewEnabled && runtime) return splitRuntimeSnapshot(runtime);
+  return currentWorkspaceSnapshot();
+}
+function loadSessions(){
+  try{ state.sessions=JSON.parse(localStorage.getItem('smx_web_sessions')||'[]'); if(!Array.isArray(state.sessions)) state.sessions=[]; }catch{ state.sessions=[]; }
+  if(!state.sessions.length){ state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}]; }
+  state.activeSessionId=localStorage.getItem('smx_web_active_session')||state.sessions[0].id;
+  if(!state.sessions.find(s=>s.id===state.activeSessionId)) state.activeSessionId=state.sessions[0].id;
+  state.splitViewEnabled=localStorage.getItem('smx_web_split_view')==='1';
+  state.splitCompareSessionId='';
+}
+function persistSessions(){
+  localStorage.setItem('smx_web_sessions',JSON.stringify(state.sessions));
+  localStorage.setItem('smx_web_active_session',state.activeSessionId||'');
+  localStorage.setItem('smx_web_split_view',state.splitViewEnabled?'1':'0');
+}
+function saveCurrentSessionSnapshot(){ const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; state.sessions[idx].snapshot=activeSessionSnapshot(); persistSessions(); }
+async function activateSession(id){ saveCurrentSessionSnapshot(); const s=state.sessions.find(x=>x.id===id); if(!s) return; state.activeSessionId=id; delete state.splitRuntime[id]; renderSessionTabs(); await applyWorkspaceSnapshot(s.snapshot||{}); persistSessions(); await refreshSplitView(true); setStatus(`Session active: ${s.name}`); }
+function newSession(){ saveCurrentSessionSnapshot(); const s={id:`s-${Date.now()}`,name:`Session ${state.sessions.length+1}`,snapshot:activeSessionSnapshot()}; state.sessions.unshift(s); state.activeSessionId=s.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Created ${s.name}`); }
+function duplicateSession(){ saveCurrentSessionSnapshot(); const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const cp={id:`s-${Date.now()}`,name:`${src.name||'Session'} Copy`,snapshot:JSON.parse(JSON.stringify(src.snapshot||activeSessionSnapshot()))}; state.sessions.unshift(cp); state.activeSessionId=cp.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Duplicated session: ${cp.name}`); }
+function renameSession(){ const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const next=(prompt('Session name:',src.name||'Session')||'').trim(); if(!next) return; src.name=next; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Renamed session to: ${next}`); }
+async function closeSession(){ if(state.sessions.length<=1) return setStatus('At least one session is required.'); const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; const removed=state.sessions.splice(idx,1)[0]; delete state.splitRuntime[removed.id]; state.activeSessionId=state.sessions[0].id; persistSessions(); renderSessionTabs(); renderSplitSessions(); await activateSession(state.activeSessionId); setStatus(`Closed ${removed.name}`); }
+function toggleSplitView(){ state.splitViewEnabled=!state.splitViewEnabled; persistSessions(); renderSplitSessions(); if(state.splitViewEnabled) refreshSplitView(true); setStatus(`Split view ${state.splitViewEnabled?'enabled':'disabled'}.`); }
+async function changeSplitCompareSession(_id){ return; }
+function renderSessionTabs(){ if(!el.sessionTabs) return; el.sessionTabs.innerHTML=''; state.sessions.forEach((s)=>{ const b=document.createElement('button'); b.className=`layout-tab${s.id===state.activeSessionId?' active':''}`; b.textContent=s.name||'Session'; b.onclick=()=>activateSession(s.id); el.sessionTabs.appendChild(b); }); renderSplitSessionOptions(); }
 
 function exportConfig(){
   const payload={
@@ -2445,13 +3147,15 @@ async function importConfigFromFile(file){
       state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}];
       state.activeSessionId=state.sessions[0].id;
     }
+    ensureSplitCompareSelection();
     saveFavorites(); saveMigrationLog(); saveAiRenameLog(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
     persistSessions();
     el.langInput.value=state.language;
     el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`;
-    renderFavorites(); renderLayouts(); renderLayoutTabs(); renderRecent(); renderSessionTabs(); renderMigrationPanel(); renderAiRenameLogPanel();
+    renderFavorites(); renderLayouts(); renderLayoutTabs(); renderRecent(); renderSessionTabs(); renderSplitSessions(); renderMigrationPanel(); renderAiRenameLogPanel();
     const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
     await applyWorkspaceSnapshot(active.snapshot||currentWorkspaceSnapshot());
+    await refreshSplitView(true);
     setStatus('Config imported.');
   }catch(e){ setStatus(`Import failed: ${err(e)}`); }
 }
@@ -2471,8 +3175,19 @@ function wirePaneEvents(key){
 }
 
 function wireGlobalEvents(){
+  if(el.splitViewToggleBtn) el.splitViewToggleBtn.onclick=()=>toggleSplitView();
+  if(el.splitTransferModeBtn) el.splitTransferModeBtn.onclick=()=>toggleSplitTransferMode();
+  if(el.splitCompareSessionSelect) el.splitCompareSessionSelect.onchange=()=>changeSplitCompareSession(el.splitCompareSessionSelect.value);
+  if(el.openSettingsBtn) el.openSettingsBtn.onclick=()=>openSettingsModal();
+  if(el.settingsCloseBtn) el.settingsCloseBtn.onclick=()=>closeSettingsModal();
+  if(el.settingsApplyBtn) el.settingsApplyBtn.onclick=async()=>{ await applySettingsFromModal(); closeSettingsModal(); };
+  if(el.settingsModal) el.settingsModal.onclick=(evt)=>{ if(evt.target===el.settingsModal) closeSettingsModal(); };
+  if(el.newFolderCancelBtn) el.newFolderCancelBtn.onclick=()=>closeNewFolderModal();
+  if(el.newFolderCreateBtn) el.newFolderCreateBtn.onclick=()=>createFolder();
+  if(el.newFolderModal) el.newFolderModal.onclick=(evt)=>{ if(evt.target===el.newFolderModal) closeNewFolderModal(); };
+  if(el.newFolderNameInput) el.newFolderNameInput.onkeydown=(evt)=>{ if(evt.key==='Enter'){ evt.preventDefault(); createFolder(); } };
   el.copyBtn.onclick=()=>setClipboard('copy'); el.cutBtn.onclick=()=>setClipboard('cut'); el.pasteBtn.onclick=pasteClipboard;
-  el.renameBtn.onclick=renameSelected; if(el.aiRenameBtn) el.aiRenameBtn.onclick=aiRenameAndOrganize; el.deleteBtn.onclick=deleteSelected; el.mkdirBtn.onclick=createFolder; el.openBtn.onclick=()=>openSelected(false); el.revealBtn.onclick=()=>openSelected(true);
+  el.renameBtn.onclick=renameSelected; if(el.aiRenameBtn) el.aiRenameBtn.onclick=aiRenameAndOrganize; el.deleteBtn.onclick=deleteSelected; el.mkdirBtn.onclick=openNewFolderModal; el.openBtn.onclick=()=>openSelected(false); el.revealBtn.onclick=()=>openSelected(true);
   el.toggleTranslateBtn.onclick=toggleTranslation; el.renameTranslatedBtn.onclick=applyTranslationRename; el.undoRenameBtn.onclick=undoRename;
   el.previewBtn.onclick=previewSelected; el.extractBtn.onclick=extractText; el.summaryBtn.onclick=summarizeSelected; el.askBtn.onclick=askQuestion;
   el.saveTagsBtn.onclick=saveTags; el.searchTagsBtn.onclick=searchTags; el.propertiesBtn.onclick=loadProperties;
@@ -2517,6 +3232,9 @@ function wireGlobalEvents(){
   if(el.aiRenameFilterInput) el.aiRenameFilterInput.oninput=renderAiRenameLogPanel;
   if(el.migrationImportBtn) el.migrationImportBtn.onclick=()=>el.migrationImportInput?.click();
   if(el.migrationImportInput) el.migrationImportInput.onchange=async()=>{ const f=el.migrationImportInput.files&&el.migrationImportInput.files[0]; await importMigrationLogFile(f); el.migrationImportInput.value=''; };
+  if(el.migrationConvertBookmarkJsonBtn) el.migrationConvertBookmarkJsonBtn.onclick=()=>{ state.migrationBookmarkExportFormat='json'; el.migrationBookmarkInput?.click(); };
+  if(el.migrationConvertBookmarkCsvBtn) el.migrationConvertBookmarkCsvBtn.onclick=()=>{ state.migrationBookmarkExportFormat='csv'; el.migrationBookmarkInput?.click(); };
+  if(el.migrationBookmarkInput) el.migrationBookmarkInput.onchange=async()=>{ const f=el.migrationBookmarkInput.files&&el.migrationBookmarkInput.files[0]; await convertBookmarkExportFile(f,state.migrationBookmarkExportFormat||'json'); el.migrationBookmarkInput.value=''; };
   if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.onclick=copyResolvedMigrationValue;
   if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.onclick=openResolvedMigrationValue;
   if(el.migrationExportJsonBtn) el.migrationExportJsonBtn.onclick=exportMigrationLogJson;
@@ -2527,6 +3245,17 @@ function wireGlobalEvents(){
   el.importConfigBtn.onclick=()=>el.importConfigInput.click();
   el.importConfigInput.onchange=async()=>{ const f=el.importConfigInput.files&&el.importConfigInput.files[0]; await importConfigFromFile(f); el.importConfigInput.value=''; };
   document.addEventListener('keydown',handleGlobalShortcutKeydown);
+  document.addEventListener('keydown',(e)=>{
+    if(e.key==='Escape' && isSettingsModalOpen()){
+      e.preventDefault();
+      closeSettingsModal();
+      return;
+    }
+    if(e.key==='Escape' && isNewFolderModalOpen()){
+      e.preventDefault();
+      closeNewFolderModal();
+    }
+  });
 }
 
 async function init(){
@@ -2550,6 +3279,8 @@ async function init(){
   loadSessions(); renderSessionTabs();
   const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
   await applyWorkspaceSnapshot(active.snapshot || currentWorkspaceSnapshot());
+  renderSplitSessions();
+  await refreshSplitView(true);
   persistSessions();
   runJobLoop();
 }

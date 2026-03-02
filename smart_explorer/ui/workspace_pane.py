@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models.sharepoint_tree_model import SharePointTreeModel, IS_DIR_ROLE, PATH_ROLE
-from ..models.translated_fs_model import TranslatedProxyModel
+from ..models.translated_fs_model import TranslatedProxyModel, TRANSLATION_ROLE
 from ..translation_cache import TranslationCache
 from ..services.preview_cache import cached_download_path, save_downloaded_file
 from ..services.tag_store import TagStore
@@ -177,6 +177,8 @@ class WorkspacePane(QFrame):
         header_color: str,
         header_active_color: str,
         tag_store: TagStore,
+        translation_enabled: bool = False,
+        translation_view_mode: str = "below_name",
     ) -> None:
         super().__init__()
         self.definition = definition
@@ -194,6 +196,8 @@ class WorkspacePane(QFrame):
         self._sharepoint_mode = definition.kind == "sharepoint"
         self._sharepoint_focus_path: Optional[str] = None
         self.tag_store = tag_store
+        self._translation_enabled = bool(translation_enabled)
+        self._translation_view_mode = translation_view_mode or "below_name"
         if definition.kind == "translation" and definition.base_workspace_id:
             base = base_panes.get(definition.base_workspace_id)
             if base is not None:
@@ -219,6 +223,8 @@ class WorkspacePane(QFrame):
         self._view = WorkspaceTreeView(self)
         self._view.setSortingEnabled(True)
         self._view.setAlternatingRowColors(True)
+        self._view.setWordWrap(True)
+        self._view.setUniformRowHeights(False)
         self._view.setSelectionMode(QTreeView.ExtendedSelection)
         self._view.setContextMenuPolicy(Qt.ActionsContextMenu)
         self._view.expanded.connect(lambda _: self._view.resizeColumnToContents(0))
@@ -377,8 +383,19 @@ class WorkspacePane(QFrame):
         root = self.definition.root_path or ""
         fs_model.setRootPath(root)
         self._source_model = fs_model
+        translated = TranslatedProxyModel(
+            self._translator or IdentityTranslator(),
+            self.definition.language or "English",
+            self,
+            cache=self._translation_cache,
+            ignore_patterns=self._ignore_patterns,
+            display_mode="below_name",
+            enabled=self._translation_enabled,
+        )
+        translated.setSourceModel(fs_model)
+        self._translated_model = translated
         proxy = WorkspaceFilterProxyModel(self)
-        proxy.setSourceModel(fs_model)
+        proxy.setSourceModel(translated)
         self._filter_model = proxy
         self._view.setModel(proxy)
         idx = fs_model.index(root) if root else fs_model.index("/")
@@ -399,8 +416,19 @@ class WorkspacePane(QFrame):
             self,
         )
         self._source_model = sp_model
+        translated = TranslatedProxyModel(
+            self._translator or IdentityTranslator(),
+            self.definition.language or "English",
+            self,
+            cache=self._translation_cache,
+            ignore_patterns=self._ignore_patterns,
+            display_mode="below_name",
+            enabled=self._translation_enabled,
+        )
+        translated.setSourceModel(sp_model)
+        self._translated_model = translated
         proxy = WorkspaceFilterProxyModel(self)
-        proxy.setSourceModel(sp_model)
+        proxy.setSourceModel(translated)
         self._filter_model = proxy
         self._view.setModel(proxy)
         self._set_root_indexes(None, QModelIndex())
@@ -424,6 +452,8 @@ class WorkspacePane(QFrame):
             self,
             cache=self._translation_cache,
             ignore_patterns=self._ignore_patterns,
+            display_mode="replace",
+            enabled=True,
         )
         translated.setSourceModel(source)
         self._translated_model = translated
@@ -566,6 +596,18 @@ class WorkspacePane(QFrame):
         if self._translated_model:
             self._translated_model.set_translator(translator)
 
+    def set_translation_enabled(self, enabled: bool) -> None:
+        self._translation_enabled = bool(enabled)
+        if self._translated_model:
+            effective_enabled = self.definition.kind == "translation" or self._translation_enabled
+            self._translated_model.set_enabled(effective_enabled)
+
+    def set_translation_display_mode(self, mode: str) -> None:
+        self._translation_view_mode = mode or "below_name"
+        if self._translated_model:
+            effective_mode = "replace" if self.definition.kind == "translation" else self._translation_view_mode
+            self._translated_model.set_display_mode(effective_mode)
+
     def allow_translation_scopes(self, paths: List[str], *, depth_limit: Optional[int] = None) -> None:
         """
         Allow on-demand translation for additional subtrees (translation panes only).
@@ -591,7 +633,7 @@ class WorkspacePane(QFrame):
         self.pane_clicked.emit(self.definition.id)
 
     def set_language(self, language: str) -> None:
-        if self.definition.kind == "translation" and self._translated_model:
+        if self._translated_model:
             self.definition.language = language
             self._translated_model.set_target_language(language)
 
@@ -958,7 +1000,8 @@ class WorkspacePane(QFrame):
                 continue
             seen.add(path)
             display_name = idx.data(Qt.DisplayRole) if idx.isValid() else os.path.basename(path)
-            items.append({"path": path, "is_dir": is_dir, "display": display_name})
+            translated_name = idx.data(TRANSLATION_ROLE) if idx.isValid() else ""
+            items.append({"path": path, "is_dir": is_dir, "display": display_name, "translated": translated_name})
         return items
 
     # --- helpers ------------------------------------------------------------

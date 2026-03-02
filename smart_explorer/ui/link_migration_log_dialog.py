@@ -17,15 +17,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..services.bookmark_export_converter import (
+    convert_bookmark_html,
+    export_converted_bookmarks_csv,
+    export_converted_bookmarks_json,
+)
 from ..services.link_migration_log import LinkMigrationLog
 
 
 class LinkMigrationLogDialog(QDialog):
-    def __init__(self, log: LinkMigrationLog, parent=None) -> None:
+    def __init__(self, log: LinkMigrationLog, parent=None, *, sp_base_url: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("Link Migration Log")
         self.resize(1100, 560)
         self._log = log
+        self._sp_base_url = str(sp_base_url or "")
 
         root = QVBoxLayout(self)
 
@@ -64,10 +70,12 @@ class LinkMigrationLogDialog(QDialog):
         actions = QHBoxLayout()
         self._btn_refresh = QPushButton("Refresh", self)
         self._btn_import_json = QPushButton("Import JSON", self)
+        self._btn_convert_bookmarks = QPushButton("Convert Bookmark HTML", self)
         self._btn_export_json = QPushButton("Export JSON", self)
         self._btn_export_csv = QPushButton("Export CSV", self)
         actions.addWidget(self._btn_refresh)
         actions.addWidget(self._btn_import_json)
+        actions.addWidget(self._btn_convert_bookmarks)
         actions.addStretch(1)
         actions.addWidget(self._btn_export_json)
         actions.addWidget(self._btn_export_csv)
@@ -79,6 +87,7 @@ class LinkMigrationLogDialog(QDialog):
 
         self._btn_refresh.clicked.connect(self._reload)
         self._btn_import_json.clicked.connect(self._import_json)
+        self._btn_convert_bookmarks.clicked.connect(self._convert_bookmark_export)
         self._btn_export_json.clicked.connect(self._export_json)
         self._btn_export_csv.clicked.connect(self._export_csv)
         self._filter.textChanged.connect(self._reload)
@@ -193,3 +202,43 @@ class LinkMigrationLogDialog(QDialog):
             self._log.export_csv(path)
         except Exception as exc:
             QMessageBox.warning(self, "Export CSV", f"Failed to export CSV: {exc}")
+
+    def _convert_bookmark_export(self) -> None:
+        source_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Bookmark Export",
+            "",
+            "HTML Files (*.html *.htm)",
+        )
+        if not source_path:
+            return
+        target_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Converted Bookmark Export",
+            "smart_explorer_bookmark_resolution.json",
+            "JSON Files (*.json);;CSV Files (*.csv)",
+        )
+        if not target_path:
+            return
+        try:
+            rows = convert_bookmark_html(source_path, self._log, self._sp_base_url)
+            if target_path.lower().endswith(".csv"):
+                export_converted_bookmarks_csv(target_path, rows)
+            else:
+                export_converted_bookmarks_json(target_path, rows)
+        except Exception as exc:
+            QMessageBox.warning(self, "Convert Bookmark HTML", f"Failed to convert bookmark export: {exc}")
+            return
+        resolved = sum(1 for row in rows if row.status == "resolved")
+        unchanged = sum(1 for row in rows if row.status == "unchanged")
+        external = sum(1 for row in rows if row.status == "external")
+        QMessageBox.information(
+            self,
+            "Convert Bookmark HTML",
+            (
+                f"Converted {len(rows)} bookmark(s).\n"
+                f"Resolved: {resolved}\n"
+                f"Unchanged: {unchanged}\n"
+                f"External: {external}"
+            ),
+        )

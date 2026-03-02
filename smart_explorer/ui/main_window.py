@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QTabBar,
     QProgressDialog,
+    QToolButton,
 )
 
 import logging
@@ -127,6 +128,7 @@ class MainWindow(QMainWindow):
         self._toolbar = self._build_toolbar()
         self.addToolBar(Qt.TopToolBarArea, self._toolbar)
         self._build_menus()
+        self._install_settings_button()
 
         self._workspace_holder = QWidget()
         self._workspace_layout = QVBoxLayout(self._workspace_holder)
@@ -217,6 +219,7 @@ class MainWindow(QMainWindow):
         self._refresh_favorites_panel()
         self._refresh_tag_suggestions()
         self._rebuild_workspace_area()
+        self._apply_translation_preferences(refresh=True)
         log_path = get_log_file_path()
         if log_path:
             self.statusBar().showMessage(f"Ready — Logging to {log_path}")
@@ -238,15 +241,18 @@ class MainWindow(QMainWindow):
         add_sharepoint.triggered.connect(self._add_sharepoint_workspace)
         tb.addAction(add_sharepoint)
 
-        add_translation = QAction("Add Translation Pane...", self)
-        add_translation.triggered.connect(self._add_translation_workspace)
-        tb.addAction(add_translation)
-
         remove_ws = QAction("Remove Active Pane", self)
         remove_ws.triggered.connect(self._remove_active_workspace)
         tb.addAction(remove_ws)
 
         tb.addSeparator()
+
+        self._translation_toggle_action = QAction("Translation", self)
+        self._translation_toggle_action.setCheckable(True)
+        self._translation_toggle_action.setChecked(bool(getattr(self._cfg, "translation_enabled", False)))
+        self._translation_toggle_action.setToolTip("Show translated names under file names")
+        self._translation_toggle_action.triggered.connect(self._toggle_translation_enabled)
+        tb.addAction(self._translation_toggle_action)
 
         rename_action = QAction("Apply Translation Rename", self)
         rename_action.triggered.connect(self._apply_translated_rename)
@@ -430,6 +436,16 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._open_settings)
         tools_menu.addAction(settings_action)
 
+    def _install_settings_button(self) -> None:
+        button = QToolButton(self)
+        button.setText("Settings")
+        button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        button.setAutoRaise(True)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip("Open application settings")
+        button.clicked.connect(self._open_settings)
+        self.menuBar().setCornerWidget(button, Qt.TopRightCorner)
+
     # ------------------------------------------------------------- workspaces
     def _setup_shortcuts(self) -> None:
         for seq, offset in (("Ctrl+Shift+Left", -1), ("Ctrl+Shift+Right", 1), ("Ctrl+Shift+Up", -1), ("Ctrl+Shift+Down", 1)):
@@ -494,6 +510,29 @@ class MainWindow(QMainWindow):
             self._rebuild_workspace_area(focus_workspace_id=self._active_workspace_id)
         except Exception:
             pass
+
+    def _toggle_translation_enabled(self, checked: bool) -> None:
+        self._cfg.translation_enabled = bool(checked)
+        save_config(self._cfg)
+        self._apply_translation_preferences(refresh=True)
+
+    def _apply_translation_preferences(self, *, refresh: bool) -> None:
+        enabled = bool(getattr(self._cfg, "translation_enabled", False))
+        mode = getattr(self._cfg, "translation_view_mode", "below_name") or "below_name"
+        language = self._cfg.target_language or "English"
+        if hasattr(self, "_translation_toggle_action") and self._translation_toggle_action is not None:
+            blocker = self._translation_toggle_action.blockSignals(True)
+            self._translation_toggle_action.setChecked(enabled)
+            self._translation_toggle_action.blockSignals(blocker)
+        for pane in self._workspace_panes.values():
+            try:
+                pane.set_language(language)
+                pane.set_translation_enabled(enabled)
+                pane.set_translation_display_mode(mode)
+                if refresh:
+                    pane.refresh()
+            except Exception:
+                pass
 
     def _on_preview_overlay_language_changed(self, language: str) -> None:
         lang = (language or "").strip() or "English"
@@ -1507,7 +1546,7 @@ QLabel#SmartCostLabel {{
         self.statusBar().showMessage(message, 7000)
 
     def _open_link_migration_log(self) -> None:
-        dlg = LinkMigrationLogDialog(self._link_migration_log, self)
+        dlg = LinkMigrationLogDialog(self._link_migration_log, self, sp_base_url=self._cfg.sp_base_url)
         dlg.exec()
 
     def _export_ai_rename_log(self) -> None:
@@ -1785,7 +1824,10 @@ QLabel#SmartCostLabel {{
             header_color=header_color,
             header_active_color=header_active_color,
             tag_store=self._tag_store,
+            translation_enabled=bool(getattr(self._cfg, "translation_enabled", False)),
+            translation_view_mode=getattr(self._cfg, "translation_view_mode", "below_name") or "below_name",
         )
+        pane.set_language(self._cfg.target_language or "English")
         pane.activated.connect(self._on_workspace_item_activated)
         pane.drop_request.connect(self._on_workspace_drop_request)
         pane.path_changed.connect(self._on_workspace_path_changed)
@@ -3189,9 +3231,6 @@ QLabel#SmartCostLabel {{
         pane = self._active_pane()
         if not pane:
             return
-        target_dir = pane.current_path()
-        if not target_dir:
-            return
         name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="New Folder")
         if not ok or not (name or "").strip():
             return
@@ -3199,6 +3238,12 @@ QLabel#SmartCostLabel {{
         target_pane = pane
         if pane.definition.kind == "translation" and pane.definition.base_workspace_id:
             target_pane = self._workspace_panes.get(pane.definition.base_workspace_id) or pane
+        target_dir = target_pane.current_path()
+        selected_items = target_pane.current_items()
+        if len(selected_items) == 1 and selected_items[0].get("is_dir"):
+            target_dir = selected_items[0].get("path") or target_dir
+        if not target_dir:
+            return
         try:
             if target_pane.definition.kind == "local":
                 os.makedirs(os.path.join(target_dir, name), exist_ok=False)
@@ -3968,24 +4013,34 @@ QLabel#SmartCostLabel {{
         pane = self._active_pane()
         if not pane:
             return
-        if pane.definition.kind != "translation":
-            QMessageBox.information(self, "Rename", "Select a translation workspace to apply renames.")
+        if not bool(getattr(self._cfg, "translation_enabled", False)) and pane.definition.kind != "translation":
+            QMessageBox.information(self, "Rename", "Enable translation first.")
             return
         items = pane.current_items()
         if not items:
             return
-        base_id = pane.definition.base_workspace_id
-        base_pane = self._workspace_panes.get(base_id) if base_id else None
-        if not base_pane:
-            QMessageBox.warning(self, "Rename", "Base workspace missing; cannot apply rename.")
-            return
+        base_pane = pane
+        if pane.definition.kind == "translation":
+            base_id = pane.definition.base_workspace_id
+            base_pane = self._workspace_panes.get(base_id) if base_id else None
+            if not base_pane:
+                QMessageBox.warning(self, "Rename", "Base workspace missing; cannot apply rename.")
+                return
         # Build candidates using original and translated display names
         candidates: List[RenameCandidate] = []
         for it in items:
             path = it["path"]
             orig = os.path.basename(path)
-            trans = (it.get("display") or orig).strip()
+            trans = (it.get("translated") or "").strip()
+            if not trans:
+                display_text = str(it.get("display") or orig)
+                if "\n" in display_text:
+                    trans = display_text.splitlines()[-1].strip()
+            trans = trans or orig
             candidates.append(RenameCandidate(path, it["is_dir"], orig, trans))
+        if not any(c.translated_name and c.translated_name != c.original_name for c in candidates):
+            QMessageBox.information(self, "Rename", "No translated names are available for the current selection.")
+            return
 
         # Conflict checker per backend
         if base_pane.definition.kind == "local":
@@ -4537,6 +4592,8 @@ QLabel#SmartCostLabel {{
         self._apply_theme()
         for pane in self._workspace_panes.values():
             pane.set_translator(self._translator)
+            pane.set_language(self._cfg.target_language or "English")
+        self._apply_translation_preferences(refresh=True)
         if self._preview_widget and hasattr(self._preview_widget, 'set_summarizer'):
             try:
                 self._preview_widget.set_summarizer(self._summarizer)

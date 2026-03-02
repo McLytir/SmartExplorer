@@ -67,6 +67,10 @@
         <button id="importConfigBtn" class="rounded-lg p-2 hover:bg-slate-200 dark:hover:bg-slate-800"><span class="material-symbols-outlined">upload_file</span></button>
         <button id="exportConfigBtn" class="rounded-lg p-2 hover:bg-slate-200 dark:hover:bg-slate-800"><span class="material-symbols-outlined">download</span></button>
         <button id="toggleTranslateBtn" class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs dark:border-slate-700">Translate: Off</button>
+        <button id="openSettingsBtn" class="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-200 dark:border-slate-700 dark:hover:bg-slate-800">
+          <span class="material-symbols-outlined text-[18px]">settings</span>
+          <span>Settings</span>
+        </button>
       </div>
     </header>
 
@@ -77,11 +81,16 @@
         <button id="duplicateSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Duplicate</button>
         <button id="renameSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Rename</button>
         <button id="closeSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Close</button>
+        <button id="splitViewToggleBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Split View: Off</button>
+        <button id="splitTransferModeBtn" class="hidden rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Split Drop: Copy</button>
+        <select id="splitCompareSessionSelect" class="hidden rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700"></select>
         <div id="layoutTabs" class="ml-2 flex items-center gap-2"></div>
       </div>
     </div>
 
-    <div class="flex min-h-0 flex-1 overflow-hidden">
+    <div id="splitSessionsHost" class="hidden min-h-0 flex-1 overflow-auto border-b border-slate-200 px-4 py-3 dark:border-slate-800"></div>
+
+    <div id="mainWorkspaceView" class="flex min-h-0 flex-1 overflow-hidden">
       <aside class="hidden w-60 shrink-0 border-r border-slate-200 bg-surface-light p-4 dark:border-slate-800 dark:bg-surface-dark lg:block">
         <h2 class="mb-3 px-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Navigation</h2>
         <nav class="space-y-1">
@@ -204,12 +213,19 @@
               <button id="migrationImportBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Import JSON</button>
             </div>
             <div id="migrationResolveOutput" class="mt-2 rounded-lg border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">No resolution yet.</div>
-            <div class="mt-3 flex gap-2">
+            <div class="mt-3 flex flex-wrap gap-2">
               <button id="migrationCopyResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Copy Resolved</button>
               <button id="migrationOpenResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Open Resolved</button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button id="migrationConvertBookmarkJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Bookmark HTML -> JSON</button>
+              <button id="migrationConvertBookmarkCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Bookmark HTML -> CSV</button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-2">
               <button id="migrationExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
               <button id="migrationExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
             </div>
+            <input id="migrationBookmarkInput" type="file" accept=".html,.htm,text/html" class="hidden" />
             <div id="migrationLogList" class="se-scroll mt-3 max-h-56 space-y-2 overflow-auto"></div>
           </div>
         </div>
@@ -275,12 +291,91 @@
     </div>
   </div>
 
+  <div id="newFolderModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <h3>Create New Folder</h3>
+      <p id="newFolderSummary">Create a folder in the active pane.</p>
+      <input id="newFolderNameInput" type="text" placeholder="Folder name" />
+      <div class="row">
+        <button id="newFolderCancelBtn" type="button">Cancel</button>
+        <button id="newFolderCreateBtn" type="button">Create Folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settingsModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card settings-modal-card">
+      <div class="settings-modal-head">
+        <div>
+          <h3>Settings</h3>
+          <p>Web shell preferences, SharePoint access, and shortcuts.</p>
+        </div>
+        <button id="settingsCloseBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Close</button>
+      </div>
+
+      <div class="settings-grid">
+        <section class="settings-section">
+          <h4>General</h4>
+          <label class="settings-field">
+            <span>Translation language</span>
+            <input id="langInput" type="text" placeholder="English" />
+          </label>
+          <label class="settings-field">
+            <span>UI layout preset</span>
+            <select id="uiVersionSelect"></select>
+          </label>
+          <div class="row">
+            <button id="settingsApplyBtn">Apply</button>
+            <button id="desktopNotifyBtn" type="button">Desktop Alerts: Off</button>
+            <button id="clearNotificationsBtn" type="button">Clear Alerts</button>
+          </div>
+          <div id="notificationsList" class="notifications-list"></div>
+        </section>
+
+        <section class="settings-section">
+          <h4>SharePoint Access</h4>
+          <label class="settings-field">
+            <span>Site URL</span>
+            <input id="spBaseUrlInput" type="text" placeholder="https://tenant.sharepoint.com/sites/SiteName" />
+          </label>
+          <label class="settings-field">
+            <span>Cookie Header</span>
+            <textarea id="spCookieHeaderInput" rows="4" placeholder="FedAuth=...; rtFa=..."></textarea>
+          </label>
+          <div class="row">
+            <button id="spSaveAuthBtn" type="button">Save Access</button>
+            <button id="spRefreshAuthBtn" type="button">Refresh Status</button>
+            <button id="spEmbeddedSigninBtn" type="button">Embedded Sign-In</button>
+          </div>
+          <pre id="spAuthState"></pre>
+        </section>
+
+        <section class="settings-section settings-section-wide">
+          <h4>Keyboard Shortcuts</h4>
+          <div class="shortcuts-grid">
+            <label><span>Copy</span><input id="scCopy" type="text" /></label>
+            <label><span>Cut</span><input id="scCut" type="text" /></label>
+            <label><span>Paste</span><input id="scPaste" type="text" /></label>
+            <label><span>Delete</span><input id="scDelete" type="text" /></label>
+            <label><span>Rename</span><input id="scRename" type="text" /></label>
+            <label><span>New Folder</span><input id="scMkdir" type="text" /></label>
+            <label><span>Refresh</span><input id="scRefresh" type="text" /></label>
+          </div>
+          <div class="row">
+            <button id="saveShortcutsBtn" type="button">Save Shortcuts</button>
+            <button id="resetShortcutsBtn" type="button">Reset Defaults</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <div id="compatMount" class="compat-mount" aria-hidden="true"></div>
 
   <script>
     (function () {
       const required = [
-        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","mkdirBtn","newSessionBtn","notificationsList","openBtn","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
+        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","migrationBookmarkInput","migrationConvertBookmarkCsvBtn","migrationConvertBookmarkJsonBtn","mkdirBtn","newSessionBtn","notificationsList","openBtn","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","splitTransferModeBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
       ];
 
       const mount = document.getElementById("compatMount");

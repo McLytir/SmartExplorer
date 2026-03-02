@@ -126,6 +126,20 @@ class SettingsDialog(QDialog):
         lgx.addWidget(self.lang)
         root.addLayout(lgx)
 
+        self.translation_enabled = QCheckBox("Enable translated names by default", self)
+        self.translation_enabled.setChecked(bool(getattr(self.cfg, "translation_enabled", False)))
+        root.addWidget(self.translation_enabled)
+
+        self.translation_view = QComboBox(self)
+        self.translation_view.addItem("Below file names", "below_name")
+        view_index = self.translation_view.findData(getattr(self.cfg, "translation_view_mode", "below_name") or "below_name")
+        if view_index >= 0:
+            self.translation_view.setCurrentIndex(view_index)
+        tvx = QHBoxLayout()
+        tvx.addWidget(QLabel("Default Translation View:"))
+        tvx.addWidget(self.translation_view)
+        root.addLayout(tvx)
+
         # Theme selection
         self.theme_combo = QComboBox(self)
         self.theme_combo.addItem("Light", "light")
@@ -302,6 +316,8 @@ QLabel {
             else:
                 secret_store.delete_secret("LIBRETRANSLATE_API_KEY")
         self.cfg.target_language = self.lang.text().strip() or "English"
+        self.cfg.translation_enabled = bool(self.translation_enabled.isChecked())
+        self.cfg.translation_view_mode = self.translation_view.currentData() or "below_name"
         # Persist translator provider
         try:
             setattr(self.cfg, "translator_provider", self.translator_combo.currentData())

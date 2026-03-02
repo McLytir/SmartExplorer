@@ -6,12 +6,14 @@ import io
 import logging
 import mimetypes
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unicodedata
+import zipfile
 from pathlib import Path
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
@@ -177,6 +179,7 @@ class LocalWriteRequest(BaseModel):
 class LocalTransferFromSharePointRequest(BaseModel):
     site_relative_url: Optional[str] = None
     server_relative_urls: List[str]
+    source_items: Optional[List[BulkDryRunSourceItem]] = None
     destination_dir: str
     move: bool = False
 
@@ -665,6 +668,85 @@ def _destination_existing_names(kind: Optional[str], path: Optional[str], site_r
             raise HTTPException(status_code=500, detail=f"Failed to inspect SharePoint destination: {exc}")
         return names
     return names
+
+
+def _sp_name(path: str) -> str:
+    value = str(path or "").rstrip("/")
+    return posixpath.basename(value) or value or "item"
+
+
+def _collect_sharepoint_download_entries(
+    source_items: List[BulkDryRunSourceItem],
+    *,
+    site_relative_url: Optional[str],
+) -> List[dict]:
+    if not sp_client:
+        raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
+    out: List[dict] = []
+    seen_files: set[str] = set()
+    seen_dirs: set[str] = set()
+
+    def add_dir(rel_path: str) -> None:
+        rel = str(rel_path or "").strip("/").replace("\\", "/")
+        if not rel or rel in seen_dirs:
+            return
+        seen_dirs.add(rel)
+        out.append({"kind": "dir", "relative_path": rel})
+
+    def add_file(server_path: str, rel_path: str) -> None:
+        rel = str(rel_path or "").strip("/").replace("\\", "/")
+        if not rel or rel in seen_files:
+            return
+        seen_files.add(rel)
+        out.append({"kind": "file", "server_relative_url": server_path, "relative_path": rel})
+
+    def walk_folder(folder_path: str, rel_prefix: str) -> None:
+        normalized_prefix = str(rel_prefix or "").strip("/").replace("\\", "/")
+        if normalized_prefix:
+            add_dir(normalized_prefix)
+        folders, files = sp_client.list_children(folder_path, site_relative_url=site_relative_url)
+        for row in folders:
+            child_path = str(row.get("ServerRelativeUrl") or "")
+            child_name = _safe_filename(str(row.get("Name") or _sp_name(child_path)))
+            child_rel = "/".join(part for part in [normalized_prefix, child_name] if part)
+            walk_folder(child_path, child_rel)
+        for row in files:
+            child_path = str(row.get("ServerRelativeUrl") or "")
+            child_name = _safe_filename(str(row.get("Name") or _sp_name(child_path)))
+            child_rel = "/".join(part for part in [normalized_prefix, child_name] if part)
+            add_file(child_path, child_rel)
+
+    for item in source_items:
+        src = str(item.path or "").strip()
+        if not src:
+            continue
+        top_name = _safe_filename(str(item.name or _sp_name(src)))
+        if bool(item.isDir):
+            walk_folder(src, top_name)
+        else:
+            add_file(src, top_name)
+    return out
+
+
+def _safe_extract_zip_to_dir(zip_path: str, destination_dir: str) -> int:
+    dest_root = os.path.abspath(destination_dir)
+    extracted = 0
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            rel_name = info.filename.replace("\\", "/").strip("/")
+            if not rel_name:
+                continue
+            target_path = os.path.abspath(os.path.join(dest_root, rel_name))
+            if target_path != dest_root and not target_path.startswith(dest_root + os.sep):
+                raise HTTPException(status_code=400, detail=f"Unsafe archive entry: {info.filename}")
+            if info.is_dir():
+                os.makedirs(target_path, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with zf.open(info) as src_fh, open(target_path, "wb") as dst_fh:
+                shutil.copyfileobj(src_fh, dst_fh)
+            extracted += 1
+    return extracted
 
 
 def _prepare_item_for_ai(kind: str, path: str, site_relative_url: Optional[str]) -> tuple[str, Optional[str]]:
@@ -1235,27 +1317,90 @@ def transfer_sharepoint_to_local(req: LocalTransferFromSharePointRequest):
     destination_dir = _normalize_local_path(req.destination_dir)
     if not os.path.isdir(destination_dir):
         raise HTTPException(status_code=404, detail=f"Destination not found: {destination_dir}")
+    source_items = list(req.source_items or [])
+    if not source_items:
+        source_items = [
+            BulkDryRunSourceItem(
+                kind="sharepoint",
+                path=src,
+                isDir=False,
+                name=_sp_name(src),
+                site_relative_url=req.site_relative_url,
+            )
+            for src in (req.server_relative_urls or [])
+            if src
+        ]
     transferred = 0
     errors: List[str] = []
-    for src in req.server_relative_urls:
+    uses_archive = len(source_items) > 1 or any(bool(item.isDir) for item in source_items)
+
+    if not uses_archive and len(source_items) == 1:
+        item = source_items[0]
         try:
-            content = sp_client.download_file(src, site_relative_url=req.site_relative_url)
-            name = _safe_filename(os.path.basename(src))
+            content = sp_client.download_file(item.path, site_relative_url=req.site_relative_url)
+            name = _safe_filename(str(item.name or _sp_name(item.path)))
             target = os.path.join(destination_dir, name)
             if os.path.exists(target):
                 errors.append(f"Exists: {target}")
-                continue
-            with open(target, "wb") as fh:
-                fh.write(content)
-            if req.move:
+            else:
+                with open(target, "wb") as fh:
+                    fh.write(content)
+                transferred = 1
+                if req.move:
+                    try:
+                        sp_client.delete_item(item.path, is_folder=False, site_relative_url=req.site_relative_url, recycle=True)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            errors.append(f"{item.path}: {exc}")
+        return {"ok": len(errors) == 0, "transferred": transferred, "errors": errors, "mode": "direct"}
+
+    archive_entries: List[dict] = []
+    archive_path = ""
+    try:
+        archive_entries = _collect_sharepoint_download_entries(source_items, site_relative_url=req.site_relative_url)
+        if not archive_entries:
+            return {"ok": False, "transferred": 0, "errors": ["No SharePoint content resolved for download."], "mode": "archive"}
+        fd, archive_path = tempfile.mkstemp(prefix="smx-sp-download-", suffix=".zip")
+        os.close(fd)
+        with zipfile.ZipFile(archive_path, mode="w", compression=getattr(zipfile, "ZIP_DEFLATED", zipfile.ZIP_STORED)) as zf:
+            for entry in archive_entries:
+                rel_path = str(entry.get("relative_path") or "").replace("\\", "/").strip("/")
+                if not rel_path:
+                    continue
+                if entry.get("kind") == "dir":
+                    zf.writestr(rel_path.rstrip("/") + "/", b"")
+                    continue
+                content = sp_client.download_file(str(entry.get("server_relative_url") or ""), site_relative_url=req.site_relative_url)
+                zf.writestr(rel_path, content)
+        transferred = _safe_extract_zip_to_dir(archive_path, destination_dir)
+        if req.move:
+            for item in source_items:
                 try:
-                    sp_client.delete_item(src, is_folder=False, site_relative_url=req.site_relative_url, recycle=True)
+                    sp_client.delete_item(
+                        str(item.path or ""),
+                        is_folder=bool(item.isDir),
+                        site_relative_url=req.site_relative_url,
+                        recycle=True,
+                    )
                 except Exception:
                     pass
-            transferred += 1
-        except Exception as exc:
-            errors.append(f"{src}: {exc}")
-    return {"ok": len(errors) == 0, "transferred": transferred, "errors": errors}
+        return {
+            "ok": True,
+            "transferred": transferred,
+            "errors": [],
+            "mode": "archive_extract",
+            "archive_entries": len(archive_entries),
+        }
+    except Exception as exc:
+        errors.append(str(exc))
+        return {"ok": False, "transferred": transferred, "errors": errors, "mode": "archive"}
+    finally:
+        if archive_path:
+            try:
+                os.remove(archive_path)
+            except Exception:
+                pass
 
 
 @app.post("/api/transfer/local-to-sp")
