@@ -75,6 +75,22 @@ class LinkMigrationLog:
         self._save()
         return record
 
+    def delete(self, record_id: str) -> bool:
+        before = len(self._records)
+        self._records = [record for record in self._records if record.id != str(record_id or "")]
+        changed = len(self._records) != before
+        if changed:
+            self._save()
+        return changed
+
+    def clear(self) -> int:
+        removed = len(self._records)
+        if not removed:
+            return 0
+        self._records = []
+        self._save()
+        return removed
+
     def import_json(self, path: str) -> int:
         return self.import_json_report(path)["added"]
 

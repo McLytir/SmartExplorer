@@ -76,6 +76,10 @@
 
     <div class="border-b border-slate-200 px-4 py-2 dark:border-slate-800">
       <div class="flex items-center gap-2 overflow-x-auto">
+        <div class="mr-3 flex items-center gap-2">
+          <button id="appWorkspaceTabBtn" class="rounded-full border border-slate-300 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary dark:border-slate-700">Workspace</button>
+          <button id="appRelinkingTabBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Relinking</button>
+        </div>
         <div id="sessionTabs" class="flex items-center gap-2"></div>
         <button id="newSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">+ New Session</button>
         <button id="duplicateSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Duplicate</button>
@@ -89,6 +93,66 @@
     </div>
 
     <div id="splitSessionsHost" class="hidden min-h-0 flex-1 overflow-auto border-b border-slate-200 px-4 py-3 dark:border-slate-800"></div>
+
+    <div id="relinkingWorkspaceView" class="hidden min-h-0 flex-1 overflow-auto px-4 py-4">
+      <div class="mx-auto flex h-full w-full max-w-6xl flex-col gap-4">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+          <div class="mb-2 text-lg font-semibold text-primary">Relinking</div>
+          <p class="text-sm text-slate-500 dark:text-slate-300">Manage background link activity, bookmark imports, resolution, and exports outside the single-view sidebar.</p>
+        </div>
+
+        <div class="grid min-h-0 flex-1 gap-4 xl:grid-cols-2">
+          <div class="space-y-4">
+            <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+              <div class="mb-2 text-sm font-semibold">Resolve</div>
+              <div class="flex gap-2">
+                <input id="migrationResolveInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Paste old SharePoint URL or path" />
+                <button id="migrationResolveBtn" class="rounded-lg bg-primary px-3 py-2 text-xs text-white">Resolve</button>
+              </div>
+              <div id="migrationResolveOutput" class="mt-2 rounded-lg border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">No resolution yet.</div>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button id="migrationCopyResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Copy Resolved</button>
+                <button id="migrationOpenResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Open Resolved</button>
+              </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+              <div class="mb-2 text-sm font-semibold">Imports</div>
+              <div class="flex flex-wrap gap-2">
+                <button id="relinkImportHtmlBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Import Bookmark HTML</button>
+                <button id="relinkClearImportsBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Clear Imports</button>
+              </div>
+              <input id="relinkImportHtmlInput" type="file" accept=".html,.htm,text/html" class="hidden" />
+              <div id="relinkImportsList" class="se-scroll mt-3 max-h-[28rem] space-y-2 overflow-auto"></div>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+              <div class="mb-2 text-sm font-semibold">Exports</div>
+              <div class="mb-2 flex flex-wrap gap-2">
+                <button id="relinkClearExportsBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Clear Exports</button>
+              </div>
+              <div id="relinkExportsList" class="se-scroll mt-3 max-h-[28rem] space-y-2 overflow-auto"></div>
+            </div>
+          </div>
+
+          <div class="space-y-4">
+            <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+              <div class="mb-2 text-sm font-semibold">Background Activity</div>
+              <div class="mt-2 flex gap-2">
+                <input id="migrationFilterInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Filter migration records" />
+                <button id="migrationImportBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Import JSON</button>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <button id="migrationExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
+                <button id="migrationExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
+                <button id="migrationClearBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Clear Activity</button>
+              </div>
+              <div id="migrationLogList" class="se-scroll mt-3 max-h-[52rem] space-y-2 overflow-auto"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div id="mainWorkspaceView" class="flex min-h-0 flex-1 overflow-hidden">
       <aside class="hidden w-60 shrink-0 border-r border-slate-200 bg-surface-light p-4 dark:border-slate-800 dark:bg-surface-dark lg:block">
@@ -154,79 +218,54 @@
       </main>
 
       <aside class="w-80 shrink-0 border-l border-slate-200 bg-surface-light dark:border-slate-800 dark:bg-slate-900/40">
-        <div class="border-b border-slate-200 p-4 font-bold text-primary dark:border-slate-800">Smart Actions</div>
+        <div class="border-b border-slate-200 p-4 font-bold text-primary dark:border-slate-800">Workspace Tools</div>
         <div class="se-scroll h-full overflow-auto p-4">
-          <div class="mb-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
-            <div class="text-sm font-semibold">Selection Preview</div>
-            <div id="previewFrame" class="preview-frame mt-2 min-h-44 rounded-lg border border-slate-200 dark:border-slate-700"></div>
-            <pre id="previewText" class="mt-2 max-h-28 overflow-auto rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700"></pre>
-          </div>
-
-          <div class="space-y-2">
-            <button id="previewBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Preview Selected</button>
-            <button id="summaryBtn" class="w-full rounded-xl border border-primary/30 bg-primary/10 px-3 py-2 text-left text-sm text-primary">Summarize File</button>
-            <button id="extractBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Extract Text</button>
-          </div>
-
-          <div class="mt-3 flex gap-2">
-            <input id="questionInput" type="text" class="flex-1 rounded-lg border-slate-300 text-sm dark:border-slate-700" placeholder="Ask AI assistant" />
-            <button id="askBtn" class="rounded-lg bg-primary px-3 py-2 text-sm text-white">Ask</button>
-          </div>
-
-          <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
-            <button id="copyBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Copy</button>
-            <button id="cutBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Cut</button>
-            <button id="pasteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Paste</button>
-            <button id="renameBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Rename</button>
-            <button id="aiRenameBtn" class="rounded-md border border-primary/30 bg-primary/10 p-2 text-primary">AI Rename</button>
-            <button id="deleteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Delete</button>
-            <button id="mkdirBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">New Folder</button>
-            <button id="openBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Open</button>
-            <button id="revealBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Reveal</button>
-            <button id="renameTranslatedBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Apply Translation Rename</button>
-            <button id="undoRenameBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Undo Rename</button>
-          </div>
-
-          <div class="mt-4 rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-800">
-            <div class="mb-2 font-semibold text-slate-500">Current Task Cost</div>
-            <div class="font-semibold text-primary">$0.00 (Idle)</div>
-          </div>
-
-          <div class="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
-            <div class="mb-2 text-sm font-semibold">AI Rename Batch Log</div>
-            <div class="flex gap-2">
-              <input id="aiRenameFilterInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Filter AI rename batches" />
-              <button id="aiRenameExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
-              <button id="aiRenameExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
+          <div id="inspectorActionsPanel">
+            <div class="mb-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+              <div class="text-sm font-semibold">Selection Preview</div>
+              <div id="previewFrame" class="preview-frame mt-2 min-h-44 rounded-lg border border-slate-200 dark:border-slate-700"></div>
+              <pre id="previewText" class="mt-2 max-h-28 overflow-auto rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700"></pre>
             </div>
-            <div id="aiRenameLogList" class="se-scroll mt-3 max-h-48 space-y-2 overflow-auto"></div>
-          </div>
 
-          <div class="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
-            <div class="mb-2 text-sm font-semibold">Link Migration Log</div>
-            <div class="flex gap-2">
-              <input id="migrationResolveInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Paste old SharePoint URL or path" />
-              <button id="migrationResolveBtn" class="rounded-lg bg-primary px-3 py-2 text-xs text-white">Resolve</button>
+            <div class="space-y-2">
+              <button id="previewBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Preview Selected</button>
+              <button id="summaryBtn" class="w-full rounded-xl border border-primary/30 bg-primary/10 px-3 py-2 text-left text-sm text-primary">Summarize File</button>
+              <button id="extractBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Extract Text</button>
             </div>
-            <div class="mt-2 flex gap-2">
-              <input id="migrationFilterInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Filter migration records" />
-              <button id="migrationImportBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Import JSON</button>
+
+            <div class="mt-3 flex gap-2">
+              <input id="questionInput" type="text" class="flex-1 rounded-lg border-slate-300 text-sm dark:border-slate-700" placeholder="Ask AI assistant" />
+              <button id="askBtn" class="rounded-lg bg-primary px-3 py-2 text-sm text-white">Ask</button>
             </div>
-            <div id="migrationResolveOutput" class="mt-2 rounded-lg border border-slate-200 p-2 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">No resolution yet.</div>
-            <div class="mt-3 flex flex-wrap gap-2">
-              <button id="migrationCopyResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Copy Resolved</button>
-              <button id="migrationOpenResolvedBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Open Resolved</button>
+
+            <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
+              <button id="copyBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Copy</button>
+              <button id="cutBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Cut</button>
+              <button id="pasteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Paste</button>
+              <button id="renameBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Rename</button>
+              <button id="aiRenameBtn" class="rounded-md border border-primary/30 bg-primary/10 p-2 text-primary">AI Rename</button>
+              <button id="deleteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Delete</button>
+              <button id="mkdirBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">New Folder</button>
+              <button id="openBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Open</button>
+              <button id="revealBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Reveal</button>
+              <button id="renameTranslatedBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Apply Translation Rename</button>
+              <button id="undoRenameBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Undo Rename</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-2">
-              <button id="migrationConvertBookmarkJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Bookmark HTML -> JSON</button>
-              <button id="migrationConvertBookmarkCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Bookmark HTML -> CSV</button>
+
+            <div class="mt-4 rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-800">
+              <div class="mb-2 font-semibold text-slate-500">Current Task Cost</div>
+              <div class="font-semibold text-primary">$0.00 (Idle)</div>
             </div>
-            <div class="mt-2 flex flex-wrap gap-2">
-              <button id="migrationExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
-              <button id="migrationExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
+
+            <div class="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+              <div class="mb-2 text-sm font-semibold">AI Rename Batch Log</div>
+              <div class="flex gap-2">
+                <input id="aiRenameFilterInput" type="text" class="flex-1 rounded-lg border-slate-300 text-xs dark:border-slate-700" placeholder="Filter AI rename batches" />
+                <button id="aiRenameExportJsonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export JSON</button>
+                <button id="aiRenameExportCsvBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs dark:border-slate-700">Export CSV</button>
+              </div>
+              <div id="aiRenameLogList" class="se-scroll mt-3 max-h-48 space-y-2 overflow-auto"></div>
             </div>
-            <input id="migrationBookmarkInput" type="file" accept=".html,.htm,text/html" class="hidden" />
-            <div id="migrationLogList" class="se-scroll mt-3 max-h-56 space-y-2 overflow-auto"></div>
           </div>
         </div>
       </aside>
@@ -247,6 +286,7 @@
 
   <input id="importConfigInput" type="file" accept="application/json" hidden />
   <input id="migrationImportInput" type="file" accept="application/json" hidden />
+  <input id="migrationBookmarkInput" type="file" accept=".html,.htm,text/html" hidden />
   <input id="leftUploadInput" type="file" hidden />
   <input id="rightUploadInput" type="file" hidden />
 
@@ -375,7 +415,7 @@
   <script>
     (function () {
       const required = [
-        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","migrationBookmarkInput","migrationConvertBookmarkCsvBtn","migrationConvertBookmarkJsonBtn","mkdirBtn","newSessionBtn","notificationsList","openBtn","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","splitTransferModeBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
+        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","appRelinkingTabBtn","appWorkspaceTabBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","inspectorActionsPanel","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","mainWorkspaceView","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","migrationBookmarkInput","migrationClearBtn","migrationCopyResolvedBtn","migrationExportCsvBtn","migrationExportJsonBtn","migrationFilterInput","migrationImportBtn","migrationImportInput","migrationLogList","migrationOpenResolvedBtn","migrationResolveBtn","migrationResolveInput","migrationResolveOutput","mkdirBtn","newSessionBtn","notificationsList","openBtn","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","relinkClearExportsBtn","relinkClearImportsBtn","relinkExportsList","relinkImportHtmlBtn","relinkImportHtmlInput","relinkImportsList","relinkingWorkspaceView","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","splitSessionsHost","splitTransferModeBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
       ];
 
       const mount = document.getElementById("compatMount");

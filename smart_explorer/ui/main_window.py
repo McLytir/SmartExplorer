@@ -39,6 +39,7 @@ from ..services.tag_store import TagStore
 from ..services.ai_summary import AISummarizer
 from ..services.ai_tagging import AITagger, TaggingError
 from ..services.link_migration_log import LinkMigrationLog
+from ..services.relinking_workspace import RelinkingWorkspaceStore
 from ..services.ai_rename_batch_log import AIRenameBatchLog
 from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
@@ -66,9 +67,7 @@ from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
 from .tag_flyout_panel import TagFlyoutPanel
-from .smart_actions_panel import SmartActionsPanel
-from .link_migration_log_dialog import LinkMigrationLogDialog
-from .resolve_old_link_dialog import ResolveOldLinkDialog
+from .workspace_tools_panel import WorkspaceToolsPanel
 from .ai_rename_plan_dialog import AIRenamePlanDialog, AIRenamePlanCandidate
 from .ai_rename_log_dialog import AIRenameLogDialog
 from ..services import edit_session
@@ -91,6 +90,7 @@ class MainWindow(QMainWindow):
         self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
         self._tag_store = TagStore()
         self._link_migration_log = LinkMigrationLog()
+        self._relinking_store = RelinkingWorkspaceStore()
         self._ai_rename_log = AIRenameBatchLog()
 
         self._translator: Translator = self._create_translator()
@@ -195,15 +195,24 @@ class MainWindow(QMainWindow):
         self._favorites_panel.tag_reveal_requested.connect(self._reveal_tag_result)
         self._favorites_panel.tag_copy_requested.connect(self._copy_tag_result)
 
-        self._smart_actions_panel = SmartActionsPanel(self)
+        self._workspace_tools_panel = WorkspaceToolsPanel(
+            self._link_migration_log,
+            self._relinking_store,
+            self,
+            sp_base_url=self._cfg.sp_base_url or "",
+        )
+        self._smart_actions_panel = self._workspace_tools_panel.smart_actions_panel
+        self._relinking_panel = self._workspace_tools_panel.relinking_panel
         self._smart_actions_panel.summarize_requested.connect(self._run_smart_summary)
         self._smart_actions_panel.auto_tag_requested.connect(self._apply_ai_tags_from_panel)
         self._smart_actions_panel.ask_requested.connect(self._run_smart_question)
         self._smart_actions_panel.set_selection_context("", "")
         self._smart_actions_panel.set_cost_hint("idle")
-        self._smart_actions_dock = QDockWidget("Smart Actions", self)
+        self._relinking_panel.open_in_app_requested.connect(self._open_resolved_sharepoint_location)
+        self._relinking_panel.status_message_requested.connect(self.statusBar().showMessage)
+        self._smart_actions_dock = QDockWidget("Workspace Tools", self)
         self._smart_actions_dock.setObjectName("SmartActionsDock")
-        self._smart_actions_dock.setWidget(self._smart_actions_panel)
+        self._smart_actions_dock.setWidget(self._workspace_tools_panel)
         self._smart_actions_dock.setAllowedAreas(Qt.RightDockWidgetArea)
         self._smart_actions_dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
         self.addDockWidget(Qt.RightDockWidgetArea, self._smart_actions_dock)
@@ -301,6 +310,10 @@ class MainWindow(QMainWindow):
         settings = QAction("Settings...", self)
         settings.triggered.connect(self._open_settings)
         tb.addAction(settings)
+
+        relinking_action = QAction("Relinking", self)
+        relinking_action.triggered.connect(self._open_relinking_tab)
+        tb.addAction(relinking_action)
 
         export_link_log = QAction("Export Link Log...", self)
         export_link_log.triggered.connect(self._export_link_migration_log)
@@ -435,6 +448,10 @@ class MainWindow(QMainWindow):
         settings_action = QAction("Settings...", self)
         settings_action.triggered.connect(self._open_settings)
         tools_menu.addAction(settings_action)
+
+        relinking_action = QAction("Relinking", self)
+        relinking_action.triggered.connect(self._open_relinking_tab)
+        tools_menu.addAction(relinking_action)
 
     def _install_settings_button(self) -> None:
         button = QToolButton(self)
@@ -1477,6 +1494,8 @@ QLabel#SmartCostLabel {{
             workspace_id=workspace_id,
             status="completed",
         )
+        if getattr(self, "_relinking_panel", None) is not None:
+            self._relinking_panel.refresh_all()
         updated = self._favorites_manager.rewrite_sharepoint_paths(
             old_server_relative_url=old_path,
             new_server_relative_url=new_path,
@@ -1543,11 +1562,12 @@ QLabel#SmartCostLabel {{
             f"skipped {report['duplicates']} duplicate(s), "
             f"detected {report['conflicts']} conflict(s) from {path}"
         )
+        if getattr(self, "_relinking_panel", None) is not None:
+            self._relinking_panel.refresh_all()
         self.statusBar().showMessage(message, 7000)
 
     def _open_link_migration_log(self) -> None:
-        dlg = LinkMigrationLogDialog(self._link_migration_log, self, sp_base_url=self._cfg.sp_base_url)
-        dlg.exec()
+        self._open_relinking_tab()
 
     def _export_ai_rename_log(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -1573,9 +1593,14 @@ QLabel#SmartCostLabel {{
         dlg.exec()
 
     def _open_resolve_old_link_dialog(self) -> None:
-        dlg = ResolveOldLinkDialog(self._link_migration_log, self._cfg, self)
-        dlg.open_in_app_requested.connect(self._open_resolved_sharepoint_location)
-        dlg.exec()
+        self._open_relinking_tab()
+
+    def _open_relinking_tab(self) -> None:
+        if getattr(self, "_workspace_tools_panel", None) is None:
+            return
+        self._smart_actions_dock.show()
+        self._workspace_tools_panel.open_tab("relinking")
+        self._relinking_panel.refresh_all()
 
     def _open_resolved_sharepoint_location(self, server_relative_url: str, site_relative_url: str) -> None:
         path = str(server_relative_url or "").strip()
@@ -4594,6 +4619,9 @@ QLabel#SmartCostLabel {{
             pane.set_translator(self._translator)
             pane.set_language(self._cfg.target_language or "English")
         self._apply_translation_preferences(refresh=True)
+        if getattr(self, "_relinking_panel", None) is not None:
+            self._relinking_panel.set_base_url(self._cfg.sp_base_url or "")
+            self._relinking_panel.refresh_all()
         if self._preview_widget and hasattr(self._preview_widget, 'set_summarizer'):
             try:
                 self._preview_widget.set_summarizer(self._summarizer)

@@ -45,7 +45,10 @@ const state = {
   splitCompareSessionId: '',
   splitRuntime: {},
   splitTransferMode: 'copy',
+  appView: 'workspace',
   migrationBookmarkExportFormat: 'json',
+  relinkImports: [],
+  relinkExports: [],
 };
 
 function paneState(key){
@@ -54,6 +57,8 @@ function paneState(key){
 
 const el = {
   splitViewToggleBtn:id('splitViewToggleBtn'), splitTransferModeBtn:id('splitTransferModeBtn'), splitCompareSessionSelect:id('splitCompareSessionSelect'), splitSessionsHost:id('splitSessionsHost'), mainWorkspaceView:id('mainWorkspaceView'),
+  appWorkspaceTabBtn:id('appWorkspaceTabBtn'), appRelinkingTabBtn:id('appRelinkingTabBtn'), relinkingWorkspaceView:id('relinkingWorkspaceView'),
+  inspectorActionsPanel:id('inspectorActionsPanel'),
   openSettingsBtn:id('openSettingsBtn'), settingsModal:id('settingsModal'), settingsCloseBtn:id('settingsCloseBtn'), settingsApplyBtn:id('settingsApplyBtn'),
   status: id('status'), uiVersionSelect:id('uiVersionSelect'), langInput: id('langInput'), toggleTranslateBtn: id('toggleTranslateBtn'),
   renameTranslatedBtn: id('renameTranslatedBtn'), undoRenameBtn: id('undoRenameBtn'), copyBtn: id('copyBtn'), cutBtn: id('cutBtn'), pasteBtn: id('pasteBtn'),
@@ -83,6 +88,8 @@ const el = {
   pdfPageInput:id('pdfPageInput'), pdfJumpBtn:id('pdfJumpBtn'), pdfBookmarkAddBtn:id('pdfBookmarkAddBtn'), pdfBookmarksList:id('pdfBookmarksList'),
   checkoutBtn:id('checkoutBtn'), checkinBtn:id('checkinBtn'), undoCheckoutBtn:id('undoCheckoutBtn'), loadVersionsBtn:id('loadVersionsBtn'), versionsSelect:id('versionsSelect'), downloadVersionBtn:id('downloadVersionBtn'), restoreVersionBtn:id('restoreVersionBtn'), versionsOutput:id('versionsOutput'),
   migrationResolveInput:id('migrationResolveInput'), migrationResolveBtn:id('migrationResolveBtn'), migrationFilterInput:id('migrationFilterInput'), migrationImportBtn:id('migrationImportBtn'), migrationImportInput:id('migrationImportInput'), migrationBookmarkInput:id('migrationBookmarkInput'), migrationConvertBookmarkJsonBtn:id('migrationConvertBookmarkJsonBtn'), migrationConvertBookmarkCsvBtn:id('migrationConvertBookmarkCsvBtn'), migrationResolveOutput:id('migrationResolveOutput'), migrationCopyResolvedBtn:id('migrationCopyResolvedBtn'), migrationOpenResolvedBtn:id('migrationOpenResolvedBtn'), migrationExportJsonBtn:id('migrationExportJsonBtn'), migrationExportCsvBtn:id('migrationExportCsvBtn'), migrationLogList:id('migrationLogList'),
+  migrationClearBtn:id('migrationClearBtn'),
+  relinkImportHtmlBtn:id('relinkImportHtmlBtn'), relinkImportHtmlInput:id('relinkImportHtmlInput'), relinkImportsList:id('relinkImportsList'), relinkExportsList:id('relinkExportsList'), relinkClearImportsBtn:id('relinkClearImportsBtn'), relinkClearExportsBtn:id('relinkClearExportsBtn'),
   aiRenameFilterInput:id('aiRenameFilterInput'), aiRenameExportJsonBtn:id('aiRenameExportJsonBtn'), aiRenameExportCsvBtn:id('aiRenameExportCsvBtn'), aiRenameLogList:id('aiRenameLogList'),
 };
 
@@ -1935,11 +1942,12 @@ function renderSplitSessions(){
   renderSplitSessionOptions();
   if(!el.splitSessionsHost) return;
   const ids=splitSessionIds();
-  const shouldShow=state.splitViewEnabled && ids.length>0;
-  if(el.mainWorkspaceView) el.mainWorkspaceView.classList.toggle('hidden', shouldShow);
+  const shouldShow=state.appView==='workspace' && state.splitViewEnabled && ids.length>0;
+  if(el.mainWorkspaceView) el.mainWorkspaceView.classList.toggle('hidden', shouldShow || state.appView==='relinking');
   el.splitSessionsHost.classList.toggle('hidden', !shouldShow);
   if(!shouldShow){
     el.splitSessionsHost.innerHTML='';
+    renderAppView();
     return;
   }
   el.splitSessionsHost.className='split-sessions-host min-h-0 flex-1 overflow-auto border-b border-slate-200 px-4 py-3 dark:border-slate-800';
@@ -1987,6 +1995,7 @@ function renderSplitSessions(){
     if(ui.refresh) ui.refresh.onclick=()=>{ focusSplitSession(sessionId); return loadSplitPane(sessionId, side, pane.path); };
     renderSplitPane(sessionId, side);
   });
+  renderAppView();
 }
 
 function setClipboard(op){
@@ -2647,6 +2656,26 @@ function loadMigrationLog(){ try{ state.migrationLog=JSON.parse(localStorage.get
 function saveMigrationLog(){ localStorage.setItem('smx_web_link_migrations',JSON.stringify(state.migrationLog)); }
 function loadAiRenameLog(){ try{ state.aiRenameLog=JSON.parse(localStorage.getItem('smx_web_ai_rename_log')||'[]'); if(!Array.isArray(state.aiRenameLog)) state.aiRenameLog=[]; }catch{ state.aiRenameLog=[]; } }
 function saveAiRenameLog(){ localStorage.setItem('smx_web_ai_rename_log',JSON.stringify(state.aiRenameLog)); }
+function loadRelinkState(){
+  try{ state.relinkImports=JSON.parse(localStorage.getItem('smx_web_relink_imports')||'[]'); if(!Array.isArray(state.relinkImports)) state.relinkImports=[]; }catch{ state.relinkImports=[]; }
+  try{ state.relinkExports=JSON.parse(localStorage.getItem('smx_web_relink_exports')||'[]'); if(!Array.isArray(state.relinkExports)) state.relinkExports=[]; }catch{ state.relinkExports=[]; }
+  state.relinkImports=state.relinkImports.map((entry)=>({
+    source_format:'netscape-html',
+    source_browser:'generic',
+    status:'imported',
+    source_rows:[],
+    summary:{total:0,resolved:0,unchanged:0,external:0},
+    ...entry,
+    source_rows:Array.isArray(entry?.source_rows) ? entry.source_rows : (Array.isArray(entry?.rows) ? entry.rows : []),
+  }));
+}
+function saveRelinkState(){
+  localStorage.setItem('smx_web_relink_imports',JSON.stringify(state.relinkImports));
+  localStorage.setItem('smx_web_relink_exports',JSON.stringify(state.relinkExports));
+}
+function loadAppView(){
+  state.appView=localStorage.getItem('smx_web_app_view')==='relinking' ? 'relinking' : 'workspace';
+}
 function buildWebUrlFromPath(path){
   const base=String(el.spBaseUrlInput?.value||'').trim();
   if(!base) return '';
@@ -2668,10 +2697,31 @@ function extractServerRelativeBookmarkPath(value){
   if(raw.startsWith('/')) return normalizeSpPath(raw);
   try{
     const url=new URL(raw);
-    return normalizeSpPath(decodeURIComponent(url.pathname||''));
+    const params=url.searchParams;
+    for(const key of ['id','RootFolder','rootfolder','FileRef','SourceUrl','src']){
+      const candidate=String(params.get(key)||'').trim();
+      if(candidate.startsWith('/')) return normalizeSpPath(decodeURIComponent(candidate));
+    }
+    let path=decodeURIComponent(url.pathname||'');
+    if(path.startsWith('/:') && path.includes('/r/')){
+      path=path.split('/r/')[1]||'';
+      if(path && !path.startsWith('/')) path=`/${path}`;
+    }
+    return normalizeSpPath(path);
   }catch{
     return '';
   }
+}
+function buildResolvedBookmarkUrl(originalUrl, currentPath){
+  const direct=buildWebUrlFromPath(currentPath);
+  if(direct) return direct;
+  try{
+    const url=new URL(String(originalUrl||'').trim());
+    if(String(currentPath||'').startsWith('/')){
+      return new URL(normalizeSpPath(currentPath), `${url.protocol}//${url.host}`).toString();
+    }
+  }catch{}
+  return String(originalUrl||'').trim();
 }
 function downloadBlob(filename, content, type){
   const blob=new Blob([content],{type});
@@ -2726,6 +2776,11 @@ function parseBookmarkExportHtml(html){
   }
   return rows;
 }
+function detectBookmarkSourceBrowser(html){
+  const lowered=String(html||'').toLowerCase();
+  if(lowered.includes('netscape-bookmark-file-1')) return 'generic_netscape';
+  return 'generic';
+}
 function convertBookmarkRows(rows){
   return (rows||[]).map((row)=>{
     const originalUrl=String(row?.url||'').trim();
@@ -2751,7 +2806,7 @@ function convertBookmarkRows(rows){
       folder_path:String(row?.folder_path||'').trim(),
       original_url:originalUrl,
       original_server_relative_url:originalPath,
-      current_url:buildWebUrlFromPath(currentPath)||originalUrl,
+      current_url:buildResolvedBookmarkUrl(originalUrl,currentPath),
       current_server_relative_url:currentPath,
       current_site_relative_url:currentSite,
       status:resolved?'resolved':'unchanged',
@@ -2770,6 +2825,34 @@ function exportConvertedBookmarkRows(rows, format){
   }
   downloadBlob(`smx-bookmark-resolution-${Date.now()}.json`,JSON.stringify(rows,null,2),'application/json');
 }
+function buildBookmarkHtmlFromRows(rows, title='Bookmarks'){
+  const root={folders:new Map(), links:[]};
+  (rows||[]).forEach((row)=>{
+    const parts=String(row?.folder_path||'').split('/').map((part)=>part.trim()).filter(Boolean);
+    let cursor=root;
+    parts.forEach((part)=>{
+      if(!cursor.folders.has(part)) cursor.folders.set(part,{folders:new Map(),links:[]});
+      cursor=cursor.folders.get(part);
+    });
+    cursor.links.push({title:String(row?.title||row?.current_url||row?.original_url||'').trim(),href:String(row?.current_url||row?.original_url||'').trim()});
+  });
+  const lines=['<!DOCTYPE NETSCAPE-Bookmark-file-1>','<!-- This file was generated by SmartExplorer -->',`<TITLE>${escapeHtml(title)}</TITLE>`,`<H1>${escapeHtml(title)}</H1>`,'<DL><p>'];
+  function emitFolder(node, depth){
+    const pad='    '.repeat(depth);
+    node.links.forEach((link)=>{
+      lines.push(`${pad}<DT><A HREF="${escapeHtml(link.href)}">${escapeHtml(link.title||link.href)}</A>`);
+    });
+    Array.from(node.folders.entries()).forEach(([name, child])=>{
+      lines.push(`${pad}<DT><H3>${escapeHtml(name)}</H3>`);
+      lines.push(`${pad}<DL><p>`);
+      emitFolder(child, depth+1);
+      lines.push(`${pad}</DL><p>`);
+    });
+  }
+  emitFolder(root,1);
+  lines.push('</DL><p>');
+  return lines.join('\n');
+}
 async function convertBookmarkExportFile(file, format){
   if(!file) return;
   try{
@@ -2783,6 +2866,193 @@ async function convertBookmarkExportFile(file, format){
   }catch(e){
     setStatus(`Bookmark HTML conversion failed: ${err(e)}`);
   }
+}
+function renderAppView(){
+  const workspaceActive=state.appView!=='relinking';
+  if(el.appWorkspaceTabBtn){
+    el.appWorkspaceTabBtn.classList.toggle('bg-primary/10', workspaceActive);
+    el.appWorkspaceTabBtn.classList.toggle('text-primary', workspaceActive);
+  }
+  if(el.appRelinkingTabBtn){
+    el.appRelinkingTabBtn.classList.toggle('bg-primary/10', !workspaceActive);
+    el.appRelinkingTabBtn.classList.toggle('text-primary', !workspaceActive);
+  }
+  const showRelinking=!workspaceActive;
+  if(el.relinkingWorkspaceView) el.relinkingWorkspaceView.classList.toggle('hidden', !showRelinking);
+  if(el.mainWorkspaceView) el.mainWorkspaceView.classList.toggle('hidden', showRelinking || (state.splitViewEnabled && splitSessionIds().length>0));
+  if(el.splitSessionsHost) el.splitSessionsHost.classList.toggle('hidden', showRelinking || !(state.splitViewEnabled && splitSessionIds().length>0));
+}
+function openAppView(view){
+  state.appView=view==='relinking' ? 'relinking' : 'workspace';
+  localStorage.setItem('smx_web_app_view', state.appView);
+  renderAppView();
+  if(state.appView==='relinking'){
+    renderMigrationPanel();
+    renderRelinkImports();
+    renderRelinkExports();
+  }
+}
+function renderRelinkImports(){
+  if(!el.relinkImportsList) return;
+  el.relinkImportsList.innerHTML='';
+  const rows=state.relinkImports.slice().reverse();
+  if(!rows.length){
+    el.relinkImportsList.innerHTML='<div class="rounded-lg border border-slate-200 p-2 text-xs text-slate-500 dark:border-slate-700">No bookmark HTML imports yet.</div>';
+    return;
+  }
+  rows.forEach((entry)=>{
+    const item=document.createElement('div');
+    item.className='rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700';
+    const summary=entry.summary||{};
+    item.innerHTML=`<div class="font-semibold">${escapeHtml(entry.name||'Bookmark Import')}</div><div class="mt-1 text-slate-500">${escapeHtml(entry.imported_at||'')}</div><div class="mt-1 text-slate-500">${escapeHtml(entry.source_browser||'generic')} · ${summary.total||0} total bookmark(s) normalized to JSON</div>`;
+    const actions=document.createElement('div');
+    actions.className='mt-2 flex flex-wrap gap-2';
+    const resolveBtn=document.createElement('button');
+    resolveBtn.textContent='Resolve & Export HTML';
+    resolveBtn.onclick=()=>resolveRelinkImport(entry.id);
+    const jsonBtn=document.createElement('button');
+    jsonBtn.textContent='Download JSON';
+    jsonBtn.onclick=()=>downloadBlob(`${(entry.name||'bookmarks').replace(/\.[^.]+$/,'')}-normalized.json`,JSON.stringify(entry.source_rows||entry.rows||[],null,2),'application/json');
+    const deleteBtn=document.createElement('button');
+    deleteBtn.textContent='Delete';
+    deleteBtn.onclick=()=>deleteRelinkImport(entry.id);
+    actions.appendChild(resolveBtn);
+    actions.appendChild(jsonBtn);
+    actions.appendChild(deleteBtn);
+    item.appendChild(actions);
+    el.relinkImportsList.appendChild(item);
+  });
+}
+function renderRelinkExports(){
+  if(!el.relinkExportsList) return;
+  el.relinkExportsList.innerHTML='';
+  const rows=state.relinkExports.slice().reverse();
+  if(!rows.length){
+    el.relinkExportsList.innerHTML='<div class="rounded-lg border border-slate-200 p-2 text-xs text-slate-500 dark:border-slate-700">No resolved bookmark exports yet.</div>';
+    return;
+  }
+  rows.forEach((entry)=>{
+    const item=document.createElement('div');
+    item.className='rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700';
+    const summary=entry.summary||{};
+    item.innerHTML=`<div class="font-semibold">${escapeHtml(entry.name||'Resolved Export')}</div><div class="mt-1 text-slate-500">${escapeHtml(entry.created_at||'')}</div><div class="mt-1 text-slate-500">${summary.total||0} total · ${summary.resolved||0} resolved · ${summary.unchanged||0} unchanged · ${summary.external||0} external</div>`;
+    const actions=document.createElement('div');
+    actions.className='mt-2 flex flex-wrap gap-2';
+    const htmlBtn=document.createElement('button');
+    htmlBtn.textContent='Download HTML';
+    htmlBtn.onclick=()=>downloadBlob(`${entry.file_stem||'resolved-bookmarks'}.html`,entry.html||'','text/html');
+    const jsonBtn=document.createElement('button');
+    jsonBtn.textContent='Download JSON';
+    jsonBtn.onclick=()=>downloadBlob(`${entry.file_stem||'resolved-bookmarks'}.json`,JSON.stringify(entry.rows||[],null,2),'application/json');
+    const deleteBtn=document.createElement('button');
+    deleteBtn.textContent='Delete';
+    deleteBtn.onclick=()=>deleteRelinkExport(entry.id);
+    actions.appendChild(htmlBtn);
+    actions.appendChild(jsonBtn);
+    actions.appendChild(deleteBtn);
+    item.appendChild(actions);
+    el.relinkExportsList.appendChild(item);
+  });
+}
+function deleteRelinkImport(importId){
+  const entry=state.relinkImports.find((row)=>row.id===importId);
+  if(!entry) return;
+  if(!confirm(`Delete import "${entry.name||'Bookmark Import'}" and its resolved exports?`)) return;
+  state.relinkImports=state.relinkImports.filter((row)=>row.id!==importId);
+  state.relinkExports=state.relinkExports.filter((row)=>row.source_import_id!==importId);
+  saveRelinkState();
+  renderRelinkImports();
+  renderRelinkExports();
+  setStatus(`Deleted import "${entry.name||'Bookmark Import'}".`);
+}
+function clearRelinkImports(){
+  if(!state.relinkImports.length) return;
+  if(!confirm('Delete all imported bookmark artifacts and their resolved exports?')) return;
+  const removed=state.relinkImports.length;
+  state.relinkImports=[];
+  state.relinkExports=[];
+  saveRelinkState();
+  renderRelinkImports();
+  renderRelinkExports();
+  setStatus(`Cleared ${removed} import artifact(s).`);
+}
+function deleteRelinkExport(exportId){
+  const entry=state.relinkExports.find((row)=>row.id===exportId);
+  if(!entry) return;
+  if(!confirm(`Delete resolved export "${entry.name||'Resolved Export'}"?`)) return;
+  state.relinkExports=state.relinkExports.filter((row)=>row.id!==exportId);
+  saveRelinkState();
+  renderRelinkExports();
+  setStatus(`Deleted export "${entry.name||'Resolved Export'}".`);
+}
+function clearRelinkExports(){
+  if(!state.relinkExports.length) return;
+  if(!confirm('Delete all resolved export artifacts?')) return;
+  const removed=state.relinkExports.length;
+  state.relinkExports=[];
+  saveRelinkState();
+  renderRelinkExports();
+  setStatus(`Cleared ${removed} export artifact(s).`);
+}
+async function importRelinkBookmarkFile(file){
+  if(!file) return;
+  try{
+    const html=await file.text();
+    const sourceRows=parseBookmarkExportHtml(html);
+    const summary={
+      total:sourceRows.length,
+      resolved:0,
+      unchanged:0,
+      external:0,
+    };
+    state.relinkImports.push({
+      id:`relink-import-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,
+      name:file.name||`bookmark-import-${Date.now()}.html`,
+      imported_at:new Date().toISOString(),
+      source_format:'netscape-html',
+      source_browser:detectBookmarkSourceBrowser(html),
+      status:'imported',
+      source_rows:sourceRows,
+      summary,
+    });
+    state.relinkImports=state.relinkImports.slice(-50);
+    saveRelinkState();
+    renderRelinkImports();
+    openAppView('relinking');
+    setStatus(`Imported bookmark HTML and normalized ${summary.total} bookmark(s) in the background.`);
+  }catch(e){
+    setStatus(`Bookmark import failed: ${err(e)}`);
+  }
+}
+function resolveRelinkImport(importId){
+  const entry=state.relinkImports.find((row)=>row.id===importId);
+  if(!entry) return setStatus('Bookmark import not found.');
+  const rows=convertBookmarkRows(entry.source_rows||entry.rows||[]);
+  const summary={
+    total:rows.length,
+    resolved:rows.filter((row)=>row.status==='resolved').length,
+    unchanged:rows.filter((row)=>row.status==='unchanged').length,
+    external:rows.filter((row)=>row.status==='external').length,
+  };
+  const fileStem=String(entry.name||'resolved-bookmarks').replace(/\.[^.]+$/,'');
+  const html=buildBookmarkHtmlFromRows(rows,fileStem);
+  state.relinkExports.push({
+    id:`relink-export-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,
+    source_import_id:entry.id,
+    name:`${fileStem} resolved`,
+    created_at:new Date().toISOString(),
+    source_browser:entry.source_browser||'generic',
+    status:'resolved',
+    file_stem:`${fileStem}-resolved`,
+    rows,
+    html,
+    summary,
+  });
+  state.relinkExports=state.relinkExports.slice(-50);
+  saveRelinkState();
+  renderRelinkExports();
+  downloadBlob(`${fileStem}-resolved.html`,html,'text/html');
+  setStatus(`Resolved ${summary.total} bookmark(s) and exported HTML.`);
 }
 function resolveMigrationTarget(path,site){
   let current=normalizeSpPath(path);
@@ -2831,17 +3101,42 @@ function renderMigrationPanel(){
     if(!rows.length){
       el.migrationLogList.innerHTML='<div class="rounded-lg border border-slate-200 p-2 text-xs text-slate-500 dark:border-slate-700">No migration records yet.</div>';
     }else{
-      rows.forEach((r)=>{
-        const item=document.createElement('div');
-        item.className='rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700';
-        item.innerHTML=`<div class="font-semibold">${escapeHtml(r.operation_type||'move')} · ${escapeHtml(r.item_type||'item')}</div><div class="mt-1 text-slate-500">${escapeHtml(r.old_server_relative_url||'')}</div><div class="mt-1 text-primary">${escapeHtml(r.new_server_relative_url||'')}</div>`;
-        el.migrationLogList.appendChild(item);
-      });
-    }
+    rows.forEach((r)=>{
+      const item=document.createElement('div');
+      item.className='rounded-lg border border-slate-200 p-2 text-xs dark:border-slate-700';
+      item.innerHTML=`<div class="font-semibold">${escapeHtml(r.operation_type||'move')} · ${escapeHtml(r.item_type||'item')}</div><div class="mt-1 text-slate-500">${escapeHtml(r.old_server_relative_url||'')}</div><div class="mt-1 text-primary">${escapeHtml(r.new_server_relative_url||'')}</div>`;
+      const actions=document.createElement('div');
+      actions.className='mt-2 flex flex-wrap gap-2';
+      const deleteBtn=document.createElement('button');
+      deleteBtn.textContent='Delete';
+      deleteBtn.onclick=()=>deleteMigrationRecord(String(r.id||''));
+      actions.appendChild(deleteBtn);
+      item.appendChild(actions);
+      el.migrationLogList.appendChild(item);
+    });
+  }
   }
   if(el.migrationResolveOutput && !el.migrationResolveOutput.dataset.touched){
     el.migrationResolveOutput.textContent=`${state.migrationLog.length} migration record(s) available locally.`;
   }
+}
+function deleteMigrationRecord(recordId){
+  const entry=state.migrationLog.find((row)=>String(row?.id||'')===String(recordId||''));
+  if(!entry) return;
+  if(!confirm('Delete the selected migration activity record?')) return;
+  state.migrationLog=state.migrationLog.filter((row)=>String(row?.id||'')!==String(recordId||''));
+  saveMigrationLog();
+  renderMigrationPanel();
+  setStatus('Deleted selected migration activity.');
+}
+function clearMigrationLog(){
+  if(!state.migrationLog.length) return;
+  if(!confirm('Delete all migration activity records?')) return;
+  const removed=state.migrationLog.length;
+  state.migrationLog=[];
+  saveMigrationLog();
+  renderMigrationPanel();
+  setStatus(`Cleared ${removed} migration record(s).`);
 }
 function renderAiRenameLogPanel(){
   if(!el.aiRenameLogList) return;
@@ -3114,6 +3409,8 @@ function exportConfig(){
     translationEnabled:state.translationEnabled,
     favorites:state.favorites,
     migrationLog:state.migrationLog,
+    relinkImports:state.relinkImports,
+    relinkExports:state.relinkExports,
     aiRenameLog:state.aiRenameLog,
     layouts:state.layouts,
     recent:state.recent,
@@ -3138,6 +3435,8 @@ async function importConfigFromFile(file){
     state.translationEnabled=!!data.translationEnabled;
     state.favorites=Array.isArray(data.favorites)?data.favorites:[];
     state.migrationLog=Array.isArray(data.migrationLog)?data.migrationLog:[];
+    state.relinkImports=Array.isArray(data.relinkImports)?data.relinkImports:[];
+    state.relinkExports=Array.isArray(data.relinkExports)?data.relinkExports:[];
     state.aiRenameLog=Array.isArray(data.aiRenameLog)?data.aiRenameLog:[];
     state.layouts=Array.isArray(data.layouts)?data.layouts:[];
     state.recent=Array.isArray(data.recent)?data.recent:[];
@@ -3148,11 +3447,11 @@ async function importConfigFromFile(file){
       state.activeSessionId=state.sessions[0].id;
     }
     ensureSplitCompareSelection();
-    saveFavorites(); saveMigrationLog(); saveAiRenameLog(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
+    saveFavorites(); saveMigrationLog(); saveRelinkState(); saveAiRenameLog(); saveLayouts(); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent));
     persistSessions();
     el.langInput.value=state.language;
     el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`;
-    renderFavorites(); renderLayouts(); renderLayoutTabs(); renderRecent(); renderSessionTabs(); renderSplitSessions(); renderMigrationPanel(); renderAiRenameLogPanel();
+    renderFavorites(); renderLayouts(); renderLayoutTabs(); renderRecent(); renderSessionTabs(); renderSplitSessions(); renderMigrationPanel(); renderRelinkImports(); renderRelinkExports(); renderAiRenameLogPanel(); renderAppView();
     const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
     await applyWorkspaceSnapshot(active.snapshot||currentWorkspaceSnapshot());
     await refreshSplitView(true);
@@ -3178,6 +3477,8 @@ function wireGlobalEvents(){
   if(el.splitViewToggleBtn) el.splitViewToggleBtn.onclick=()=>toggleSplitView();
   if(el.splitTransferModeBtn) el.splitTransferModeBtn.onclick=()=>toggleSplitTransferMode();
   if(el.splitCompareSessionSelect) el.splitCompareSessionSelect.onchange=()=>changeSplitCompareSession(el.splitCompareSessionSelect.value);
+  if(el.appWorkspaceTabBtn) el.appWorkspaceTabBtn.onclick=()=>openAppView('workspace');
+  if(el.appRelinkingTabBtn) el.appRelinkingTabBtn.onclick=()=>openAppView('relinking');
   if(el.openSettingsBtn) el.openSettingsBtn.onclick=()=>openSettingsModal();
   if(el.settingsCloseBtn) el.settingsCloseBtn.onclick=()=>closeSettingsModal();
   if(el.settingsApplyBtn) el.settingsApplyBtn.onclick=async()=>{ await applySettingsFromModal(); closeSettingsModal(); };
@@ -3232,9 +3533,11 @@ function wireGlobalEvents(){
   if(el.aiRenameFilterInput) el.aiRenameFilterInput.oninput=renderAiRenameLogPanel;
   if(el.migrationImportBtn) el.migrationImportBtn.onclick=()=>el.migrationImportInput?.click();
   if(el.migrationImportInput) el.migrationImportInput.onchange=async()=>{ const f=el.migrationImportInput.files&&el.migrationImportInput.files[0]; await importMigrationLogFile(f); el.migrationImportInput.value=''; };
-  if(el.migrationConvertBookmarkJsonBtn) el.migrationConvertBookmarkJsonBtn.onclick=()=>{ state.migrationBookmarkExportFormat='json'; el.migrationBookmarkInput?.click(); };
-  if(el.migrationConvertBookmarkCsvBtn) el.migrationConvertBookmarkCsvBtn.onclick=()=>{ state.migrationBookmarkExportFormat='csv'; el.migrationBookmarkInput?.click(); };
-  if(el.migrationBookmarkInput) el.migrationBookmarkInput.onchange=async()=>{ const f=el.migrationBookmarkInput.files&&el.migrationBookmarkInput.files[0]; await convertBookmarkExportFile(f,state.migrationBookmarkExportFormat||'json'); el.migrationBookmarkInput.value=''; };
+  if(el.migrationClearBtn) el.migrationClearBtn.onclick=clearMigrationLog;
+  if(el.relinkImportHtmlBtn) el.relinkImportHtmlBtn.onclick=()=>el.relinkImportHtmlInput?.click();
+  if(el.relinkImportHtmlInput) el.relinkImportHtmlInput.onchange=async()=>{ const f=el.relinkImportHtmlInput.files&&el.relinkImportHtmlInput.files[0]; await importRelinkBookmarkFile(f); el.relinkImportHtmlInput.value=''; };
+  if(el.relinkClearImportsBtn) el.relinkClearImportsBtn.onclick=clearRelinkImports;
+  if(el.relinkClearExportsBtn) el.relinkClearExportsBtn.onclick=clearRelinkExports;
   if(el.migrationCopyResolvedBtn) el.migrationCopyResolvedBtn.onclick=copyResolvedMigrationValue;
   if(el.migrationOpenResolvedBtn) el.migrationOpenResolvedBtn.onclick=openResolvedMigrationValue;
   if(el.migrationExportJsonBtn) el.migrationExportJsonBtn.onclick=exportMigrationLogJson;
@@ -3275,7 +3578,7 @@ async function init(){
   loadAutomationRules(); renderAutomationRules();
   loadSearchFilters(); renderSearchFilters(); renderSearchResults();
   loadJobsState(); renderJobs();
-  loadFavorites(); loadMigrationLog(); loadAiRenameLog(); renderFavorites(); renderMigrationPanel(); renderAiRenameLogPanel(); loadLayouts(); renderLayouts(); loadRecent(); renderRecent();
+  loadFavorites(); loadMigrationLog(); loadRelinkState(); loadAppView(); loadAiRenameLog(); renderFavorites(); renderMigrationPanel(); renderRelinkImports(); renderRelinkExports(); renderAiRenameLogPanel(); renderAppView(); loadLayouts(); renderLayouts(); loadRecent(); renderRecent();
   loadSessions(); renderSessionTabs();
   const active = state.sessions.find(s=>s.id===state.activeSessionId) || state.sessions[0];
   await applyWorkspaceSnapshot(active.snapshot || currentWorkspaceSnapshot());
