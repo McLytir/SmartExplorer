@@ -51,7 +51,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
-  win.loadURL(`${BACKEND_URL}/web/index.html`);
+  try {
+    win.webContents.session.clearCache().catch(() => {});
+  } catch (_) {}
+  const cacheBust = `v=${Date.now()}`;
+  win.loadURL(`${BACKEND_URL}/web/index.html?${cacheBust}`);
   mainWindow = win;
 }
 
