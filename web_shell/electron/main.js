@@ -61,7 +61,7 @@ function createWindow() {
 
 function extractSharePointCookies(allCookies, host) {
   const tenantHost = String(host || '').toLowerCase();
-  const out = {};
+  const out = [];
   for (const c of allCookies || []) {
     const name = String(c?.name || '').trim();
     const value = String(c?.value || '');
@@ -73,13 +73,25 @@ function extractSharePointCookies(allCookies, host) {
       domain.endsWith('microsoftonline.com') ||
       domain.endsWith('office.com') ||
       domain.endsWith('live.com');
-    if (hostMatch || commonMatch) out[name] = value;
+    if (!hostMatch && !commonMatch) continue;
+    out.push({
+      name,
+      value,
+      domain: String(c?.domain || '').trim() || null,
+      path: String(c?.path || '/').trim() || '/',
+      secure: Boolean(c?.secure),
+      http_only: Boolean(c?.httpOnly),
+      expires_at:
+        Number.isFinite(c?.expirationDate) && Number(c.expirationDate) > 0
+          ? Number(c.expirationDate)
+          : null,
+    });
   }
   return out;
 }
 
 function hasAuthCookies(cookies) {
-  const keys = Object.keys(cookies || {}).map((k) => k.toLowerCase());
+  const keys = (cookies || []).map((item) => String(item?.name || '').toLowerCase());
   if (keys.includes('fedauth') && keys.includes('rtfa')) return true;
   return keys.includes('spoidcrl') || keys.includes('spoidcrlid');
 }
@@ -99,9 +111,25 @@ async function postJson(url, body) {
   return {};
 }
 
-async function persistSharePointAuth(baseUrl, cookies) {
+async function persistSharePointAuth(baseUrl, cookieRecords) {
   await postJson(`${BACKEND_URL}/api/settings`, { sp_base_url: baseUrl });
-  await postJson(`${BACKEND_URL}/api/sp/cookies`, { base_url: baseUrl, cookies });
+  await postJson(`${BACKEND_URL}/api/sp/cookies`, { base_url: baseUrl, cookie_records: cookieRecords });
+}
+
+async function syncPersistedSharePointAuth() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/settings`);
+    if (!res.ok) return;
+    const settings = await res.json();
+    const baseUrl = String(settings?.sp_base_url || '').trim();
+    if (!baseUrl) return;
+    const parsed = new URL(baseUrl);
+    const authSession = session.fromPartition('persist:smx-sp-auth');
+    const all = await authSession.cookies.get({});
+    const cookieRecords = extractSharePointCookies(all, parsed.host);
+    if (!hasAuthCookies(cookieRecords)) return;
+    await persistSharePointAuth(baseUrl, cookieRecords);
+  } catch (_) {}
 }
 
 async function runEmbeddedSharePointAuth(baseUrl) {
@@ -141,12 +169,12 @@ async function runEmbeddedSharePointAuth(baseUrl) {
   const tryCapture = async () => {
     if (done) return null;
     const all = await authSession.cookies.get({});
-    const jar = extractSharePointCookies(all, parsed.host);
-    if (!hasAuthCookies(jar)) return null;
-    await persistSharePointAuth(baseUrl, jar);
+    const cookieRecords = extractSharePointCookies(all, parsed.host);
+    if (!hasAuthCookies(cookieRecords)) return null;
+    await persistSharePointAuth(baseUrl, cookieRecords);
     return finish(true, {
-      message: `Captured ${Object.keys(jar).length} cookie(s) from embedded SharePoint sign-in.`,
-      count: Object.keys(jar).length,
+      message: `Captured ${cookieRecords.length} cookie(s) from embedded SharePoint sign-in.`,
+      count: cookieRecords.length,
     });
   };
 
@@ -195,6 +223,7 @@ ipcMain.handle('smx:sp-auth-flow', async (_evt, payload) => {
 app.whenReady().then(async () => {
   try {
     await ensureBackend();
+    await syncPersistedSharePointAuth();
     createWindow();
   } catch (err) {
     console.error(err);

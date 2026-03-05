@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import httpx
 import os
 
@@ -45,12 +45,20 @@ class BackendClient:
     def update_settings(self, **kwargs) -> dict:
         return self.post("/api/settings", json=kwargs)
 
-    def set_sp_cookies(self, base_url: str, cookies: Optional[Dict[str, str]] = None, cookie_header: Optional[str] = None) -> dict:
+    def set_sp_cookies(
+        self,
+        base_url: str,
+        cookies: Optional[Dict[str, str]] = None,
+        cookie_header: Optional[str] = None,
+        cookie_records: Optional[List[dict]] = None,
+    ) -> dict:
         payload = {"base_url": base_url}
         if cookies:
             payload["cookies"] = cookies
         if cookie_header:
             payload["cookie_header"] = cookie_header
+        if cookie_records:
+            payload["cookie_records"] = cookie_records
         return self.post("/api/sp/cookies", json=payload)
 
     def sp_list(self, site_relative_url: str, folder_server_relative_url: str) -> dict:

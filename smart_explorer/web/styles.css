@@ -186,6 +186,16 @@ button:focus-visible {
   background: rgba(6, 13, 24, 0.85);
 }
 
+.pane-head select {
+  color: #000000;
+  background: #ffffff;
+}
+
+.pane-head select option {
+  color: #000000;
+  background: #ffffff;
+}
+
 .pane-filter-row {
   padding: 7px 8px;
   border-bottom: 1px solid rgba(125, 167, 224, 0.17);

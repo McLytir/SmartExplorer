@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 try:
     import browser_cookie3  # type: ignore
@@ -16,7 +16,7 @@ def get_last_capture_hint() -> str | None:
     return _LAST_CAPTURE_HINT
 
 
-def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
+def collect_sharepoint_cookie_records(netloc: str) -> List[dict]:
     """
     Attempt to load SharePoint cookies (FedAuth, rtFa) from common desktop browsers.
     netloc should be the hostname portion of the SharePoint site.
@@ -66,7 +66,7 @@ def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
         "spoidcrl": "SPOIDCRL",
         "spoidcrlid": "SPOIDCRLID",
     }
-    cookies: Dict[str, str] = {}
+    cookies: Dict[str, dict] = {}
 
     def _domain_matches(cookie_domain: str, host: str) -> bool:
         d = (cookie_domain or "").lstrip(".").lower()
@@ -90,7 +90,20 @@ def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
                 continue
             # Accept tenant-host cookies and parent sharepoint-domain cookies.
             if _domain_matches(domain, tenant_host) or _domain_matches(domain, parent_host):
-                cookies[canonical] = value
+                expires_raw = getattr(cookie, "expires", None)
+                try:
+                    expires_at = float(expires_raw) if expires_raw not in (None, "", 0) else None
+                except Exception:
+                    expires_at = None
+                cookies[canonical] = {
+                    "name": canonical,
+                    "value": value,
+                    "domain": domain or None,
+                    "path": (getattr(cookie, "path", None) or "/"),
+                    "secure": bool(getattr(cookie, "secure", True)),
+                    "http_only": False,
+                    "expires_at": expires_at,
+                }
 
     def _has_minimum_auth() -> bool:
         # Prefer classic pair when present.
@@ -234,4 +247,12 @@ def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
             if _has_minimum_auth():
                 break
 
-    return cookies
+    return list(cookies.values())
+
+
+def collect_sharepoint_cookies(netloc: str) -> Dict[str, str]:
+    return {
+        str(record.get("name") or ""): str(record.get("value") or "")
+        for record in collect_sharepoint_cookie_records(netloc)
+        if record.get("name") and record.get("value") is not None
+    }

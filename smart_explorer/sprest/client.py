@@ -4,8 +4,8 @@ import json
 import os
 import time
 import urllib.parse
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -13,7 +13,38 @@ import httpx
 COOKIES_FILE = "sp_cookies.json"
 
 
-def _load_cookies() -> Dict[str, Dict[str, str]]:
+@dataclass
+class CookieRecord:
+    name: str
+    value: str
+    domain: Optional[str] = None
+    path: str = "/"
+    secure: bool = True
+    http_only: bool = False
+    expires_at: Optional[float] = None
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "CookieRecord":
+        expires_raw = data.get("expires_at")
+        try:
+            expires_at = float(expires_raw) if expires_raw not in (None, "", 0) else None
+        except Exception:
+            expires_at = None
+        return CookieRecord(
+            name=str(data.get("name") or "").strip(),
+            value=str(data.get("value") or ""),
+            domain=str(data.get("domain") or "").strip() or None,
+            path=str(data.get("path") or "/").strip() or "/",
+            secure=bool(data.get("secure", True)),
+            http_only=bool(data.get("http_only", False)),
+            expires_at=expires_at,
+        )
+
+    def expired(self) -> bool:
+        return self.expires_at is not None and self.expires_at <= time.time()
+
+
+def _load_cookies() -> Dict[str, Any]:
     try:
         if os.path.exists(COOKIES_FILE):
             with open(COOKIES_FILE, "r", encoding="utf-8") as f:
@@ -23,7 +54,7 @@ def _load_cookies() -> Dict[str, Dict[str, str]]:
     return {}
 
 
-def _save_cookies(data: Dict[str, Dict[str, str]]) -> None:
+def _save_cookies(data: Dict[str, Any]) -> None:
     try:
         tmp = COOKIES_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -56,29 +87,54 @@ class SharePointClient:
 
     # Cookies management
     def set_cookies_from_header(self, cookie_header: str) -> None:
-        jar: Dict[str, str] = {}
+        records: List[CookieRecord] = []
         parts = [p.strip() for p in cookie_header.split(";") if p.strip()]
         for p in parts:
             if "=" in p:
                 k, v = p.split("=", 1)
                 if k.lower() in ("fedauth", "rtfa") or k.isalpha():
-                    jar[k] = v
-        self._cookies_store[self._cookie_store_key()] = jar
-        _save_cookies(self._cookies_store)
+                    records.append(self._build_cookie_record(k, v))
+        self._set_cookie_records(records)
 
     def set_cookie(self, name: str, value: str) -> None:
-        jar = self._cookies_store.setdefault(self._cookie_store_key(), {})
-        jar[name] = value
-        _save_cookies(self._cookies_store)
+        self._upsert_cookie_record(self._build_cookie_record(name, value))
+
+    def set_cookie_record(
+        self,
+        name: str,
+        value: str,
+        *,
+        domain: Optional[str] = None,
+        path: str = "/",
+        secure: bool = True,
+        http_only: bool = False,
+        expires_at: Optional[float] = None,
+    ) -> None:
+        self._upsert_cookie_record(
+            CookieRecord(
+                name=str(name or "").strip(),
+                value=str(value or ""),
+                domain=str(domain or "").strip() or None,
+                path=str(path or "/").strip() or "/",
+                secure=bool(secure),
+                http_only=bool(http_only),
+                expires_at=expires_at,
+            )
+        )
 
     def has_cookies(self) -> bool:
-        return bool(self._cookies_store.get(self._cookie_store_key()))
+        return bool(self._cookie_records())
 
     def _http(self) -> httpx.Client:
         cookies = httpx.Cookies()
-        domain = urllib.parse.urlparse(self._resource_base).hostname
-        for k, v in (self._cookies_store.get(self._cookie_store_key()) or {}).items():
-            cookies.set(k, v, domain=domain)
+        default_domain = urllib.parse.urlparse(self._resource_base).hostname
+        for record in self._cookie_records():
+            cookies.set(
+                record.name,
+                record.value,
+                domain=record.domain or default_domain,
+                path=record.path or "/",
+            )
         return httpx.Client(cookies=cookies, timeout=30.0, headers={
             "Accept": "application/json;odata=nometadata",
             "User-Agent": "SmartExplorer/0.1",
@@ -865,3 +921,77 @@ class SharePointClient:
 
     def _cookie_store_key(self) -> str:
         return self._resource_base
+
+    def _default_cookie_domain(self) -> Optional[str]:
+        return urllib.parse.urlparse(self._resource_base).hostname
+
+    def _build_cookie_record(self, name: str, value: str) -> CookieRecord:
+        return CookieRecord(
+            name=str(name or "").strip(),
+            value=str(value or ""),
+            domain=self._default_cookie_domain(),
+            path="/",
+            secure=True,
+            http_only=False,
+            expires_at=None,
+        )
+
+    def _normalize_cookie_records(self, entry: Any) -> List[CookieRecord]:
+        records: List[CookieRecord] = []
+        if isinstance(entry, dict):
+            if isinstance(entry.get("cookies"), list):
+                for item in entry.get("cookies") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        record = CookieRecord.from_dict(item)
+                    except Exception:
+                        continue
+                    if record.name and record.value and not record.expired():
+                        records.append(record)
+                return records
+            for name, value in entry.items():
+                if isinstance(name, str) and isinstance(value, str) and name != "cookies":
+                    record = self._build_cookie_record(name, value)
+                    if record.name and record.value:
+                        records.append(record)
+        return records
+
+    def _cookie_records(self) -> List[CookieRecord]:
+        key = self._cookie_store_key()
+        entry = self._cookies_store.get(key)
+        records = self._normalize_cookie_records(entry)
+        normalized_entry = {"cookies": [asdict(record) for record in records]}
+        if entry != normalized_entry:
+            self._cookies_store[key] = normalized_entry
+            _save_cookies(self._cookies_store)
+        return records
+
+    def _set_cookie_records(self, records: List[CookieRecord]) -> None:
+        unique: Dict[tuple[str, str, str], CookieRecord] = {}
+        for record in records:
+            if not record.name or not record.value or record.expired():
+                continue
+            domain = record.domain or self._default_cookie_domain() or ""
+            path = record.path or "/"
+            record.domain = domain or None
+            record.path = path
+            unique[(record.name, domain, path)] = record
+        self._cookies_store[self._cookie_store_key()] = {
+            "cookies": [asdict(record) for record in unique.values()]
+        }
+        _save_cookies(self._cookies_store)
+
+    def _upsert_cookie_record(self, record: CookieRecord) -> None:
+        records = self._cookie_records()
+        merged: Dict[tuple[str, str, str], CookieRecord] = {}
+        for item in records:
+            domain = item.domain or ""
+            path = item.path or "/"
+            merged[(item.name, domain, path)] = item
+        domain = record.domain or self._default_cookie_domain() or ""
+        path = record.path or "/"
+        record.domain = domain or None
+        record.path = path
+        merged[(record.name, domain, path)] = record
+        self._set_cookie_records(list(merged.values()))

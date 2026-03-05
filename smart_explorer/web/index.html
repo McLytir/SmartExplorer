@@ -74,18 +74,42 @@
       </div>
     </header>
 
-    <div class="border-b border-slate-200 px-4 py-2 dark:border-slate-800">
-      <div class="flex items-center gap-2 overflow-x-auto">
-        <div class="mr-3 flex items-center gap-2">
+    <div id="appModeBar" class="border-b border-slate-200 px-4 py-2 dark:border-slate-800">
+      <div class="flex items-center justify-between gap-3 overflow-x-auto">
+        <div class="flex items-center gap-2">
           <button id="appWorkspaceTabBtn" class="rounded-full border border-slate-300 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary dark:border-slate-700">Workspace</button>
           <button id="appRelinkingTabBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Relinking</button>
         </div>
+        <div class="flex items-center gap-2">
+          <button id="splitViewToggleBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Split View: Off</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="sessionBar" class="border-b border-slate-200 px-4 py-2 dark:border-slate-800">
+      <div class="flex items-center gap-2 overflow-x-auto">
         <div id="sessionTabs" class="flex items-center gap-2"></div>
         <button id="newSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">+ New Session</button>
         <button id="duplicateSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Duplicate</button>
         <button id="renameSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Rename</button>
         <button id="closeSessionBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Close</button>
-        <button id="splitViewToggleBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Split View: Off</button>
+      </div>
+    </div>
+
+    <div id="workspaceToolsBar" class="border-b border-slate-200 px-4 py-2 dark:border-slate-800">
+      <div class="flex items-center gap-2 overflow-x-auto">
+        <button id="copyBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Copy</button>
+        <button id="cutBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Cut</button>
+        <button id="pasteBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Paste</button>
+        <button id="renameBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Rename</button>
+        <button id="aiRenameBtn" class="rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">AI Rename</button>
+        <button id="deleteBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Delete</button>
+        <button id="mkdirBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">New Folder</button>
+        <button id="openBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Open</button>
+        <button id="revealBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Reveal</button>
+        <button id="previewBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Preview</button>
+        <button id="renameTranslatedBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Apply Translation Rename</button>
+        <button id="undoRenameBtn" class="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Undo Rename</button>
         <button id="splitTransferModeBtn" class="hidden rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700">Split Drop: Copy</button>
         <select id="splitCompareSessionSelect" class="hidden rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700"></select>
         <div id="layoutTabs" class="ml-2 flex items-center gap-2"></div>
@@ -228,7 +252,6 @@
             </div>
 
             <div class="space-y-2">
-              <button id="previewBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Preview Selected</button>
               <button id="summaryBtn" class="w-full rounded-xl border border-primary/30 bg-primary/10 px-3 py-2 text-left text-sm text-primary">Summarize File</button>
               <button id="extractBtn" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-left text-sm dark:border-slate-700">Extract Text</button>
             </div>
@@ -236,20 +259,6 @@
             <div class="mt-3 flex gap-2">
               <input id="questionInput" type="text" class="flex-1 rounded-lg border-slate-300 text-sm dark:border-slate-700" placeholder="Ask AI assistant" />
               <button id="askBtn" class="rounded-lg bg-primary px-3 py-2 text-sm text-white">Ask</button>
-            </div>
-
-            <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
-              <button id="copyBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Copy</button>
-              <button id="cutBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Cut</button>
-              <button id="pasteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Paste</button>
-              <button id="renameBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Rename</button>
-              <button id="aiRenameBtn" class="rounded-md border border-primary/30 bg-primary/10 p-2 text-primary">AI Rename</button>
-              <button id="deleteBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Delete</button>
-              <button id="mkdirBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">New Folder</button>
-              <button id="openBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Open</button>
-              <button id="revealBtn" class="rounded-md border border-slate-300 p-2 dark:border-slate-700">Reveal</button>
-              <button id="renameTranslatedBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Apply Translation Rename</button>
-              <button id="undoRenameBtn" class="col-span-2 rounded-md border border-slate-300 p-2 dark:border-slate-700">Undo Rename</button>
             </div>
 
             <div class="mt-4 rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-800">
@@ -373,10 +382,49 @@
         </section>
 
         <section class="settings-section">
+          <h4>AI Engine</h4>
+          <label class="settings-field">
+            <span>Provider</span>
+            <select id="aiProviderSelect">
+              <option value="openai">OpenAI</option>
+              <option value="claude">Claude</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>Model</span>
+            <select id="aiModelInput"></select>
+          </label>
+          <label class="settings-field">
+            <span>OpenAI API Key</span>
+            <input id="openAiApiKeyInput" type="password" placeholder="Enter or replace OpenAI key" autocomplete="new-password" />
+          </label>
+          <label class="settings-field">
+            <span>Claude API Key</span>
+            <input id="claudeApiKeyInput" type="password" placeholder="Enter or replace Claude key" autocomplete="new-password" />
+          </label>
+          <label class="settings-field">
+            <span>Gemini API Key</span>
+            <input id="geminiApiKeyInput" type="password" placeholder="Enter or replace Gemini key" autocomplete="new-password" />
+          </label>
+          <div class="row">
+            <button id="aiProviderSaveBtn" type="button">Save AI Settings</button>
+            <button id="openAiApiKeyClearBtn" type="button">Clear OpenAI Key</button>
+            <button id="claudeApiKeyClearBtn" type="button">Clear Claude Key</button>
+            <button id="geminiApiKeyClearBtn" type="button">Clear Gemini Key</button>
+          </div>
+          <pre id="aiApiKeyState">Key status: unknown</pre>
+        </section>
+
+        <section class="settings-section">
           <h4>SharePoint Access</h4>
           <label class="settings-field">
             <span>Site URL</span>
             <input id="spBaseUrlInput" type="text" placeholder="https://tenant.sharepoint.com/sites/SiteName" />
+          </label>
+          <label class="settings-field">
+            <span>Site List (one per line)</span>
+            <textarea id="spSitesListInput" rows="4" placeholder="/sites/PeakEnergyJapan42&#10;/sites/PeakEnergy&#10;https://tenant.sharepoint.com/sites/AnotherSite"></textarea>
           </label>
           <label class="settings-field">
             <span>Cookie Header</span>
@@ -415,14 +463,14 @@
   <script>
     (function () {
       const required = [
-        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","appRelinkingTabBtn","appWorkspaceTabBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","inspectorActionsPanel","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","mainWorkspaceView","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","migrationBookmarkInput","migrationClearBtn","migrationCopyResolvedBtn","migrationExportCsvBtn","migrationExportJsonBtn","migrationFilterInput","migrationImportBtn","migrationImportInput","migrationLogList","migrationOpenResolvedBtn","migrationResolveBtn","migrationResolveInput","migrationResolveOutput","mkdirBtn","newSessionBtn","notificationsList","openBtn","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","relinkClearExportsBtn","relinkClearImportsBtn","relinkExportsList","relinkImportHtmlBtn","relinkImportHtmlInput","relinkImportsList","relinkingWorkspaceView","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","splitSessionsHost","splitTransferModeBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
+        "addFavoriteBtn","addGlossaryBtn","addRuleBtn","aiApiKeyState","aiModelInput","aiProviderSaveBtn","aiProviderSelect","appRelinkingTabBtn","appWorkspaceTabBtn","applyRulesBtn","askBtn","bulkConflictPolicy","bulkDryRunBtn","bulkDryRunOutput","bulkOpType","bulkQueueBtn","bulkTargetPane","checkinBtn","checkoutBtn","claudeApiKeyClearBtn","claudeApiKeyInput","clearNotificationsBtn","closeSessionBtn","copyBtn","cutBtn","deleteBtn","desktopNotifyBtn","downloadVersionBtn","duplicateSessionBtn","exportConfigBtn","extractBtn","favoriteNameInput","favoritesList","geminiApiKeyClearBtn","geminiApiKeyInput","glossaryList","glossarySourceInput","glossaryTargetInput","importConfigBtn","importConfigInput","inspectorActionsPanel","jobsCancelBtn","jobsClearFinishedBtn","jobsExportBtn","jobsList","jobsPauseBtn","jobsResumeBtn","jobsRetryFailedBtn","langInput","layoutNameInput","layoutsList","layoutTabs","leftFilterInput","leftGo","leftKind","leftLibrary","leftList","leftPath","leftSite","leftUploadBtn","leftUploadInput","loadVersionsBtn","mainWorkspaceView","metadataApplyBtn","metadataDiff","metadataForm","metadataInput","metadataLoadBtn","metadataOutput","metadataValidation","migrationBookmarkInput","migrationClearBtn","migrationCopyResolvedBtn","migrationExportCsvBtn","migrationExportJsonBtn","migrationFilterInput","migrationImportBtn","migrationImportInput","migrationLogList","migrationOpenResolvedBtn","migrationResolveBtn","migrationResolveInput","migrationResolveOutput","mkdirBtn","newSessionBtn","notificationsList","openBtn","openAiApiKeyClearBtn","openAiApiKeyInput","opLogOutput","pasteBtn","pdfBookmarkAddBtn","pdfBookmarksList","pdfJumpBtn","pdfPageInput","permissionsBtn","permissionsOutput","previewBtn","previewFrame","previewText","propertiesBtn","propertiesOutput","questionInput","queueMetrics","recentList","relinkClearExportsBtn","relinkClearImportsBtn","relinkExportsList","relinkImportHtmlBtn","relinkImportHtmlInput","relinkImportsList","relinkingWorkspaceView","renameBtn","renamePreviewCancelBtn","renamePreviewConflicts","renamePreviewModal","renamePreviewProceedBtn","renamePreviewSummary","renameSessionBtn","renameTranslatedBtn","resetShortcutsBtn","restoreVersionBtn","revealBtn","rightFilterInput","rightGo","rightKind","rightLibrary","rightList","rightPath","rightSite","rightUploadBtn","rightUploadInput","ruleActionSelect","ruleMatchInput","rulesList","ruleValueInput","saveFavoriteBtn","saveLayoutBtn","saveShortcutsBtn","saveTagsBtn","scCopy","scCut","scDelete","scMkdir","scPaste","scRefresh","scRename","searchExtInput","searchFilterDeleteBtn","searchFilterSaveBtn","searchFilterSelect","searchIncludeLocal","searchIncludeSp","searchMaxInput","searchQueryInput","searchResults","searchRunBtn","searchTagsBtn","sessionTabs","spAuthState","spBaseUrlInput","spSitesListInput","spCookieHeaderInput","spEmbeddedSigninBtn","spRefreshAuthBtn","spSaveAuthBtn","splitSessionsHost","splitTransferModeBtn","status","summaryBtn","tagInput","tagResults","tagSearchInput","toggleTranslateBtn","transferPreviewCancelBtn","transferPreviewConflicts","transferPreviewList","transferPreviewModal","transferPreviewProceedBtn","transferPreviewSummary","transferSelectNoneBtn","transferSelectSafeBtn","uiVersionSelect","undoCheckoutBtn","undoRenameBtn","versionsOutput","versionsSelect"
       ];
 
       const mount = document.getElementById("compatMount");
       if (!mount) return;
 
       const fileInputs = new Set(["importConfigInput", "leftUploadInput", "rightUploadInput"]);
-      const textareas = new Set(["spCookieHeaderInput", "metadataInput"]);
+      const textareas = new Set(["spSitesListInput", "spCookieHeaderInput", "metadataInput"]);
       const checks = new Set(["searchIncludeLocal", "searchIncludeSp"]);
       const numbers = new Set(["searchMaxInput", "pdfPageInput"]);
       const selects = new Set(["leftKind","rightKind","leftSite","leftLibrary","rightSite","rightLibrary","bulkOpType","bulkTargetPane","bulkConflictPolicy","searchFilterSelect","ruleActionSelect","versionsSelect","uiVersionSelect"]);

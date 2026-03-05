@@ -8,11 +8,7 @@ from dataclasses import dataclass
 from typing import List, Sequence
 
 from .ai_summary import extract_text_snippet
-
-try:
-    from openai import OpenAI  # type: ignore
-except Exception:  # pragma: no cover - optional
-    OpenAI = None  # type: ignore
+from .ai_provider import AIProviderClient, AIProviderError
 
 
 class RenamePlanningError(RuntimeError):
@@ -33,23 +29,23 @@ class AIRenamePlanner:
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini",
+        provider: str = "openai",
+        model: str = "gpt-4.1-mini",
         *,
         max_chars: int = 1200,
         timeout: float | None = 60.0,
     ) -> None:
         if not api_key:
             raise ValueError("API key is required for rename planning.")
-        if OpenAI is None:
-            raise RenamePlanningError("openai package is not available.")
-        client_kwargs = {"api_key": api_key}
-        if timeout:
-            client_kwargs["timeout"] = timeout
         try:
-            self._client = OpenAI(**client_kwargs)
-        except TypeError:
-            client_kwargs.pop("timeout", None)
-            self._client = OpenAI(**client_kwargs)
+            self._client = AIProviderClient(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                timeout=timeout,
+            )
+        except AIProviderError as exc:
+            raise RenamePlanningError(str(exc)) from exc
         self._model = model
         self._max_chars = max(200, int(max_chars))
 
@@ -134,35 +130,14 @@ class AIRenamePlanner:
     def _call_openai(self, system_prompt: str, payload: dict) -> str:
         body = json.dumps(payload, ensure_ascii=False)
         try:
-            response = self._client.responses.create(
-                model=self._model,
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": body},
-                ],
-                response_format={"type": "json_object"},
+            return self._client.generate_text(
+                system_prompt=system_prompt,
+                user_prompt=body,
+                json_mode=True,
                 temperature=0.2,
             )
-            text = response.output_text.strip()
-            if text:
-                return text
-        except Exception:
-            pass
-
-        try:
-            chat = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": body},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2,
-            )
-            content = chat.choices[0].message.content if chat.choices else ""
-            return (content or "").strip()
-        except Exception as exc:  # pragma: no cover - network dependent
-            raise RenamePlanningError(f"OpenAI request failed: {exc}") from exc
+        except AIProviderError as exc:  # pragma: no cover - network dependent
+            raise RenamePlanningError(str(exc)) from exc
 
 
 def _normalize_relative(path: str) -> str:

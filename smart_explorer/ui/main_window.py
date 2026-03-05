@@ -34,6 +34,12 @@ from PySide6.QtWidgets import (
 import logging
 
 from ..api.backend_client import BackendClient
+from ..services.ai_provider import (
+    default_model_for_provider,
+    effective_ai_model,
+    effective_ai_provider,
+    get_provider_api_key,
+)
 from ..services.rename_service import apply_rename, safe_new_name
 from ..services.tag_store import TagStore
 from ..services.ai_summary import AISummarizer
@@ -45,7 +51,7 @@ from ..settings import AppConfig, load_config, save_config
 from ..translation_cache import TranslationCache
 from ..translators.backend_translator import BackendTranslator
 from ..translators.base import IdentityTranslator, Translator
-from ..translators.openai_translator import OpenAITranslator
+from ..translators.ai_translator import AITranslator
 from ..translators.google_free_translator import GoogleFreeTranslator
 from ..translators.libretranslate_translator import LibreTranslateTranslator
 from ..workspaces import (
@@ -62,7 +68,6 @@ from ..workspaces import (
 from .favorites_panel import FavoritesPanel
 from .settings_dialog import SettingsDialog
 from .sharepoint_selector import SharePointSelectorDialog
-from .translation_dialog import TranslationWorkspaceDialog
 from .workspace_pane import WorkspacePane
 from .rename_preview_dialog import RenamePreviewDialog, RenameCandidate
 from .preview_pane import PreviewPane
@@ -88,6 +93,7 @@ class MainWindow(QMainWindow):
         self._workspace_manager: WorkspaceManager = ensure_workspaces(self._cfg)
         self._favorites_manager: FavoritesManager = ensure_favorites(self._cfg)
         self._layouts_manager: LayoutManager = ensure_layouts(self._cfg)
+        self._strip_legacy_translation_workspaces()
         self._tag_store = TagStore()
         self._link_migration_log = LinkMigrationLog()
         self._relinking_store = RelinkingWorkspaceStore()
@@ -105,7 +111,6 @@ class MainWindow(QMainWindow):
         self._preview_enabled: bool = False
         self._preview_widget: Optional[PreviewPane] = None
         self._clipboard: Dict[str, dict] = {}
-        self._selection_sync_block: set[str] = set()
         self._shortcuts: List[QShortcut] = []
         self._address_bar: Optional[QLineEdit] = None
         self._theme_specs = self._build_theme_specs()
@@ -125,6 +130,12 @@ class MainWindow(QMainWindow):
         self._container_layout.setContentsMargins(0, 0, 0, 0)
         self._container_layout.setSpacing(0)
 
+        self._mode_toolbar = self._build_mode_toolbar()
+        self.addToolBar(Qt.TopToolBarArea, self._mode_toolbar)
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self._session_toolbar = self._build_session_toolbar()
+        self.addToolBar(Qt.TopToolBarArea, self._session_toolbar)
+        self.addToolBarBreak(Qt.TopToolBarArea)
         self._toolbar = self._build_toolbar()
         self.addToolBar(Qt.TopToolBarArea, self._toolbar)
         self._build_menus()
@@ -238,8 +249,47 @@ class MainWindow(QMainWindow):
         self._refresh_layout_tabs()
 
     # ------------------------------------------------------------------ UI --
+    def _build_mode_toolbar(self) -> QToolBar:
+        tb = QToolBar("Mode", self)
+        tb.setMovable(False)
+
+        workspace_action = QAction("Workspace", self)
+        workspace_action.triggered.connect(self._open_workspace_tools_tab)
+        tb.addAction(workspace_action)
+
+        relinking_action = QAction("Relinking", self)
+        relinking_action.triggered.connect(self._open_relinking_tab)
+        tb.addAction(relinking_action)
+
+        tb.addSeparator()
+
+        settings_action = QAction("Settings...", self)
+        settings_action.triggered.connect(self._open_settings)
+        tb.addAction(settings_action)
+        return tb
+
+    def _build_session_toolbar(self) -> QToolBar:
+        tb = QToolBar("Sessions", self)
+        tb.setMovable(False)
+        if self._layout_tabs is not None:
+            self._layout_tabs.setMinimumWidth(320)
+            tb.addWidget(self._layout_tabs)
+
+        save_layout = QAction("+ Save Layout", self)
+        save_layout.triggered.connect(self._on_save_layout)
+        tb.addAction(save_layout)
+
+        rename_layout = QAction("Rename Layout", self)
+        rename_layout.triggered.connect(self._rename_selected_layout_from_bar)
+        tb.addAction(rename_layout)
+
+        delete_layout = QAction("Delete Layout", self)
+        delete_layout.triggered.connect(self._delete_selected_layout_from_bar)
+        tb.addAction(delete_layout)
+        return tb
+
     def _build_toolbar(self) -> QToolBar:
-        tb = QToolBar("Workspaces", self)
+        tb = QToolBar("Tools", self)
         tb.setMovable(False)
 
         add_local = QAction("Add Local Pane...", self)
@@ -307,38 +357,6 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        settings = QAction("Settings...", self)
-        settings.triggered.connect(self._open_settings)
-        tb.addAction(settings)
-
-        relinking_action = QAction("Relinking", self)
-        relinking_action.triggered.connect(self._open_relinking_tab)
-        tb.addAction(relinking_action)
-
-        export_link_log = QAction("Export Link Log...", self)
-        export_link_log.triggered.connect(self._export_link_migration_log)
-        tb.addAction(export_link_log)
-
-        view_link_log = QAction("View Link Log...", self)
-        view_link_log.triggered.connect(self._open_link_migration_log)
-        tb.addAction(view_link_log)
-
-        resolve_old_link = QAction("Resolve Old Link...", self)
-        resolve_old_link.triggered.connect(self._open_resolve_old_link_dialog)
-        tb.addAction(resolve_old_link)
-
-        import_link_log = QAction("Import Link Log...", self)
-        import_link_log.triggered.connect(self._import_link_migration_log)
-        tb.addAction(import_link_log)
-
-        view_ai_log = QAction("View AI Rename Log...", self)
-        view_ai_log.triggered.connect(self._open_ai_rename_log)
-        tb.addAction(view_ai_log)
-
-        export_ai_log = QAction("Export AI Rename Log...", self)
-        export_ai_log.triggered.connect(self._export_ai_rename_log)
-        tb.addAction(export_ai_log)
-
         # Toggle preview pane (off by default to avoid clutter)
         toggle_preview = QAction("Preview Pane", self)
         toggle_preview.setCheckable(True)
@@ -400,19 +418,26 @@ class MainWindow(QMainWindow):
         undo_action.triggered.connect(self._undo_last_rename_batch)
         tb.addAction(undo_action)
 
-        # Follow base toggle for translation panes
-        self._follow_toggle = QAction("Follow Base", self)
-        self._follow_toggle.setCheckable(True)
-        self._follow_toggle.setChecked(True)
-        self._follow_toggle.triggered.connect(self._toggle_follow_active)
-        tb.addAction(self._follow_toggle)
-        # Initially disabled until a translation pane is active
-        self._follow_toggle.setEnabled(False)
-
         return tb
 
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
+        view_menu = menu_bar.addMenu("View")
+
+        workspace_action = QAction("Workspace Tools", self)
+        workspace_action.triggered.connect(self._open_workspace_tools_tab)
+        view_menu.addAction(workspace_action)
+
+        relinking_action = QAction("Relinking", self)
+        relinking_action.triggered.connect(self._open_relinking_tab)
+        view_menu.addAction(relinking_action)
+
+        view_menu.addSeparator()
+
+        settings_action = QAction("Settings...", self)
+        settings_action.triggered.connect(self._open_settings)
+        view_menu.addAction(settings_action)
+
         tools_menu = menu_bar.addMenu("Tools")
 
         resolve_old_link = QAction("Resolve Old Link...", self)
@@ -443,15 +468,22 @@ class MainWindow(QMainWindow):
         import_link_log.triggered.connect(self._import_link_migration_log)
         tools_menu.addAction(import_link_log)
 
-        tools_menu.addSeparator()
+    def _strip_legacy_translation_workspaces(self) -> None:
+        definitions = self._workspace_manager.definitions()
+        filtered = [ws.to_config() for ws in definitions if ws.kind != "translation"]
+        if len(filtered) == len(definitions):
+            return
+        if not filtered:
+            filtered = [WorkspaceDefinition(
+                id="ws-local",
+                kind="local",
+                name="Local",
+                root_path=self._cfg.root_path or os.path.expanduser("~"),
+            ).to_config()]
+        self._cfg.workspaces = filtered
+        self._workspace_manager = ensure_workspaces(self._cfg)
+        save_config(self._cfg)
 
-        settings_action = QAction("Settings...", self)
-        settings_action.triggered.connect(self._open_settings)
-        tools_menu.addAction(settings_action)
-
-        relinking_action = QAction("Relinking", self)
-        relinking_action.triggered.connect(self._open_relinking_tab)
-        tools_menu.addAction(relinking_action)
 
     def _install_settings_button(self) -> None:
         button = QToolButton(self)
@@ -481,13 +513,6 @@ class MainWindow(QMainWindow):
             shortcut.activated.connect(lambda checked=False, a=action: self._navigate_active_pane(a))
             self._shortcuts.append(shortcut)
         self._sync_address_bar()
-
-    def _toggle_follow_active(self, checked: bool) -> None:
-        pane = self._active_pane()
-        if not pane or pane.definition.kind != "translation":
-            return
-        pane.set_follow_base(bool(checked))
-        self._on_pane_link_toggled(pane.id, bool(checked))
 
     def _toggle_preview_pane(self, checked: bool) -> None:
         """Create/destroy the preview pane and rebuild the workspace layout."""
@@ -615,19 +640,6 @@ class MainWindow(QMainWindow):
         pane = self._workspace_panes.get(workspace_id)
         if pane:
             pane.set_title(self._display_name_for_pane(pane))
-            # Keep translation panes mirrored to the base pane's path (if linked)
-            if pane.definition.kind != "translation":
-                for dep in self._translation_dependents(workspace_id):
-                    try:
-                        if getattr(dep.definition, "follow_base", True):
-                            dep.set_root_to_path(path, record=False, emit=False)
-                        dep.set_title(self._display_name_for_pane(dep))
-                    except Exception:
-                        pass
-            else:
-                for dep in self._translation_dependents(workspace_id):
-                    dep.set_title(self._display_name_for_pane(dep))
-
             if pane.definition.kind == "sharepoint":
                 normalized = path or "/"
                 if normalized != pane.definition.last_path:
@@ -1019,23 +1031,12 @@ QLabel#SmartCostLabel {{
         panes_in_order: List[WorkspacePane] = []
         base_lookup: Dict[str, WorkspacePane] = {}
 
-        defs = self._workspace_manager.definitions()
-        base_defs = [d for d in defs if d.kind != "translation"]
-        translation_defs = [d for d in defs if d.kind == "translation"]
+        defs = [d for d in self._workspace_manager.definitions() if d.kind != "translation"]
 
-        for definition in base_defs:
+        for definition in defs:
             pane = self._create_workspace_pane(definition, base_lookup)
             self._workspace_panes[definition.id] = pane
             base_lookup[definition.id] = pane
-            panes_in_order.append(pane)
-
-        for definition in translation_defs:
-            try:
-                pane = self._create_workspace_pane(definition, base_lookup)
-            except Exception as exc:
-                QMessageBox.warning(self, "Workspace", f"Failed to create translation workspace '{definition.name}': {exc}")
-                continue
-            self._workspace_panes[definition.id] = pane
             panes_in_order.append(pane)
 
         if not panes_in_order:
@@ -1152,23 +1153,6 @@ QLabel#SmartCostLabel {{
         pane = self._workspace_panes.get(self._active_workspace_id) if self._active_workspace_id else None
         selected = pane.current_items() if pane else []
         self._update_smart_actions_context(pane, selected)
-        # Update follow toggle state/visibility
-        try:
-            if hasattr(self, "_follow_toggle") and self._follow_toggle:
-                if pane and pane.definition.kind == "translation":
-                    self._follow_toggle.setEnabled(True)
-                    self._follow_toggle.setChecked(getattr(pane.definition, "follow_base", True))
-                else:
-                    self._follow_toggle.setEnabled(False)
-        except Exception:
-            pass
-
-    def _translation_dependents(self, base_workspace_id: str) -> List[WorkspacePane]:
-        return [
-            pane
-            for pane in self._workspace_panes.values()
-            if pane.definition.kind == "translation" and pane.definition.base_workspace_id == base_workspace_id
-        ]
 
     def _arrange_favorites_panel(self) -> None:
         if self._main_splitter is not None:
@@ -1199,9 +1183,6 @@ QLabel#SmartCostLabel {{
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
-        # Layout tabs (layouts as quick tabs)
-        if self._layout_tabs is not None:
-            self._container_layout.addWidget(self._layout_tabs)
         self._container_layout.addWidget(splitter, 1)
         self._update_splitter_sizes()
 
@@ -1238,6 +1219,26 @@ QLabel#SmartCostLabel {{
     def _on_layout_tab_clicked(self, index: int) -> None:
         if 0 <= index < len(self._layout_tab_ids):
             self._on_apply_layout(self._layout_tab_ids[index])
+
+    def _selected_layout_id(self) -> Optional[str]:
+        if not self._layout_tabs:
+            return None
+        index = self._layout_tabs.currentIndex()
+        if 0 <= index < len(self._layout_tab_ids):
+            return self._layout_tab_ids[index]
+        return None
+
+    def _rename_selected_layout_from_bar(self) -> None:
+        layout_id = self._selected_layout_id()
+        if not layout_id:
+            return
+        self._on_rename_layout(layout_id)
+
+    def _delete_selected_layout_from_bar(self) -> None:
+        layout_id = self._selected_layout_id()
+        if not layout_id:
+            return
+        self._on_remove_layout(layout_id)
 
     def _update_splitter_sizes(self) -> None:
         if not self._main_splitter:
@@ -1595,6 +1596,12 @@ QLabel#SmartCostLabel {{
     def _open_resolve_old_link_dialog(self) -> None:
         self._open_relinking_tab()
 
+    def _open_workspace_tools_tab(self) -> None:
+        if getattr(self, "_workspace_tools_panel", None) is None:
+            return
+        self._smart_actions_dock.show()
+        self._workspace_tools_panel.open_tab("smart_actions")
+
     def _open_relinking_tab(self) -> None:
         if getattr(self, "_workspace_tools_panel", None) is None:
             return
@@ -1654,7 +1661,7 @@ QLabel#SmartCostLabel {{
             return
         if QMessageBox.question(self, "Layouts", f"Apply layout '{layout.name}'? This will replace current panes.") != QMessageBox.Yes:
             return
-        self._cfg.workspaces = list(layout.workspaces)
+        self._cfg.workspaces = [ws for ws in list(layout.workspaces) if str(ws.get("kind") or "") != "translation"]
         self._workspace_manager = ensure_workspaces(self._cfg)
         self._persist_state()
         self._rebuild_workspace_area()
@@ -1700,10 +1707,6 @@ QLabel#SmartCostLabel {{
         self._rebuild_workspace_area(focus_workspace_id=self._active_workspace_id)
 
     def _convert_workspace_to_local(self, definition: WorkspaceDefinition) -> None:
-        dependents = self._translation_dependents(definition.id)
-        if definition.kind == "translation" and dependents:
-            QMessageBox.warning(self, "Workspace", "Cannot convert a translation workspace that has dependents.")
-            return
         path = QFileDialog.getExistingDirectory(self, "Choose local folder", definition.root_path or os.path.expanduser("~"))
         if not path:
             return
@@ -1719,10 +1722,6 @@ QLabel#SmartCostLabel {{
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
     def _convert_workspace_to_sharepoint(self, definition: WorkspaceDefinition) -> None:
-        dependents = self._translation_dependents(definition.id)
-        if definition.kind == "translation" and dependents:
-            QMessageBox.warning(self, "Workspace", "Cannot convert a translation workspace that has dependents.")
-            return
         dlg = SharePointSelectorDialog(self._backend, self)
         if dlg.exec() != QDialog.Accepted:
             return
@@ -1737,41 +1736,6 @@ QLabel#SmartCostLabel {{
         definition.base_workspace_id = None
         definition.language = None
         definition.name = f"{selection.get('site_title', 'SharePoint')} - {selection.get('library_title', 'Library')}"
-        self._workspace_manager.update(definition)
-        self._persist_state()
-        self._rebuild_workspace_area(focus_workspace_id=definition.id)
-
-    def _convert_workspace_to_translation(self, definition: WorkspaceDefinition) -> None:
-        if definition.kind != "translation" and self._translation_dependents(definition.id):
-            QMessageBox.warning(self, "Workspace", "Cannot convert a workspace that other translations depend on.")
-            return
-        base_options = []
-        for ws in self._workspace_manager.definitions():
-            if ws.id == definition.id or ws.kind not in ("local", "sharepoint"):
-                continue
-            pane2 = self._workspace_panes.get(ws.id)
-            display2 = self._display_name_for_pane(pane2) if pane2 else (getattr(ws, "title_override", None) or ws.name)
-            base_options.append((ws.id, display2))
-        if not base_options:
-            QMessageBox.information(self, "Translation", "Create a local or SharePoint workspace first.")
-            return
-        dlg = TranslationWorkspaceDialog(base_options, self._cfg.target_language or "English", self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        base_id = dlg.base_workspace_id
-        language = dlg.language
-        if base_id == definition.id:
-            QMessageBox.warning(self, "Translation", "A workspace cannot translate itself.")
-            return
-        definition.kind = "translation"
-        definition.base_workspace_id = base_id
-        definition.language = language
-        definition.follow_base = True
-        definition.root_path = None
-        definition.site_relative_url = None
-        definition.server_relative_url = None
-        base_name = dict(base_options).get(base_id, "Workspace")
-        definition.name = f"{base_name} ({language})"
         self._workspace_manager.update(definition)
         self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
@@ -1862,44 +1826,10 @@ QLabel#SmartCostLabel {{
 
     def _register_workspace_signals(self, pane: WorkspacePane) -> None:
         pane.selection_changed.connect(self._on_workspace_selection_changed)
-        pane.expanded_path.connect(self._on_workspace_expanded)
-        pane.collapsed_path.connect(self._on_workspace_collapsed)
         pane.pane_clicked.connect(self._on_pane_clicked)
-        if hasattr(pane, "link_toggled"):
-            pane.link_toggled.connect(self._on_pane_link_toggled)
         if hasattr(pane, "header"):
             pane.header.reorder_requested.connect(self._on_header_reorder)
             pane.header.context_menu_requested.connect(self._on_header_context_menu)
-
-    def _mirror_selection(self, workspace_id: str) -> None:
-        base_pane = self._workspace_panes.get(workspace_id)
-        if not base_pane or base_pane.definition.kind == "translation":
-            return
-        dependents = self._translation_dependents(workspace_id)
-        if not dependents:
-            return
-        if workspace_id in self._selection_sync_block:
-            return
-        self._selection_sync_block.add(workspace_id)
-        try:
-            source_indexes = base_pane.current_source_indexes()
-            paths: List[str] = []
-            for idx in source_indexes:
-                path = base_pane.path_for_source_index(idx)
-                if path:
-                    paths.append(path)
-            for pane in dependents:
-                pane.select_paths(paths)
-        finally:
-            self._selection_sync_block.discard(workspace_id)
-
-    def _on_workspace_expanded(self, workspace_id: str, path: str) -> None:
-        for pane in self._translation_dependents(workspace_id):
-            pane.expand_path(path)
-
-    def _on_workspace_collapsed(self, workspace_id: str, path: str) -> None:
-        for pane in self._translation_dependents(workspace_id):
-            pane.collapse_path(path)
 
     def _attach_context_menu(self, pane: WorkspacePane) -> None:
         def add_action(text, handler=None, *, separator=False):
@@ -1938,10 +1868,7 @@ QLabel#SmartCostLabel {{
         if pane.definition.kind != "local":
             tag_action.setEnabled(False)
         add_action("", separator=True)
-        # Translation group
-        translate_more = add_action("Translate Selection (on-demand)", lambda: self._translate_selection_on_demand(pane))
-        if pane.definition.kind != "translation":
-            translate_more.setEnabled(False)
+        # Translation + AI group
         add_action("Apply Translation Rename", self._apply_translated_rename)
         add_action("AI Rename & Organize...", self._ai_rename_and_organize)
         add_action("", separator=True)
@@ -2204,8 +2131,6 @@ QLabel#SmartCostLabel {{
         menu = QMenu(self)
         local_action = menu.addAction("Switch to Local...")
         sharepoint_action = menu.addAction("Switch to SharePoint...")
-        translation_label = "Configure Translation..." if definition.kind == "translation" else "Switch to Translation..."
-        translation_action = menu.addAction(translation_label)
         menu.addSeparator()
         rename_action = menu.addAction("Rename Pane...")
         reset_title_action = menu.addAction("Reset Auto Title")
@@ -2213,22 +2138,8 @@ QLabel#SmartCostLabel {{
             local_action.setEnabled(False)
         if definition.kind == "sharepoint":
             sharepoint_action.setEnabled(False)
-        if definition.kind != "translation" and not any(ws.kind in ("local", "sharepoint") and ws.id != workspace_id for ws in self._workspace_manager.definitions()):
-            translation_action.setEnabled(False)
-        if definition.kind != "translation" and self._translation_dependents(definition.id):
-            translation_action.setEnabled(False)
         if not getattr(definition, "title_override", None):
             reset_title_action.setEnabled(False)
-
-        # Add link/unlink toggle for translation panes
-        link_action = None
-        if definition.kind == "translation":
-            link_action = menu.addAction("Link to Base Navigation")
-            link_action.setCheckable(True)
-            try:
-                link_action.setChecked(getattr(definition, "follow_base", True))
-            except Exception:
-                link_action.setChecked(True)
 
         action = menu.exec(global_pos)
         if not action:
@@ -2237,16 +2148,6 @@ QLabel#SmartCostLabel {{
             self._convert_workspace_to_local(definition)
         elif action is sharepoint_action:
             self._convert_workspace_to_sharepoint(definition)
-        elif action is translation_action:
-            self._convert_workspace_to_translation(definition)
-        elif link_action is not None and action is link_action:
-            new_state = not getattr(definition, "follow_base", True)
-            definition.follow_base = new_state
-            self._workspace_manager.update(definition)
-            self._persist_state()
-            if new_state and definition.base_workspace_id and definition.base_workspace_id in self._workspace_panes:
-                base = self._workspace_panes[definition.base_workspace_id]
-                pane.set_root_to_path(base.current_path(), record=False, emit=False)
         elif 'rename_action' in locals() and action is rename_action:
             current_title = self._display_name_for_pane(pane)
             new_name, ok = QInputDialog.getText(self, "Rename Pane", "Title:", text=current_title)
@@ -2274,17 +2175,6 @@ QLabel#SmartCostLabel {{
             title = pane.definition.name
         self.statusBar().showMessage(f"{title}: {len(selected)} selected")
         self._update_smart_actions_context(pane, selected)
-        self._mirror_selection(workspace_id)
-        # keep toolbar follow toggle in sync
-        try:
-            if hasattr(self, "_follow_toggle") and self._follow_toggle:
-                if pane.definition.kind == "translation":
-                    self._follow_toggle.setEnabled(True)
-                    self._follow_toggle.setChecked(getattr(pane.definition, "follow_base", True))
-                else:
-                    self._follow_toggle.setEnabled(False)
-        except Exception:
-            pass
 
     def _update_smart_actions_context(self, pane: Optional[WorkspacePane], selected: List[dict]) -> None:
         panel = getattr(self, "_smart_actions_panel", None)
@@ -2614,33 +2504,6 @@ QLabel#SmartCostLabel {{
 
     def _on_pane_clicked(self, workspace_id: str) -> None:
         self._focus_workspace(workspace_id)
-
-    def _on_pane_link_toggled(self, workspace_id: str, follow: bool) -> None:
-        definition = self._workspace_manager.get(workspace_id)
-        pane = self._workspace_panes.get(workspace_id)
-        if not definition or not pane:
-            return
-        try:
-            definition.follow_base = bool(follow)
-            self._workspace_manager.update(definition)
-            self._persist_state()
-        except Exception:
-            pass
-        # update toolbar state
-        try:
-            if hasattr(self, "_follow_toggle") and self._active_workspace_id == workspace_id:
-                self._follow_toggle.setEnabled(True)
-                self._follow_toggle.setChecked(bool(follow))
-        except Exception:
-            pass
-        # if linking now, sync path to base
-        try:
-            if follow and definition.base_workspace_id and definition.base_workspace_id in self._workspace_panes:
-                base = self._workspace_panes[definition.base_workspace_id]
-                pane.set_follow_base(True)
-                pane.set_root_to_path(base.current_path(), record=False, emit=False)
-        except Exception:
-            pass
 
     def _on_workspace_item_activated(self, workspace_id: str, path: str) -> None:
         # If we were given a real local path (e.g., from preview auto-open), open it directly.
@@ -3374,41 +3237,6 @@ QLabel#SmartCostLabel {{
         self._persist_state()
         self._rebuild_workspace_area(focus_workspace_id=definition.id)
 
-    def _add_translation_workspace(self) -> None:
-        base_options = []
-        for ws in self._workspace_manager.definitions():
-            if ws.kind not in ("local", "sharepoint"):
-                continue
-            pane = self._workspace_panes.get(ws.id)
-            display = self._display_name_for_pane(pane) if pane else (getattr(ws, "title_override", None) or ws.name)
-            base_options.append((ws.id, display))
-        if not base_options:
-            QMessageBox.information(self, "Translation", "Create a base workspace (local or SharePoint) first.")
-            return
-        dlg = TranslationWorkspaceDialog(base_options, self._cfg.target_language or "English", self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        base_id = dlg.base_workspace_id
-        language = dlg.language
-        name, ok = QInputDialog.getText(
-            self,
-            "Workspace Name",
-            "Name:",
-            text=f"{dict(base_options).get(base_id, 'Workspace')} ({language})",
-        )
-        if not ok or not name.strip():
-            return
-        definition = WorkspaceDefinition(
-            id=self._workspace_manager.ensure_unique_id("ws-tr"),
-            kind="translation",
-            name=name.strip(),
-            base_workspace_id=base_id,
-            language=language,
-        )
-        self._workspace_manager.add(definition)
-        self._persist_state()
-        self._rebuild_workspace_area(focus_workspace_id=definition.id)
-
     def _remove_active_workspace(self) -> None:
         if not self._active_workspace_id:
             QMessageBox.information(self, "Workspace", "Select a workspace first.")
@@ -3422,7 +3250,7 @@ QLabel#SmartCostLabel {{
         reply = QMessageBox.question(
             self,
             "Remove Workspace",
-            "Remove this workspace (and any translations depending on it)?",
+            "Remove this workspace?",
         )
         if reply != QMessageBox.Yes:
             return
@@ -3449,27 +3277,6 @@ QLabel#SmartCostLabel {{
         if not self._active_workspace_id:
             return None
         return self._workspace_panes.get(self._active_workspace_id)
-
-    def _translate_selection_on_demand(self, pane: WorkspacePane) -> None:
-        if not pane:
-            return
-        if pane.definition.kind != "translation":
-            QMessageBox.information(self, "Translation", "Select a translation workspace to translate more.")
-            return
-        indexes = pane.current_source_indexes()
-        if not indexes:
-            root_idx = pane.root_source_index()
-            if root_idx and root_idx.isValid():
-                indexes = [root_idx]
-        paths: list[str] = []
-        for idx in indexes:
-            path = pane.path_for_source_index(idx)
-            if path:
-                paths.append(path)
-        if not paths:
-            QMessageBox.information(self, "Translation", "No items selected to translate.")
-            return
-        pane.allow_translation_scopes(paths, depth_limit=None)
 
     def _ai_rename_and_organize(self) -> None:
         pane = self._active_pane()
@@ -4501,57 +4308,52 @@ QLabel#SmartCostLabel {{
 
     # ------------------------------------------------------------- settings --
     def _create_summarizer(self) -> Optional[AISummarizer]:
-        key = (self._cfg.api_key or "").strip()
-        try:
-            from ..services import secret_store
-        except Exception:
-            secret_store = None  # type: ignore
-        if not key and secret_store:
-            try:
-                key = secret_store.get_secret("OPENAI_API_KEY") or ""
-            except Exception:
-                key = ""
+        provider = effective_ai_provider(self._cfg)
+        key = get_provider_api_key(provider, cfg=self._cfg)
         if not key:
             return None
         try:
-            return AISummarizer(api_key=key, model=self._cfg.model, timeout=45.0)
+            return AISummarizer(
+                api_key=key,
+                provider=provider,
+                model=effective_ai_model(self._cfg),
+                timeout=45.0,
+            )
         except Exception:
             return None
 
     def _create_tagger(self) -> Optional[AITagger]:
-        key = (self._cfg.api_key or "").strip()
-        try:
-            from ..services import secret_store
-        except Exception:
-            secret_store = None  # type: ignore
-        if not key and secret_store:
-            try:
-                key = secret_store.get_secret("OPENAI_API_KEY") or ""
-            except Exception:
-                key = ""
+        provider = effective_ai_provider(self._cfg)
+        key = get_provider_api_key(provider, cfg=self._cfg)
         if not key:
             return None
         try:
-            return AITagger(api_key=key, model=self._cfg.model, timeout=45.0)
+            return AITagger(
+                api_key=key,
+                provider=provider,
+                model=effective_ai_model(self._cfg),
+                timeout=45.0,
+            )
         except Exception:
             return None
 
     def _create_translator(self) -> Translator:
         provider = getattr(self._cfg, "translator_provider", "auto") or "auto"
-        # Secrets
-        try:
-            from ..services import secret_store
-        except Exception:
-            secret_store = None  # type: ignore
 
         def openai_instance() -> Optional[Translator]:
-            key = (self._cfg.api_key or "").strip()
-            if not key and secret_store:
-                try:
-                    key = secret_store.get_secret("OPENAI_API_KEY") or ""
-                except Exception:
-                    key = ""
-            return OpenAITranslator(api_key=key, model=self._cfg.model) if key else None
+            key = get_provider_api_key("openai", cfg=self._cfg)
+            model = effective_ai_model(self._cfg) if effective_ai_provider(self._cfg) == "openai" else default_model_for_provider("openai")
+            return AITranslator("openai", key, model) if key else None
+
+        def claude_instance() -> Optional[Translator]:
+            key = get_provider_api_key("claude", cfg=self._cfg)
+            model = effective_ai_model(self._cfg) if effective_ai_provider(self._cfg) == "claude" else default_model_for_provider("claude")
+            return AITranslator("claude", key, model) if key else None
+
+        def gemini_instance() -> Optional[Translator]:
+            key = get_provider_api_key("gemini", cfg=self._cfg)
+            model = effective_ai_model(self._cfg) if effective_ai_provider(self._cfg) == "gemini" else default_model_for_provider("gemini")
+            return AITranslator("gemini", key, model) if key else None
 
         def backend_instance() -> Optional[Translator]:
             try:
@@ -4572,17 +4374,22 @@ QLabel#SmartCostLabel {{
             try:
                 base = getattr(self._cfg, "libretranslate_url", None) or "https://libretranslate.de"
                 lt_key = None
-                if secret_store:
-                    try:
-                        lt_key = secret_store.get_secret("LIBRETRANSLATE_API_KEY") or None
-                    except Exception:
-                        lt_key = None
+                try:
+                    from ..services import secret_store
+
+                    lt_key = secret_store.get_secret("LIBRETRANSLATE_API_KEY") or None
+                except Exception:
+                    lt_key = None
                 return LibreTranslateTranslator(base_url=base, api_key=lt_key)
             except Exception:
                 return None
 
         if provider == "openai":
             return openai_instance() or IdentityTranslator()
+        if provider == "claude":
+            return claude_instance() or IdentityTranslator()
+        if provider == "gemini":
+            return gemini_instance() or IdentityTranslator()
         if provider == "backend":
             return backend_instance() or IdentityTranslator()
         if provider == "google_free":
@@ -4592,9 +4399,18 @@ QLabel#SmartCostLabel {{
         if provider == "identity":
             return IdentityTranslator()
 
-        # auto: prefer OpenAI → Backend → LibreTranslate → GoogleFree → Identity
+        # auto: prefer selected AI provider → OpenAI → Backend → LibreTranslate → GoogleFree → Identity
+        preferred = effective_ai_provider(self._cfg)
+        ai_first = {
+            "openai": openai_instance,
+            "claude": claude_instance,
+            "gemini": gemini_instance,
+        }.get(preferred, openai_instance)
         return (
-            openai_instance()
+            ai_first()
+            or openai_instance()
+            or claude_instance()
+            or gemini_instance()
             or backend_instance()
             or libretranslate_instance()
             or google_free_instance()

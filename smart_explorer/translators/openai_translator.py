@@ -13,7 +13,7 @@ _EXT_RE = re.compile(r"^(?P<stem>.*?)(?P<ext>\.[^./\\]+)?$")
 
 
 class OpenAITranslator(Translator):
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini") -> None:
+    def __init__(self, api_key: str, model: str = "gpt-4.1-mini") -> None:
         self.client = OpenAI(api_key=api_key)
         self.model = model
 

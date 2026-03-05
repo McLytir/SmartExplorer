@@ -10,15 +10,18 @@ CONFIG_FILENAME = "smart_explorer_config.json"
 @dataclass
 class AppConfig:
     api_key: Optional[str] = None
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4.1-mini"
+    ai_provider: str = "openai"  # openai, claude, gemini
+    ai_model: Optional[str] = None
     target_language: str = "English"
-    translator_provider: str = "auto"  # auto, openai, backend, google_free, libretranslate, identity
+    translator_provider: str = "auto"  # auto, openai, claude, gemini, backend, google_free, libretranslate, identity
     translation_enabled: bool = False
-    translation_view_mode: str = "below_name"  # below_name
+    translation_view_mode: str = "below_name"  # below_name, separate_column
     theme: str = "light"  # "light", "dark", "solarized_light", "solarized_dark"
     root_path: str = os.path.expanduser("~")
     ignore_patterns: list[str] = None  # glob patterns to skip translating
     sp_base_url: Optional[str] = None  # e.g., https://tenant.sharepoint.com/sites/SiteName
+    sp_site_allowlist: Optional[list[str]] = None  # e.g., ["/sites/TeamA", "/sites/TeamB"]
     # Optional: override the SharePoint library root (server-relative path)
     # Example: "/sites/PeakEnergy-All/Shared Documents" or "/sites/PeakEnergy-All/Documents"
     sp_library_root: Optional[str] = None  # server-relative library root (e.g., /sites/Site/Shared Documents)
@@ -73,12 +76,38 @@ def load_config() -> AppConfig:
         cfg.saved_layouts = []
     if cfg.recent_resolved_links is None:
         cfg.recent_resolved_links = []
+    if cfg.sp_site_allowlist is None or not isinstance(cfg.sp_site_allowlist, list):
+        cfg.sp_site_allowlist = []
+    normalized_sites: list[str] = []
+    seen_sites: set[str] = set()
+    for raw in cfg.sp_site_allowlist:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value.startswith("http://") or value.startswith("https://"):
+            try:
+                from urllib.parse import urlparse
+                value = urlparse(value).path or value
+            except Exception:
+                pass
+        if not value.startswith("/"):
+            value = "/" + value
+        value = value.rstrip("/") or "/"
+        key = value.lower()
+        if key in seen_sites:
+            continue
+        seen_sites.add(key)
+        normalized_sites.append(value)
+    cfg.sp_site_allowlist = normalized_sites
     if getattr(cfg, "theme", None) not in {"light", "dark", "solarized_light", "solarized_dark"}:
         cfg.theme = "light"
-    if getattr(cfg, "translator_provider", None) not in {"auto", "openai", "backend", "google_free", "libretranslate", "identity"}:
+    if getattr(cfg, "translator_provider", None) not in {"auto", "openai", "claude", "gemini", "backend", "google_free", "libretranslate", "identity"}:
         cfg.translator_provider = "auto"
+    if getattr(cfg, "ai_provider", None) not in {"openai", "claude", "gemini"}:
+        cfg.ai_provider = "openai"
+    cfg.ai_model = (getattr(cfg, "ai_model", None) or getattr(cfg, "model", None) or "").strip() or None
     cfg.translation_enabled = bool(getattr(cfg, "translation_enabled", False))
-    if getattr(cfg, "translation_view_mode", None) not in {"below_name"}:
+    if getattr(cfg, "translation_view_mode", None) not in {"below_name", "separate_column"}:
         cfg.translation_view_mode = "below_name"
     if cfg.favorites_bar_position not in {"left", "right", "top", "bottom"}:
         cfg.favorites_bar_position = "left"

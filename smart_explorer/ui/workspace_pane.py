@@ -389,7 +389,7 @@ class WorkspacePane(QFrame):
             self,
             cache=self._translation_cache,
             ignore_patterns=self._ignore_patterns,
-            display_mode="below_name",
+            display_mode=self._translation_view_mode,
             enabled=self._translation_enabled,
         )
         translated.setSourceModel(fs_model)
@@ -403,6 +403,7 @@ class WorkspacePane(QFrame):
         self._set_root_indexes(idx, view_idx)
         for column in range(1, fs_model.columnCount()):
             self._view.setColumnHidden(column, True)
+        self._refresh_translation_columns()
         self._connect_selection()
         self._sync_icon_model()
 
@@ -422,7 +423,7 @@ class WorkspacePane(QFrame):
             self,
             cache=self._translation_cache,
             ignore_patterns=self._ignore_patterns,
-            display_mode="below_name",
+            display_mode=self._translation_view_mode,
             enabled=self._translation_enabled,
         )
         translated.setSourceModel(sp_model)
@@ -432,6 +433,7 @@ class WorkspacePane(QFrame):
         self._filter_model = proxy
         self._view.setModel(proxy)
         self._set_root_indexes(None, QModelIndex())
+        self._refresh_translation_columns()
         self._connect_selection()
         self._sync_icon_model()
 
@@ -601,12 +603,14 @@ class WorkspacePane(QFrame):
         if self._translated_model:
             effective_enabled = self.definition.kind == "translation" or self._translation_enabled
             self._translated_model.set_enabled(effective_enabled)
+            self._refresh_translation_columns()
 
     def set_translation_display_mode(self, mode: str) -> None:
         self._translation_view_mode = mode or "below_name"
         if self._translated_model:
             effective_mode = "replace" if self.definition.kind == "translation" else self._translation_view_mode
             self._translated_model.set_display_mode(effective_mode)
+            self._refresh_translation_columns()
 
     def allow_translation_scopes(self, paths: List[str], *, depth_limit: Optional[int] = None) -> None:
         """
@@ -1037,6 +1041,18 @@ class WorkspacePane(QFrame):
             self._icon_view.setSelectionModel(sel_model)
         root_index = self._view.rootIndex()
         self._icon_view.setRootIndex(root_index)
+
+    def _refresh_translation_columns(self) -> None:
+        if self._view.model() is None or self._translated_model is None:
+            return
+        columns = self._view.model().columnCount()
+        if columns <= 1:
+            return
+        translation_col = self._translated_model.translation_column() if hasattr(self._translated_model, "translation_column") else -1
+        for col in range(1, columns):
+            self._view.setColumnHidden(col, col != translation_col)
+        if translation_col > 0:
+            self._view.setColumnWidth(translation_col, 280)
 
     def _on_selection_changed(self, *_args) -> None:
         if self._suppress_selection_signal:

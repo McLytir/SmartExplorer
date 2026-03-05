@@ -88,14 +88,28 @@ class TranslatedProxyModel(QIdentityProxyModel):
         enabled = bool(enabled)
         if enabled == self._enabled:
             return
-        self._enabled = enabled
+        had_translation_column = self._has_translation_column()
+        has_translation_column = bool(enabled and self._display_mode == "separate_column")
+        if had_translation_column != has_translation_column:
+            self.beginResetModel()
+            self._enabled = enabled
+            self.endResetModel()
+        else:
+            self._enabled = enabled
         self._refresh_all_rows()
 
     def set_display_mode(self, mode: str) -> None:
         mode = mode or "replace"
         if mode == self._display_mode:
             return
-        self._display_mode = mode
+        had_translation_column = self._has_translation_column()
+        has_translation_column = bool(self._enabled and mode == "separate_column")
+        if had_translation_column != has_translation_column:
+            self.beginResetModel()
+            self._display_mode = mode
+            self.endResetModel()
+        else:
+            self._display_mode = mode
         self._refresh_all_rows()
 
     def set_translator(self, translator: Translator) -> None:
@@ -137,6 +151,34 @@ class TranslatedProxyModel(QIdentityProxyModel):
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return super().data(index, role)
+        source_col_count = self._source_column_count(index.parent())
+        translation_col = source_col_count if self._has_translation_column() else -1
+
+        if index.column() == translation_col and role in (Qt.DisplayRole, TRANSLATION_ROLE):
+            src_parent = self.mapToSource(index.parent())
+            src_idx = self.sourceModel().index(index.row(), 0, src_parent)
+            if not src_idx.isValid():
+                return ""
+            path = None
+            name = None
+            src_model = self.sourceModel()
+            if hasattr(src_model, "filePath") and hasattr(src_model, "fileName"):
+                try:
+                    path = src_model.filePath(src_idx)  # type: ignore[attr-defined]
+                    name = src_model.fileName(src_idx)  # type: ignore[attr-defined]
+                except Exception:
+                    path = None
+                    name = None
+            if path is None:
+                path = src_model.data(src_idx, PATH_ROLE)
+            if name is None:
+                name = src_model.data(src_idx, Qt.DisplayRole)
+            name = str(name or "")
+            if not self._enabled or self._is_ignored(path, name) or not self._is_in_scope(path):
+                return ""
+            translated = self._translated_value(path, name)
+            return translated if translated and translated != name else ""
+
         if index.column() != 0:
             return super().data(index, role)
         if role in (Qt.DisplayRole, TRANSLATION_ROLE):
@@ -182,6 +224,19 @@ class TranslatedProxyModel(QIdentityProxyModel):
                 return f"{name}\n{translated}"
             return translated
         return super().data(index, role)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        base = self._source_column_count(parent)
+        if self._has_translation_column():
+            return base + 1
+        return base
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole and self._has_translation_column():
+            translation_col = self._source_column_count()
+            if section == translation_col:
+                return "Translation"
+        return super().headerData(section, orientation, role)
 
     def _translated_value(self, path: str, name: str) -> str:
         if path in self._cache:
@@ -286,5 +341,25 @@ class TranslatedProxyModel(QIdentityProxyModel):
         if rows <= 0:
             return
         top_left = self.index(0, 0)
-        bottom_right = self.index(rows - 1, 0)
+        last_col = max(0, self.columnCount() - 1)
+        bottom_right = self.index(rows - 1, last_col)
         self.dataChanged.emit(top_left, bottom_right)
+
+    def _has_translation_column(self) -> bool:
+        return bool(self._enabled and self._display_mode == "separate_column")
+
+    def translation_column(self, parent: QModelIndex = QModelIndex()) -> int:
+        if not self._has_translation_column():
+            return -1
+        return self._source_column_count(parent)
+
+    def _source_column_count(self, parent: QModelIndex = QModelIndex()) -> int:
+        src_model = self.sourceModel()
+        if src_model is None:
+            return 1
+        src_parent = self.mapToSource(parent) if parent.isValid() else QModelIndex()
+        try:
+            count = int(src_model.columnCount(src_parent))
+            return count if count > 0 else 1
+        except Exception:
+            return 1

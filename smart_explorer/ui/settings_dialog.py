@@ -18,8 +18,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..api.backend_client import BackendClient
+from ..services.ai_provider import model_presets_for_provider
 from ..settings import AppConfig, save_config
-from ..services.browser_cookies import collect_sharepoint_cookies, get_last_capture_hint
+from ..services.browser_cookies import (
+    collect_sharepoint_cookie_records,
+    get_last_capture_hint,
+)
 from .shortcut_settings_dialog import ShortcutSettingsDialog
 
 
@@ -39,6 +43,8 @@ class SettingsDialog(QDialog):
         self.translator_combo = QComboBox(self)
         self.translator_combo.addItem("Auto (prefer OpenAI, then Backend)", "auto")
         self.translator_combo.addItem("OpenAI", "openai")
+        self.translator_combo.addItem("Claude", "claude")
+        self.translator_combo.addItem("Gemini", "gemini")
         self.translator_combo.addItem("Backend", "backend")
         self.translator_combo.addItem("Google Free (deep-translator)", "google_free")
         self.translator_combo.addItem("LibreTranslate", "libretranslate")
@@ -56,6 +62,34 @@ class SettingsDialog(QDialog):
         root.addLayout(trl)
         try:
             self.translator_combo.currentIndexChanged.connect(self._on_translator_changed)
+        except Exception:
+            pass
+
+        self.ai_provider_combo = QComboBox(self)
+        self.ai_provider_combo.addItem("OpenAI", "openai")
+        self.ai_provider_combo.addItem("Claude", "claude")
+        self.ai_provider_combo.addItem("Gemini", "gemini")
+        try:
+            current_ai_provider = getattr(self.cfg, "ai_provider", "openai") or "openai"
+            idx = self.ai_provider_combo.findData(current_ai_provider)
+            if idx >= 0:
+                self.ai_provider_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+        air = QHBoxLayout()
+        air.addWidget(QLabel("AI Engine Provider:"))
+        air.addWidget(self.ai_provider_combo)
+        root.addLayout(air)
+
+        self.ai_model = QComboBox(self)
+        self.ai_model.setEditable(True)
+        amx = QHBoxLayout()
+        amx.addWidget(QLabel("AI Engine Model:"))
+        amx.addWidget(self.ai_model)
+        root.addLayout(amx)
+        self._refresh_ai_model_options()
+        try:
+            self.ai_provider_combo.currentIndexChanged.connect(self._on_ai_provider_changed)
         except Exception:
             pass
 
@@ -88,6 +122,36 @@ class SettingsDialog(QDialog):
         akx.addWidget(self.btn_api_clear)
         root.addWidget(self._openai_key_row)
         self._load_saved_api_keys()
+
+        self.claude_api_key = QLineEdit(self)
+        self.claude_api_key.setPlaceholderText("Anthropic API Key")
+        self.claude_api_key.setEchoMode(QLineEdit.Password)
+        self._claude_key_row = QWidget(self)
+        ckx = QHBoxLayout(self._claude_key_row)
+        ckx.setContentsMargins(0, 0, 0, 0)
+        ckx.addWidget(QLabel("Claude Key:"))
+        ckx.addWidget(self.claude_api_key)
+        self.btn_claude_clear = QPushButton("Clear", self)
+        self.btn_claude_clear.setToolTip("Remove saved Claude API key from system keyring")
+        self.btn_claude_clear.clicked.connect(self._on_clear_claude_key)
+        ckx.addWidget(self.btn_claude_clear)
+        root.addWidget(self._claude_key_row)
+        self._load_saved_claude_key()
+
+        self.gemini_api_key = QLineEdit(self)
+        self.gemini_api_key.setPlaceholderText("Gemini API Key")
+        self.gemini_api_key.setEchoMode(QLineEdit.Password)
+        self._gemini_key_row = QWidget(self)
+        gkx = QHBoxLayout(self._gemini_key_row)
+        gkx.setContentsMargins(0, 0, 0, 0)
+        gkx.addWidget(QLabel("Gemini Key:"))
+        gkx.addWidget(self.gemini_api_key)
+        self.btn_gemini_clear = QPushButton("Clear", self)
+        self.btn_gemini_clear.setToolTip("Remove saved Gemini API key from system keyring")
+        self.btn_gemini_clear.clicked.connect(self._on_clear_gemini_key)
+        gkx.addWidget(self.btn_gemini_clear)
+        root.addWidget(self._gemini_key_row)
+        self._load_saved_gemini_key()
 
         # LibreTranslate settings
         self.lt_url = QLineEdit(self)
@@ -132,6 +196,7 @@ class SettingsDialog(QDialog):
 
         self.translation_view = QComboBox(self)
         self.translation_view.addItem("Below file names", "below_name")
+        self.translation_view.addItem("Separate column", "separate_column")
         view_index = self.translation_view.findData(getattr(self.cfg, "translation_view_mode", "below_name") or "below_name")
         if view_index >= 0:
             self.translation_view.setCurrentIndex(view_index)
@@ -163,6 +228,16 @@ class SettingsDialog(QDialog):
         spx.addWidget(QLabel("SharePoint Site URL:"))
         spx.addWidget(self.sp_base)
         root.addLayout(spx)
+
+        self.sp_sites_allowlist = QTextEdit(self)
+        self.sp_sites_allowlist.setPlaceholderText("/sites/PeakEnergyJapan42\n/sites/PeakEnergy\nhttps://tenant.sharepoint.com/sites/AnotherSite")
+        try:
+            rows = list(getattr(self.cfg, "sp_site_allowlist", []) or [])
+            self.sp_sites_allowlist.setPlainText("\n".join(str(r) for r in rows if str(r).strip()))
+        except Exception:
+            pass
+        root.addWidget(QLabel("SharePoint Sites (one per line):"))
+        root.addWidget(self.sp_sites_allowlist)
 
         # Optional: library root override (server-relative)
         self.sp_root = QLineEdit(self)
@@ -309,6 +384,20 @@ QLabel {
         else:
             self.cfg.api_key = key_text or None
 
+        claude_key = self.claude_api_key.text().strip()
+        if secret_store:
+            if claude_key:
+                secret_store.set_secret("ANTHROPIC_API_KEY", claude_key)
+            else:
+                secret_store.delete_secret("ANTHROPIC_API_KEY")
+
+        gemini_key = self.gemini_api_key.text().strip()
+        if secret_store:
+            if gemini_key:
+                secret_store.set_secret("GEMINI_API_KEY", gemini_key)
+            else:
+                secret_store.delete_secret("GEMINI_API_KEY")
+
         lt_key = self.lt_api_key.text().strip()
         if secret_store:
             if lt_key:
@@ -318,6 +407,16 @@ QLabel {
         self.cfg.target_language = self.lang.text().strip() or "English"
         self.cfg.translation_enabled = bool(self.translation_enabled.isChecked())
         self.cfg.translation_view_mode = self.translation_view.currentData() or "below_name"
+        try:
+            setattr(self.cfg, "ai_provider", self.ai_provider_combo.currentData() or "openai")
+        except Exception:
+            pass
+        ai_model = self.ai_model.text().strip()
+        try:
+            setattr(self.cfg, "ai_model", ai_model or None)
+        except Exception:
+            pass
+        self.cfg.model = ai_model or getattr(self.cfg, "model", "gpt-4.1-mini") or "gpt-4.1-mini"
         # Persist translator provider
         try:
             setattr(self.cfg, "translator_provider", self.translator_combo.currentData())
@@ -331,6 +430,10 @@ QLabel {
             pass
         try:
             setattr(self.cfg, "sp_base_url", self.sp_base.text().strip() or None)
+        except Exception:
+            pass
+        try:
+            setattr(self.cfg, "sp_site_allowlist", self._parse_sharepoint_sites(self.sp_sites_allowlist.toPlainText()))
         except Exception:
             pass
         try:
@@ -370,8 +473,10 @@ QLabel {
         base = self.sp_base.text().strip()
         burl = self.backend_url.text().strip() or "http://127.0.0.1:5001"
         self.backend.base_url = burl.rstrip('/')
-        if base:
-            self.backend.update_settings(sp_base_url=base)
+        self.backend.update_settings(
+            sp_base_url=base or None,
+            sp_site_allowlist=self._parse_sharepoint_sites(self.sp_sites_allowlist.toPlainText()),
+        )
         cookie_header = self.cookie_header.toPlainText().strip() or None
         cookies = None
         if not cookie_header:
@@ -405,8 +510,13 @@ QLabel {
             "Your default browser has been opened. Please complete the SharePoint sign-in in a normal (non-private) window, then return here and click OK to capture cookies.",
         )
 
-        cookies = collect_sharepoint_cookies(parsed.netloc)
-        if not cookies:
+        cookie_records = collect_sharepoint_cookie_records(parsed.netloc)
+        cookies = {
+            str(record.get("name") or ""): str(record.get("value") or "")
+            for record in cookie_records
+            if record.get("name") and record.get("value") is not None
+        }
+        if not cookie_records:
             hint = get_last_capture_hint()
             msg = (
                 "Could not locate SharePoint cookies. Ensure you are signed in using Edge, Opera, Chrome, or Firefox on this machine. "
@@ -429,7 +539,7 @@ QLabel {
             self.rtfa.setText(rt)
 
         try:
-            self.backend.set_sp_cookies(base_url=base, cookies=cookies)
+            self.backend.set_sp_cookies(base_url=base, cookies=cookies, cookie_records=cookie_records)
             QMessageBox.information(self, "Cookie Capture", "Cookies captured and sent to backend.")
         except Exception as exc:
             QMessageBox.warning(self, "Backend Error", f"Failed to send cookies: {exc}")
@@ -443,7 +553,45 @@ QLabel {
         except Exception:
             pass
 
+    @staticmethod
+    def _parse_sharepoint_sites(raw: str) -> list[str]:
+        sites: list[str] = []
+        seen: set[str] = set()
+        for line in str(raw or "").replace(",", "\n").splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            parsed = urlparse(value)
+            if parsed.scheme and parsed.netloc:
+                value = parsed.path or "/"
+            if not value.startswith("/"):
+                value = "/" + value
+            value = value.rstrip("/") or "/"
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            sites.append(value)
+        return sites
+
+    def _on_clear_claude_key(self):
+        self.claude_api_key.clear()
+        try:
+            from ..services import secret_store
+            secret_store.delete_secret("ANTHROPIC_API_KEY")
+        except Exception:
+            pass
+
+    def _on_clear_gemini_key(self):
+        self.gemini_api_key.clear()
+        try:
+            from ..services import secret_store
+            secret_store.delete_secret("GEMINI_API_KEY")
+        except Exception:
+            pass
+
     def _on_clear_lt_key(self):
+        self.lt_api_key.clear()
         try:
             from ..services import secret_store
             secret_store.delete_secret("LIBRETRANSLATE_API_KEY")
@@ -463,6 +611,12 @@ QLabel {
         # Show provider-specific hints/masking
         try:
             self._apply_api_key_mask(data)
+        except Exception:
+            pass
+
+    def _on_ai_provider_changed(self, _index: int) -> None:
+        try:
+            self._refresh_ai_model_options()
         except Exception:
             pass
 
@@ -498,9 +652,43 @@ QLabel {
         if lt_value:
             self.lt_api_key.setText(lt_value)
 
+    def _load_saved_claude_key(self) -> None:
+        value = None
+        try:
+            from ..services import secret_store as secret_store_module
+        except Exception:
+            secret_store_module = None
+        if secret_store_module:
+            try:
+                value = secret_store_module.get_secret("ANTHROPIC_API_KEY") or None
+            except Exception:
+                value = None
+        if value:
+            self.claude_api_key.setText(value)
+
+    def _load_saved_gemini_key(self) -> None:
+        value = None
+        try:
+            from ..services import secret_store as secret_store_module
+        except Exception:
+            secret_store_module = None
+        if secret_store_module:
+            try:
+                value = (
+                    secret_store_module.get_secret("GEMINI_API_KEY")
+                    or secret_store_module.get_secret("GOOGLE_API_KEY")
+                    or None
+                )
+            except Exception:
+                value = None
+        if value:
+            self.gemini_api_key.setText(value)
+
     def _apply_api_key_mask(self, provider: str | None = None) -> None:
         try:
             self.api_key.setEchoMode(QLineEdit.Password)
+            self.claude_api_key.setEchoMode(QLineEdit.Password)
+            self.gemini_api_key.setEchoMode(QLineEdit.Password)
             self.lt_api_key.setEchoMode(QLineEdit.Password)
         except Exception:
             pass
@@ -532,6 +720,39 @@ QLabel {
                     _wb.open("https://libretranslate.com/docs/")
             except Exception:
                 pass
+
+    def _refresh_ai_model_options(self) -> None:
+        provider = "openai"
+        try:
+            provider = self.ai_provider_combo.currentData() or "openai"
+        except Exception:
+            provider = "openai"
+        current_text = ""
+        try:
+            current_text = self.ai_model.currentText().strip()
+        except Exception:
+            current_text = ""
+        configured = (
+            getattr(self.cfg, "ai_model", None)
+            or getattr(self.cfg, "model", None)
+            or ""
+        ).strip()
+        selected = current_text or configured
+        presets = model_presets_for_provider(provider)
+        self.ai_model.blockSignals(True)
+        self.ai_model.clear()
+        for model_name in presets:
+            self.ai_model.addItem(model_name, model_name)
+        if selected and self.ai_model.findText(selected) < 0:
+            self.ai_model.addItem(selected, selected)
+        if selected:
+            idx = self.ai_model.findText(selected)
+            if idx >= 0:
+                self.ai_model.setCurrentIndex(idx)
+            self.ai_model.setEditText(selected)
+        elif presets:
+            self.ai_model.setCurrentIndex(0)
+        self.ai_model.blockSignals(False)
 
     def _update_provider_visibility(self) -> None:
         provider = None

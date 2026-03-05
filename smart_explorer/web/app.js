@@ -4,6 +4,11 @@ const EXT_VIDEO = new Set(['.mp4','.webm','.mov','.mkv','.avi']);
 const EXT_AUDIO = new Set(['.mp3','.wav','.ogg','.m4a']);
 const EXT_PDF = new Set(['.pdf']);
 const EXT_TEXT = new Set(['.txt','.md','.json','.yaml','.yml','.xml','.csv','.log','.py','.js','.ts','.html','.css','.ini','.cfg']);
+const AI_MODEL_PRESETS = {
+  openai: ['gpt-5.2','gpt-5.2-pro','gpt-5','gpt-5-mini','gpt-5-nano','gpt-4.1-mini','gpt-4.1','gpt-4.1-nano','gpt-4o','gpt-4o-mini','o4-mini'],
+  claude: ['claude-sonnet-4-20250514','claude-opus-4-20250514','claude-3-7-sonnet-latest','claude-3-5-sonnet-latest','claude-3-5-haiku-latest'],
+  gemini: ['gemini-2.5-flash','gemini-2.5-pro','gemini-2.0-flash','gemini-1.5-pro','gemini-1.5-flash'],
+};
 
 const state = {
   left: paneState('left'),
@@ -52,14 +57,16 @@ const state = {
 };
 
 function paneState(key){
-  return { key, kind:'local', path:'', items:[], selected:new Set(), translations:new Map(), site:'', library:'', sites:[], libraries:[], filterText:'' };
+  return { key, kind:'local', path:'', items:[], selected:new Set(), translations:new Map(), site:'', siteTitle:'', library:'', sites:[], libraries:[], filterText:'' };
 }
 
 const el = {
+  appModeBar:id('appModeBar'), sessionBar:id('sessionBar'), workspaceToolsBar:id('workspaceToolsBar'),
   splitViewToggleBtn:id('splitViewToggleBtn'), splitTransferModeBtn:id('splitTransferModeBtn'), splitCompareSessionSelect:id('splitCompareSessionSelect'), splitSessionsHost:id('splitSessionsHost'), mainWorkspaceView:id('mainWorkspaceView'),
   appWorkspaceTabBtn:id('appWorkspaceTabBtn'), appRelinkingTabBtn:id('appRelinkingTabBtn'), relinkingWorkspaceView:id('relinkingWorkspaceView'),
   inspectorActionsPanel:id('inspectorActionsPanel'),
   openSettingsBtn:id('openSettingsBtn'), settingsModal:id('settingsModal'), settingsCloseBtn:id('settingsCloseBtn'), settingsApplyBtn:id('settingsApplyBtn'),
+  aiProviderSelect:id('aiProviderSelect'), aiModelInput:id('aiModelInput'), openAiApiKeyInput:id('openAiApiKeyInput'), claudeApiKeyInput:id('claudeApiKeyInput'), geminiApiKeyInput:id('geminiApiKeyInput'), aiProviderSaveBtn:id('aiProviderSaveBtn'), openAiApiKeyClearBtn:id('openAiApiKeyClearBtn'), claudeApiKeyClearBtn:id('claudeApiKeyClearBtn'), geminiApiKeyClearBtn:id('geminiApiKeyClearBtn'), aiApiKeyState:id('aiApiKeyState'),
   status: id('status'), uiVersionSelect:id('uiVersionSelect'), langInput: id('langInput'), toggleTranslateBtn: id('toggleTranslateBtn'),
   renameTranslatedBtn: id('renameTranslatedBtn'), undoRenameBtn: id('undoRenameBtn'), copyBtn: id('copyBtn'), cutBtn: id('cutBtn'), pasteBtn: id('pasteBtn'),
   renameBtn: id('renameBtn'), aiRenameBtn:id('aiRenameBtn'), deleteBtn: id('deleteBtn'), mkdirBtn: id('mkdirBtn'), openBtn: id('openBtn'), revealBtn: id('revealBtn'), addFavoriteBtn: id('addFavoriteBtn'), exportConfigBtn:id('exportConfigBtn'), importConfigBtn:id('importConfigBtn'), importConfigInput:id('importConfigInput'),
@@ -71,7 +78,7 @@ const el = {
   layoutNameInput:id('layoutNameInput'), saveLayoutBtn:id('saveLayoutBtn'), layoutsList:id('layoutsList'), recentList:id('recentList'),
   opLogOutput:id('opLogOutput'), desktopNotifyBtn:id('desktopNotifyBtn'), clearNotificationsBtn:id('clearNotificationsBtn'), notificationsList:id('notificationsList'),
   searchQueryInput:id('searchQueryInput'), searchRunBtn:id('searchRunBtn'), searchIncludeLocal:id('searchIncludeLocal'), searchIncludeSp:id('searchIncludeSp'), searchExtInput:id('searchExtInput'), searchMaxInput:id('searchMaxInput'), searchFilterSelect:id('searchFilterSelect'), searchFilterSaveBtn:id('searchFilterSaveBtn'), searchFilterDeleteBtn:id('searchFilterDeleteBtn'), searchResults:id('searchResults'),
-  spBaseUrlInput:id('spBaseUrlInput'), spCookieHeaderInput:id('spCookieHeaderInput'), spSaveAuthBtn:id('spSaveAuthBtn'), spRefreshAuthBtn:id('spRefreshAuthBtn'), spEmbeddedSigninBtn:id('spEmbeddedSigninBtn'), spAuthState:id('spAuthState'),
+  spBaseUrlInput:id('spBaseUrlInput'), spSitesListInput:id('spSitesListInput'), spCookieHeaderInput:id('spCookieHeaderInput'), spSaveAuthBtn:id('spSaveAuthBtn'), spRefreshAuthBtn:id('spRefreshAuthBtn'), spEmbeddedSigninBtn:id('spEmbeddedSigninBtn'), spAuthState:id('spAuthState'),
   bulkOpType:id('bulkOpType'), bulkTargetPane:id('bulkTargetPane'), bulkConflictPolicy:id('bulkConflictPolicy'), bulkDryRunBtn:id('bulkDryRunBtn'), bulkQueueBtn:id('bulkQueueBtn'), bulkDryRunOutput:id('bulkDryRunOutput'),
   jobsPauseBtn:id('jobsPauseBtn'), jobsResumeBtn:id('jobsResumeBtn'), jobsCancelBtn:id('jobsCancelBtn'), jobsRetryFailedBtn:id('jobsRetryFailedBtn'), jobsExportBtn:id('jobsExportBtn'), jobsClearFinishedBtn:id('jobsClearFinishedBtn'), jobsList:id('jobsList'), queueMetrics:id('queueMetrics'),
   scCopy:id('scCopy'), scCut:id('scCut'), scPaste:id('scPaste'), scDelete:id('scDelete'), scRename:id('scRename'), scMkdir:id('scMkdir'), scRefresh:id('scRefresh'), saveShortcutsBtn:id('saveShortcutsBtn'), resetShortcutsBtn:id('resetShortcutsBtn'),
@@ -109,6 +116,10 @@ function isNewFolderModalOpen(){
 function syncSettingsUi(){
   if(el.langInput) el.langInput.value=state.language||'English';
   if(el.uiVersionSelect) el.uiVersionSelect.value=document.body.getAttribute('data-ui-version')||'v1';
+  if(el.openAiApiKeyInput) el.openAiApiKeyInput.value='';
+  if(el.claudeApiKeyInput) el.claudeApiKeyInput.value='';
+  if(el.geminiApiKeyInput) el.geminiApiKeyInput.value='';
+  renderAiModelOptions(el.aiProviderSelect?.value||'openai', el.aiModelInput?.value||'');
   renderShortcuts();
   renderNotifications();
 }
@@ -116,8 +127,26 @@ async function applySettingsFromModal(){
   const nextLanguage=(el.langInput?.value||'English').trim()||'English';
   const languageChanged=nextLanguage!==state.language;
   state.language=nextLanguage;
+  const aiProvider=String(el.aiProviderSelect?.value||'openai').trim()||'openai';
+  const aiModel=String(el.aiModelInput?.value||'').trim();
+  const spBase=String(el.spBaseUrlInput?.value||'').trim();
+  const spSites=parseSharePointSitesInput(el.spSitesListInput?.value||'');
   saveCurrentSessionSnapshot();
   persistSessions();
+  try{
+    await apiPost('/api/settings',{
+      target_language:state.language,
+      ai_provider:aiProvider,
+      ai_model:aiModel,
+      sp_base_url:spBase||null,
+      sp_site_allowlist:spSites,
+    });
+    await refreshSpAuthPanel();
+    await refreshAiKeyPanel();
+  }catch(e){
+    setStatus(`Settings save failed: ${err(e)}`);
+    return;
+  }
   if(languageChanged && state.translationEnabled){
     await refreshTranslations('left');
     await refreshTranslations('right');
@@ -129,6 +158,7 @@ async function applySettingsFromModal(){
 async function openSettingsModal(){
   if(!el.settingsModal) return;
   syncSettingsUi();
+  await refreshAiKeyPanel();
   await refreshSpAuthPanel();
   el.settingsModal.classList.remove('hidden');
   el.settingsModal.setAttribute('aria-hidden','false');
@@ -136,6 +166,63 @@ async function openSettingsModal(){
 function closeSettingsModal(){
   if(!el.settingsModal) return;
   setModalOpen(el.settingsModal, false);
+}
+function renderAiKeyState(settings){
+  if(!el.aiApiKeyState) return;
+  const provider=String(settings?.ai_provider||'openai').trim()||'openai';
+  const model=String(settings?.ai_model||settings?.model||'').trim()||'';
+  const hasOpenAi=!!settings?.has_openai_api_key;
+  const hasClaude=!!settings?.has_anthropic_api_key;
+  const hasGemini=!!settings?.has_gemini_api_key;
+  const activeReady=provider==='openai' ? hasOpenAi : provider==='claude' ? hasClaude : hasGemini;
+  if(el.aiProviderSelect) el.aiProviderSelect.value=provider;
+  renderAiModelOptions(provider, model);
+  el.aiApiKeyState.textContent=`Provider: ${provider} | Active key: ${activeReady?'configured':'missing'} | OpenAI: ${hasOpenAi?'yes':'no'} | Claude: ${hasClaude?'yes':'no'} | Gemini: ${hasGemini?'yes':'no'} | Model: ${model}`;
+}
+async function refreshAiKeyPanel(){
+  try{
+    const settings=await apiGet('/api/settings');
+    renderAiKeyState(settings);
+  }catch(e){
+    if(el.aiApiKeyState) el.aiApiKeyState.textContent=`Key status: failed to load (${err(e)})`;
+  }
+}
+async function saveAiApiKeyFromPortal(){
+  const provider=String(el.aiProviderSelect?.value||'openai').trim()||'openai';
+  const model=String(el.aiModelInput?.value||'').trim();
+  const openAiKey=String(el.openAiApiKeyInput?.value||'').trim();
+  const claudeKey=String(el.claudeApiKeyInput?.value||'').trim();
+  const geminiKey=String(el.geminiApiKeyInput?.value||'').trim();
+  if(!model) return setStatus('Enter a model before saving AI settings.');
+  if(!openAiKey && !claudeKey && !geminiKey) return setStatus('Enter at least one key to save, or use the clear actions.');
+  try{
+    const payload={ai_provider:provider, ai_model:model};
+    if(openAiKey) payload.openai_api_key=openAiKey;
+    if(claudeKey) payload.anthropic_api_key=claudeKey;
+    if(geminiKey) payload.gemini_api_key=geminiKey;
+    await apiPost('/api/settings',payload);
+    if(el.openAiApiKeyInput) el.openAiApiKeyInput.value='';
+    if(el.claudeApiKeyInput) el.claudeApiKeyInput.value='';
+    if(el.geminiApiKeyInput) el.geminiApiKeyInput.value='';
+    await refreshAiKeyPanel();
+    setStatus('AI provider settings saved securely.');
+  }catch(e){
+    setStatus(`AI settings save failed: ${err(e)}`);
+  }
+}
+async function clearAiApiKeyFromPortal(secretField){
+  try{
+    const payload={};
+    payload[secretField]='';
+    await apiPost('/api/settings',payload);
+    if(secretField==='openai_api_key' && el.openAiApiKeyInput) el.openAiApiKeyInput.value='';
+    if(secretField==='anthropic_api_key' && el.claudeApiKeyInput) el.claudeApiKeyInput.value='';
+    if(secretField==='gemini_api_key' && el.geminiApiKeyInput) el.geminiApiKeyInput.value='';
+    await refreshAiKeyPanel();
+    setStatus('AI API key cleared.');
+  }catch(e){
+    setStatus(`AI API key clear failed: ${err(e)}`);
+  }
 }
 function resolveCreateFolderContext(){
   const p=activePane();
@@ -260,6 +347,11 @@ function setStatus(v){
 }
 function err(e){ return String(e).slice(0,180); }
 function basename(p){ return (p||'').split(/[\\/]/).filter(Boolean).pop()||p; }
+function drivePrefix(path){
+  const raw=String(path||'').trim();
+  const m=raw.match(/^[A-Za-z]:/);
+  return m ? m[0].toUpperCase() : '';
+}
 function extname(p){ const n=basename(p).toLowerCase(); const i=n.lastIndexOf('.'); return i>=0?n.slice(i):''; }
 function activePane(){ return state[state.activePane]; }
 function selectedItems(p){ return p.items.filter(i=>p.selected.has(i.path)); }
@@ -287,6 +379,49 @@ function parentPath(path){
   const trimmed=raw.replace(/[\\\/]+$/,'');
   const idx=Math.max(trimmed.lastIndexOf('/'),trimmed.lastIndexOf('\\'));
   return idx<=0 ? trimmed : trimmed.slice(0, idx);
+}
+function findSiteTitle(site, sites, fallback=''){
+  const key=String(site||'').trim();
+  if(key && Array.isArray(sites)){
+    const match=sites.find((s)=>String(s?.site||'').trim()===key);
+    if(match?.title) return String(match.title).trim();
+  }
+  if(fallback) return String(fallback).trim();
+  if(!key) return 'Default Site';
+  const slug=key.split('/').filter(Boolean).pop()||key;
+  return slug
+    .replace(/([a-z])([A-Z])/g,'$1 $2')
+    .replace(/[-_]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim() || key;
+}
+function localSessionLabel(path){
+  const raw=String(path||'').trim();
+  if(!raw) return 'Local';
+  if(/^[A-Za-z]:\\?$/.test(raw)) return raw.endsWith('\\') ? raw : `${raw}\\`;
+  const trimmed=raw.replace(/[\\\/]+$/,'');
+  const drive=drivePrefix(trimmed);
+  if(!drive) return basename(trimmed)||trimmed||'Local';
+  const leaf=basename(trimmed);
+  return leaf && leaf.toUpperCase()!==drive ? `${drive}\\${leaf}` : `${drive}\\`;
+}
+function sharePointSessionLabel(pane){
+  const siteTitle=findSiteTitle(pane?.site, pane?.sites, pane?.siteTitle||'');
+  const folder=basename(String(pane?.path||pane?.library||'').replace(/\/+$/,'')) || '';
+  return folder ? `${siteTitle} - ${folder}` : siteTitle || 'SharePoint';
+}
+function sessionLabelFromPane(pane){
+  const kind=String(pane?.kind||'local').toLowerCase();
+  if(kind==='sharepoint') return sharePointSessionLabel(pane);
+  return localSessionLabel(pane?.path||'');
+}
+function sessionLabelFromSnapshot(snapshot){
+  const snap=snapshot||{};
+  const side=preferredSplitSide(snap);
+  return sessionLabelFromPane(snap?.[side]||snap?.left||snap?.right||{});
+}
+function sessionLabelById(sessionId){
+  return sessionLabelFromSnapshot(splitSnapshotForSession(sessionId));
 }
 function isMedia(path){ const e=extname(path); return EXT_IMAGE.has(e)||EXT_VIDEO.has(e)||EXT_AUDIO.has(e)||EXT_PDF.has(e); }
 function normalizeSpFieldType(t){ return String(t||'').toLowerCase(); }
@@ -657,6 +792,16 @@ function focusSplitSession(sessionId){
   syncActiveSessionFromSplitRuntime(runtime);
   persistSessions();
   renderSessionTabs();
+  return runtime;
+}
+
+function focusSplitPane(sessionId, side){
+  const wasActive=(sessionId===state.activeSessionId);
+  const runtime=focusSplitSession(sessionId);
+  if(!runtime) return null;
+  runtime.activePane=(side==='right'?'right':'left');
+  persistSplitRuntimeSession(sessionId);
+  if(!wasActive) renderSplitSessions();
   return runtime;
 }
 
@@ -1435,6 +1580,29 @@ function retryFailedItems(){
 async function apiGet(url){ const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 async function apiPost(url,body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 function fillSelect(sel,rows,val,label,selected=''){ sel.innerHTML=''; rows.forEach(r=>{ const o=document.createElement('option'); o.value=String(r[val]??''); o.textContent=String(r[label]??r[val]??''); if(String(o.value)===String(selected)) o.selected=true; sel.appendChild(o); }); }
+function aiModelPresets(provider){
+  const key=String(provider||'openai').trim().toLowerCase();
+  return Array.isArray(AI_MODEL_PRESETS[key]) ? [...AI_MODEL_PRESETS[key]] : [...AI_MODEL_PRESETS.openai];
+}
+function renderAiModelOptions(provider, selected=''){
+  if(!el.aiModelInput) return;
+  const presets=aiModelPresets(provider);
+  const current=String(selected||'').trim();
+  const values=current && !presets.includes(current) ? [...presets, current] : presets;
+  el.aiModelInput.innerHTML='';
+  values.forEach((model)=>{
+    const option=document.createElement('option');
+    option.value=model;
+    option.textContent=model;
+    if(model===current) option.selected=true;
+    el.aiModelInput.appendChild(option);
+  });
+  if(current){
+    el.aiModelInput.value=current;
+  }else if(values.length){
+    el.aiModelInput.value=values[0];
+  }
+}
 
 function renderSpAuthState(settings){
   if(!el.spAuthState) return;
@@ -1445,10 +1613,33 @@ function renderSpAuthState(settings){
   el.spAuthState.textContent=`Status: ${baseLabel} | ${cookieLabel}`;
 }
 
+function parseSharePointSitesInput(raw){
+  const rows=String(raw||'').replaceAll(',', '\n').split('\n');
+  const out=[];
+  const seen=new Set();
+  for(const row of rows){
+    let value=String(row||'').trim();
+    if(!value) continue;
+    if(/^https?:\/\//i.test(value)){
+      try{
+        value=new URL(value).pathname||'/';
+      }catch{}
+    }
+    if(!value.startsWith('/')) value='/'+value;
+    value=value.replace(/\/+$/,'')||'/';
+    const key=value.toLowerCase();
+    if(seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
 async function refreshSpAuthPanel(){
   try{
     const settings=await apiGet('/api/settings');
     if(el.spBaseUrlInput) el.spBaseUrlInput.value=String(settings?.sp_base_url||'');
+    if(el.spSitesListInput) el.spSitesListInput.value=(settings?.sp_site_allowlist||[]).join('\n');
     renderSpAuthState(settings);
   }catch(e){
     if(el.spAuthState) el.spAuthState.textContent=`Status: failed to load (${err(e)})`;
@@ -1457,16 +1648,18 @@ async function refreshSpAuthPanel(){
 
 async function saveSpAuthFromPortal(){
   const base=String(el.spBaseUrlInput?.value||'').trim();
+  const allowlist=parseSharePointSitesInput(el.spSitesListInput?.value||'');
   const cookieHeader=String(el.spCookieHeaderInput?.value||'').trim();
-  if(!base) return setStatus('Enter SharePoint site URL before saving access.');
+  if(!base && !allowlist.length) return setStatus('Enter SharePoint site URL or site list before saving access.');
   try{
-    await apiPost('/api/settings',{sp_base_url:base});
+    await apiPost('/api/settings',{sp_base_url:base||null, sp_site_allowlist:allowlist});
     if(cookieHeader){
+      if(!base) return setStatus('Enter SharePoint site URL to save cookies.');
       await apiPost('/api/sp/cookies',{base_url:base,cookie_header:cookieHeader});
       if(el.spCookieHeaderInput) el.spCookieHeaderInput.value='';
     }
     await refreshSpAuthPanel();
-    setStatus(cookieHeader?'SharePoint URL and cookies saved.':'SharePoint URL saved. Paste Cookie header to enable authenticated access.');
+    setStatus(cookieHeader?'SharePoint settings and cookies saved.':'SharePoint settings saved.');
   }catch(e){
     setStatus(`SharePoint access save failed: ${err(e)}`);
   }
@@ -1501,20 +1694,35 @@ function updatePaneControls(key){
   ui.uploadBtn.classList.toggle('hidden',!p.path);
 }
 
+function inferSharePointSiteFromPath(path){
+  const raw=String(path||'').trim();
+  if(!raw.startsWith('/')) return '';
+  const parts=raw.split('/').filter(Boolean);
+  if(parts.length>=2 && (parts[0].toLowerCase()==='sites' || parts[0].toLowerCase()==='teams')){
+    return `/${parts[0]}/${parts[1]}`;
+  }
+  return '';
+}
+
 async function loadSitesForPane(p){
   try{
     const d=await apiGet('/api/sp/sites');
-    p.sites=[{site:'',title:'Default Site'},...(d.sites||[]).map(s=>({site:s.server_relative_url||s.serverRelativeUrl||'',title:s.title||s.url||'Site'}))];
-    if(!p.site&&p.sites.length) p.site=p.sites[0].site;
-  }catch{ p.sites=[{site:'',title:'Default Site'}]; p.site=''; }
+    p.sites=(d.sites||[]).map(s=>({site:s.server_relative_url||s.serverRelativeUrl||'',title:s.title||s.url||'Site'})).filter((s)=>String(s.site||'').trim());
+    if(!p.sites.length) p.sites=[{site:'',title:'Auto (from path)'}];
+    if(!p.site&&p.sites.length) p.site=p.sites[0].site||'';
+  }catch{ p.sites=[{site:'',title:'Auto (from path)'}]; p.site=''; }
+  p.siteTitle=findSiteTitle(p.site,p.sites,p.siteTitle||'');
   fillSelect(paneEls(p.key).site,p.sites,'site','title',p.site);
 }
 
 async function loadLibrariesForPane(p){
   try{
-    const d=await apiGet(`/api/sp/libraries?${new URLSearchParams({site_relative_url:p.site||''}).toString()}`);
+    const query=new URLSearchParams();
+    if(p.site) query.set('site_relative_url',p.site);
+    const d=await apiGet(`/api/sp/libraries?${query.toString()}`);
     p.libraries=(d.libraries||[]).map(l=>({path:l.server_relative_url||l.serverRelativeUrl||'',title:l.title||l.name||'Library'})).filter(x=>x.path);
-    if(!p.library&&p.libraries.length) p.library=p.libraries[0].path;
+    const hasCurrent=p.libraries.some((lib)=>String(lib.path||'')===String(p.library||''));
+    if(!hasCurrent) p.library=p.libraries.length ? p.libraries[0].path : '';
   }catch{ p.libraries=[]; }
   fillSelect(paneEls(p.key).library,p.libraries,'path','title',p.library);
 }
@@ -1524,7 +1732,7 @@ async function switchPaneKind(key,kind){
   if(kind==='local'){
     const h=await apiGet('/api/local/home'); p.path=h.path; updatePaneControls(key); await loadPane(key,p.path); return;
   }
-  await loadSitesForPane(p); await loadLibrariesForPane(p); p.path=p.library||p.path; updatePaneControls(key); if(p.path) await loadPane(key,p.path);
+  await loadSitesForPane(p); await loadLibrariesForPane(p); p.path=p.library||p.site||'/'; updatePaneControls(key); if(p.path) await loadPane(key,p.path);
 }
 function rememberRecent(p){
   if(!p.path) return;
@@ -1565,7 +1773,19 @@ async function loadPane(key,path,quiet=false){
     if(p.kind==='local'){
       const q=new URLSearchParams(); if(path) q.set('path',path); d=await apiGet(`/api/local/list?${q.toString()}`);
     }else{
-      d=await apiGet(`/api/sp/list?${new URLSearchParams({site_relative_url:p.site||'',folder_server_relative_url:path||p.library||'/'}).toString()}`);
+      let targetPath=normalizeSpPath(path||p.library||p.site||'/');
+      const sitePath=normalizeSpPath(p.site||'');
+      if(sitePath){
+        const underSite=targetPath===sitePath || targetPath.startsWith(sitePath+'/');
+        if(!underSite){
+          const libPath=normalizeSpPath(p.library||'');
+          const libUnderSite=libPath && (libPath===sitePath || libPath.startsWith(sitePath+'/'));
+          targetPath=libUnderSite ? libPath : sitePath;
+        }
+      }
+      const q=new URLSearchParams({folder_server_relative_url:targetPath});
+      if(p.site) q.set('site_relative_url',p.site);
+      d=await apiGet(`/api/sp/list?${q.toString()}`);
     }
     p.path=d.path; p.items=d.items||[]; p.selected.clear(); p.translations.clear();
     updatePaneControls(key); await refreshTranslations(key); renderPane(key); rememberRecent(p);
@@ -1617,6 +1837,7 @@ function createSplitPaneState(sessionId, side, source){
     selected:new Set(),
     translations:new Map(),
     site:source?.site||'',
+    siteTitle:source?.siteTitle||'',
     library:source?.library||'',
     sites:[],
     libraries:[],
@@ -1669,7 +1890,7 @@ function hydrateSplitRuntime(sessionId){
   if(!runtime){
     runtime={
       id:sessionId,
-      name:record?.name||'Session',
+      name:sessionLabelById(sessionId),
       language:snap.language||state.language||'English',
       translationEnabled:!!snap.translationEnabled,
       activePane:preferredSplitSide(snap),
@@ -1679,7 +1900,7 @@ function hydrateSplitRuntime(sessionId){
     state.splitRuntime[sessionId]=runtime;
     return runtime;
   }
-  runtime.name=record?.name||runtime.name||'Session';
+  runtime.name=sessionLabelById(sessionId);
   runtime.language=snap.language||state.language||'English';
   runtime.translationEnabled=!!snap.translationEnabled;
   runtime.activePane=preferredSplitSide(snap);
@@ -1692,6 +1913,7 @@ function hydrateSplitRuntime(sessionId){
     const libraryChanged=pane.library!==String(src.library||'');
     pane.kind=src.kind||'local';
     pane.site=src.site||'';
+    pane.siteTitle=src.siteTitle||pane.siteTitle||'';
     pane.library=src.library||'';
     pane.path=src.path||'';
     pane.filterText=src.filterText||'';
@@ -1716,8 +1938,8 @@ function splitRuntimeSnapshot(runtime){
     language:runtime.language||state.language||'English',
     translationEnabled:!!runtime.translationEnabled,
     activePane:(runtime.activePane==='right'?'right':'left'),
-    left:{kind:runtime.left.kind,site:runtime.left.site||'',library:runtime.left.library||'',path:runtime.left.path||'',filterText:runtime.left.filterText||''},
-    right:{kind:runtime.right.kind,site:runtime.right.site||'',library:runtime.right.library||'',path:runtime.right.path||'',filterText:runtime.right.filterText||''},
+    left:{kind:runtime.left.kind,site:runtime.left.site||'',siteTitle:findSiteTitle(runtime.left.site,runtime.left.sites,runtime.left.siteTitle||''),library:runtime.left.library||'',path:runtime.left.path||'',filterText:runtime.left.filterText||''},
+    right:{kind:runtime.right.kind,site:runtime.right.site||'',siteTitle:findSiteTitle(runtime.right.site,runtime.right.sites,runtime.right.siteTitle||''),library:runtime.right.library||'',path:runtime.right.path||'',filterText:runtime.right.filterText||''},
   };
 }
 
@@ -1763,9 +1985,7 @@ function splitPaneElements(sessionId, side){
     filter:id(splitPaneDomId(sessionId,side,'filter')),
     path:id(splitPaneDomId(sessionId,side,'path')),
     pathInput:id(splitPaneDomId(sessionId,side,'path-input')),
-    go:id(splitPaneDomId(sessionId,side,'go')),
     up:id(splitPaneDomId(sessionId,side,'up')),
-    refresh:id(splitPaneDomId(sessionId,side,'refresh')),
   };
 }
 
@@ -1801,7 +2021,19 @@ async function loadSplitPane(sessionId, side, path, quiet=false){
       if(path) q.set('path',path);
       d=await apiGet(`/api/local/list?${q.toString()}`);
     }else{
-      d=await apiGet(`/api/sp/list?${new URLSearchParams({site_relative_url:pane.site||'',folder_server_relative_url:path||pane.library||'/'}).toString()}`);
+      let targetPath=normalizeSpPath(path||pane.library||pane.site||'/');
+      const sitePath=normalizeSpPath(pane.site||'');
+      if(sitePath){
+        const underSite=targetPath===sitePath || targetPath.startsWith(sitePath+'/');
+        if(!underSite){
+          const libPath=normalizeSpPath(pane.library||'');
+          const libUnderSite=libPath && (libPath===sitePath || libPath.startsWith(sitePath+'/'));
+          targetPath=libUnderSite ? libPath : sitePath;
+        }
+      }
+      const q=new URLSearchParams({folder_server_relative_url:targetPath});
+      if(pane.site) q.set('site_relative_url',pane.site);
+      d=await apiGet(`/api/sp/list?${q.toString()}`);
     }
     pane.path=d.path;
     pane.items=d.items||[];
@@ -1855,8 +2087,8 @@ function renderSplitPane(sessionId, side){
     meta.className='meta';
     meta.textContent=it.isDir?'Dir':fmtSize(it.size);
     row.appendChild(cb); row.appendChild(nm); row.appendChild(meta);
-    row.onclick=(ev)=>{ focusSplitSession(sessionId); if(!ev.ctrlKey&&!ev.metaKey) pane.selected.clear(); pane.selected.add(it.path); persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
-    row.ondblclick=()=>{ focusSplitSession(sessionId); return it.isDir?loadSplitPane(sessionId, side, it.path):window.open(downloadUrl(pane,it.path),'_blank'); };
+    row.onclick=(ev)=>{ focusSplitPane(sessionId, side); if(!ev.ctrlKey&&!ev.metaKey) pane.selected.clear(); pane.selected.add(it.path); persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
+    row.ondblclick=()=>{ focusSplitPane(sessionId, side); return it.isDir?loadSplitPane(sessionId, side, it.path):window.open(downloadUrl(pane,it.path),'_blank'); };
     row.ondragstart=(ev)=>startSplitDrag(sessionId, side, it.path, ev);
     if(it.isDir){
       row.ondragover=(ev)=>{ ev.preventDefault(); row.classList.add('drop-folder'); };
@@ -1966,12 +2198,10 @@ function renderSplitSessions(){
           <div class="split-pane-actions">
             <button id="${splitPaneDomId(sessionId,'session','focus')}" type="button">Focus</button>
             <button id="${splitPaneDomId(sessionId,side,'up')}" type="button">Up</button>
-            <button id="${splitPaneDomId(sessionId,side,'refresh')}" type="button">Refresh</button>
           </div>
         </div>
         <div class="split-pane-pathbar">
           <input id="${splitPaneDomId(sessionId,side,'path-input')}" type="text" spellcheck="false" placeholder="${pane.kind==='sharepoint'?'SharePoint path...':'Local path...'}" value="${escapeHtml(pane.path||'')}" />
-          <button id="${splitPaneDomId(sessionId,side,'go')}" type="button">Go</button>
         </div>
         <div class="split-pane-filter">
           <input id="${splitPaneDomId(sessionId,side,'filter')}" type="text" spellcheck="false" placeholder="Filter..." value="${escapeHtml(pane.filterText||'')}" />
@@ -1987,12 +2217,13 @@ function renderSplitSessions(){
     const pane=runtime[side];
     const focusBtn=id(splitPaneDomId(sessionId,'session','focus'));
     if(focusBtn) focusBtn.onclick=()=>focusSplitSession(sessionId);
+    const card=el.splitSessionsHost?.querySelector(`[data-split-session="${sessionId}"][data-split-side="${side}"]`);
+    if(card) card.onclick=()=>focusSplitPane(sessionId, side);
     const ui=splitPaneElements(sessionId, side);
-    if(ui.filter) ui.filter.oninput=()=>{ focusSplitSession(sessionId); pane.filterText=ui.filter.value||''; persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
-    if(ui.pathInput) ui.pathInput.onkeydown=async(ev)=>{ if(ev.key==='Enter'){ focusSplitSession(sessionId); await loadSplitPane(sessionId, side, (ui.pathInput.value||'').trim()); } };
-    if(ui.go) ui.go.onclick=()=>{ focusSplitSession(sessionId); return loadSplitPane(sessionId, side, (ui.pathInput?.value||'').trim()); };
+    if(ui.filter) ui.filter.oninput=()=>{ focusSplitPane(sessionId, side); pane.filterText=ui.filter.value||''; persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
+    if(ui.pathInput) ui.pathInput.onkeydown=async(ev)=>{ if(ev.key==='Enter'){ focusSplitPane(sessionId, side); await loadSplitPane(sessionId, side, (ui.pathInput.value||'').trim()); } };
+    if(ui.pathInput) ui.pathInput.onchange=async()=>{ focusSplitPane(sessionId, side); await loadSplitPane(sessionId, side, (ui.pathInput.value||'').trim(), true); };
     if(ui.up) ui.up.onclick=()=>navigateSplitPaneUp(sessionId, side);
-    if(ui.refresh) ui.refresh.onclick=()=>{ focusSplitSession(sessionId); return loadSplitPane(sessionId, side, pane.path); };
     renderSplitPane(sessionId, side);
   });
   renderAppView();
@@ -2878,6 +3109,10 @@ function renderAppView(){
     el.appRelinkingTabBtn.classList.toggle('text-primary', !workspaceActive);
   }
   const showRelinking=!workspaceActive;
+  const showSessionBar=workspaceActive && !state.splitViewEnabled;
+  const showToolsBar=workspaceActive;
+  if(el.sessionBar) el.sessionBar.classList.toggle('hidden', !showSessionBar);
+  if(el.workspaceToolsBar) el.workspaceToolsBar.classList.toggle('hidden', !showToolsBar);
   if(el.relinkingWorkspaceView) el.relinkingWorkspaceView.classList.toggle('hidden', !showRelinking);
   if(el.mainWorkspaceView) el.mainWorkspaceView.classList.toggle('hidden', showRelinking || (state.splitViewEnabled && splitSessionIds().length>0));
   if(el.splitSessionsHost) el.splitSessionsHost.classList.toggle('hidden', showRelinking || !(state.splitViewEnabled && splitSessionIds().length>0));
@@ -3371,8 +3606,8 @@ function saveCurrentLayout(){ state.layouts.unshift({name:(el.layoutNameInput.va
 function loadRecent(){ try{ state.recent=JSON.parse(localStorage.getItem('smx_web_recent')||'[]'); if(!Array.isArray(state.recent)) state.recent=[]; }catch{ state.recent=[]; } }
 function renderRecent(){ el.recentList.innerHTML=''; state.recent.forEach((r,i)=>{ const row=document.createElement('div'); row.className='favorite'; row.innerHTML=`<div><strong>${r.path}</strong><small>${r.kind}${r.site?` | ${r.site}`:''}</small></div>`; const act=document.createElement('div'); const open=document.createElement('button'); open.textContent='Open'; open.onclick=async()=>{ const p=activePane(); p.kind=r.kind; p.site=r.site||''; p.path=r.path; if(p.kind==='sharepoint'){ await loadSitesForPane(p); await loadLibrariesForPane(p);} updatePaneControls(p.key); await loadPane(p.key,p.path); }; const del=document.createElement('button'); del.textContent='X'; del.onclick=()=>{ state.recent.splice(i,1); localStorage.setItem('smx_web_recent',JSON.stringify(state.recent)); renderRecent(); }; act.appendChild(open); act.appendChild(del); row.appendChild(act); el.recentList.appendChild(row); }); }
 
-function currentWorkspaceSnapshot(){ return { language:state.language, translationEnabled:state.translationEnabled, activePane:state.activePane||'left', left:{kind:state.left.kind,site:state.left.site||'',library:state.left.library||'',path:state.left.path||'',filterText:state.left.filterText||''}, right:{kind:state.right.kind,site:state.right.site||'',library:state.right.library||'',path:state.right.path||'',filterText:state.right.filterText||''} }; }
-async function applyWorkspaceSnapshot(s){ if(!s) return; state.language=s.language||state.language||'English'; state.translationEnabled=!!s.translationEnabled; state.activePane=(s.activePane==='right'?'right':'left'); el.langInput.value=state.language; el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`; for(const key of ['left','right']){ const pane=state[key], src=s[key]||{}; pane.kind=src.kind||'local'; pane.site=src.site||''; pane.library=src.library||''; pane.path=src.path||''; pane.filterText=src.filterText||''; if(pane.kind==='sharepoint'){ await loadSitesForPane(pane); await loadLibrariesForPane(pane); } updatePaneControls(key); await loadPane(key,pane.path||(pane.kind==='local'?'':pane.library||'/')); } }
+function currentWorkspaceSnapshot(){ return { language:state.language, translationEnabled:state.translationEnabled, activePane:state.activePane||'left', left:{kind:state.left.kind,site:state.left.site||'',siteTitle:findSiteTitle(state.left.site,state.left.sites,state.left.siteTitle||''),library:state.left.library||'',path:state.left.path||'',filterText:state.left.filterText||''}, right:{kind:state.right.kind,site:state.right.site||'',siteTitle:findSiteTitle(state.right.site,state.right.sites,state.right.siteTitle||''),library:state.right.library||'',path:state.right.path||'',filterText:state.right.filterText||''} }; }
+async function applyWorkspaceSnapshot(s){ if(!s) return; state.language=s.language||state.language||'English'; state.translationEnabled=!!s.translationEnabled; state.activePane=(s.activePane==='right'?'right':'left'); el.langInput.value=state.language; el.toggleTranslateBtn.textContent=`Translate: ${state.translationEnabled?'On':'Off'}`; for(const key of ['left','right']){ const pane=state[key], src=s[key]||{}; pane.kind=src.kind||'local'; pane.site=src.site||''; pane.siteTitle=src.siteTitle||pane.siteTitle||''; pane.library=src.library||''; pane.path=src.path||''; pane.filterText=src.filterText||''; if(pane.kind==='sharepoint'){ await loadSitesForPane(pane); await loadLibrariesForPane(pane); } updatePaneControls(key); await loadPane(key,pane.path||(pane.kind==='local'?'':pane.library||'/')); } }
 function ensureSplitCompareSelection(){ return; }
 function activeSessionSnapshot(){
   const runtime=state.splitRuntime[state.activeSessionId];
@@ -3381,7 +3616,7 @@ function activeSessionSnapshot(){
 }
 function loadSessions(){
   try{ state.sessions=JSON.parse(localStorage.getItem('smx_web_sessions')||'[]'); if(!Array.isArray(state.sessions)) state.sessions=[]; }catch{ state.sessions=[]; }
-  if(!state.sessions.length){ state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}]; }
+  if(!state.sessions.length){ state.sessions=[{id:`s-${Date.now()}`,name:'',snapshot:currentWorkspaceSnapshot()}]; }
   state.activeSessionId=localStorage.getItem('smx_web_active_session')||state.sessions[0].id;
   if(!state.sessions.find(s=>s.id===state.activeSessionId)) state.activeSessionId=state.sessions[0].id;
   state.splitViewEnabled=localStorage.getItem('smx_web_split_view')==='1';
@@ -3392,15 +3627,15 @@ function persistSessions(){
   localStorage.setItem('smx_web_active_session',state.activeSessionId||'');
   localStorage.setItem('smx_web_split_view',state.splitViewEnabled?'1':'0');
 }
-function saveCurrentSessionSnapshot(){ const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; state.sessions[idx].snapshot=activeSessionSnapshot(); persistSessions(); }
-async function activateSession(id){ saveCurrentSessionSnapshot(); const s=state.sessions.find(x=>x.id===id); if(!s) return; state.activeSessionId=id; delete state.splitRuntime[id]; renderSessionTabs(); await applyWorkspaceSnapshot(s.snapshot||{}); persistSessions(); await refreshSplitView(true); setStatus(`Session active: ${s.name}`); }
-function newSession(){ saveCurrentSessionSnapshot(); const s={id:`s-${Date.now()}`,name:`Session ${state.sessions.length+1}`,snapshot:activeSessionSnapshot()}; state.sessions.unshift(s); state.activeSessionId=s.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Created ${s.name}`); }
-function duplicateSession(){ saveCurrentSessionSnapshot(); const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const cp={id:`s-${Date.now()}`,name:`${src.name||'Session'} Copy`,snapshot:JSON.parse(JSON.stringify(src.snapshot||activeSessionSnapshot()))}; state.sessions.unshift(cp); state.activeSessionId=cp.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Duplicated session: ${cp.name}`); }
-function renameSession(){ const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const next=(prompt('Session name:',src.name||'Session')||'').trim(); if(!next) return; src.name=next; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Renamed session to: ${next}`); }
-async function closeSession(){ if(state.sessions.length<=1) return setStatus('At least one session is required.'); const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; const removed=state.sessions.splice(idx,1)[0]; delete state.splitRuntime[removed.id]; state.activeSessionId=state.sessions[0].id; persistSessions(); renderSessionTabs(); renderSplitSessions(); await activateSession(state.activeSessionId); setStatus(`Closed ${removed.name}`); }
+function saveCurrentSessionSnapshot(){ const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; state.sessions[idx].snapshot=activeSessionSnapshot(); persistSessions(); renderSessionTabs(); if(state.splitViewEnabled) renderSplitSessions(); }
+async function activateSession(id){ saveCurrentSessionSnapshot(); const s=state.sessions.find(x=>x.id===id); if(!s) return; state.activeSessionId=id; delete state.splitRuntime[id]; renderSessionTabs(); await applyWorkspaceSnapshot(s.snapshot||{}); persistSessions(); await refreshSplitView(true); setStatus(`Session active: ${sessionLabelById(id)}`); }
+function newSession(){ saveCurrentSessionSnapshot(); const s={id:`s-${Date.now()}`,name:'',snapshot:activeSessionSnapshot()}; state.sessions.unshift(s); state.activeSessionId=s.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Created ${sessionLabelById(s.id)}`); }
+function duplicateSession(){ saveCurrentSessionSnapshot(); const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const cp={id:`s-${Date.now()}`,name:'',snapshot:JSON.parse(JSON.stringify(src.snapshot||activeSessionSnapshot()))}; state.sessions.unshift(cp); state.activeSessionId=cp.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Duplicated session: ${sessionLabelById(cp.id)}`); }
+function renameSession(){ setStatus('Session labels are automatic from the current folder or SharePoint location.'); }
+async function closeSession(){ if(state.sessions.length<=1) return setStatus('At least one session is required.'); const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; const removed=state.sessions.splice(idx,1)[0]; const removedLabel=sessionLabelFromSnapshot(removed.snapshot||{}); delete state.splitRuntime[removed.id]; state.activeSessionId=state.sessions[0].id; persistSessions(); renderSessionTabs(); renderSplitSessions(); await activateSession(state.activeSessionId); setStatus(`Closed ${removedLabel}`); }
 function toggleSplitView(){ state.splitViewEnabled=!state.splitViewEnabled; persistSessions(); renderSplitSessions(); if(state.splitViewEnabled) refreshSplitView(true); setStatus(`Split view ${state.splitViewEnabled?'enabled':'disabled'}.`); }
 async function changeSplitCompareSession(_id){ return; }
-function renderSessionTabs(){ if(!el.sessionTabs) return; el.sessionTabs.innerHTML=''; state.sessions.forEach((s)=>{ const b=document.createElement('button'); b.className=`layout-tab${s.id===state.activeSessionId?' active':''}`; b.textContent=s.name||'Session'; b.onclick=()=>activateSession(s.id); el.sessionTabs.appendChild(b); }); renderSplitSessionOptions(); }
+function renderSessionTabs(){ if(!el.sessionTabs) return; el.sessionTabs.innerHTML=''; state.sessions.forEach((s)=>{ const b=document.createElement('button'); b.className=`layout-tab${s.id===state.activeSessionId?' active':''}`; b.textContent=sessionLabelById(s.id); b.onclick=()=>activateSession(s.id); el.sessionTabs.appendChild(b); }); renderSplitSessionOptions(); }
 
 function exportConfig(){
   const payload={
@@ -3443,7 +3678,7 @@ async function importConfigFromFile(file){
     state.sessions=Array.isArray(data.sessions)?data.sessions:[];
     state.activeSessionId=data.activeSessionId||'';
     if(!state.sessions.length){
-      state.sessions=[{id:`s-${Date.now()}`,name:'Session 1',snapshot:currentWorkspaceSnapshot()}];
+      state.sessions=[{id:`s-${Date.now()}`,name:'',snapshot:currentWorkspaceSnapshot()}];
       state.activeSessionId=state.sessions[0].id;
     }
     ensureSplitCompareSelection();
@@ -3462,10 +3697,11 @@ async function importConfigFromFile(file){
 function wirePaneEvents(key){
   const p=state[key], ui=paneEls(key);
   ui.kind.onchange=async()=>{ state.activePane=key; await switchPaneKind(key,ui.kind.value); };
-  ui.site.onchange=async()=>{ state.activePane=key; p.site=ui.site.value; await loadLibrariesForPane(p); p.path=p.library||p.path; updatePaneControls(key); await loadPane(key,p.path); };
+  ui.site.onchange=async()=>{ state.activePane=key; p.site=ui.site.value; p.library=''; p.path=normalizeSpPath(p.site||'/'); await loadLibrariesForPane(p); p.path=p.library||normalizeSpPath(p.site||'/'); updatePaneControls(key); await loadPane(key,p.path); };
   ui.library.onchange=async()=>{ state.activePane=key; p.library=ui.library.value; p.path=p.library; await loadPane(key,p.path); };
-  ui.go.onclick=async()=>{ state.activePane=key; await loadPane(key,ui.path.value.trim()); };
+  if(ui.go) ui.go.onclick=async()=>{ state.activePane=key; await loadPane(key,ui.path.value.trim()); };
   ui.path.onkeydown=async(e)=>{ if(e.key==='Enter'){ state.activePane=key; await loadPane(key,ui.path.value.trim()); } };
+  ui.path.onchange=async()=>{ state.activePane=key; await loadPane(key,ui.path.value.trim(), true); };
   ui.uploadBtn.onclick=()=>ui.uploadInput.click();
   ui.uploadInput.onchange=async()=>{ const f=ui.uploadInput.files&&ui.uploadInput.files[0]; if(!f) return; state.activePane=key; await uploadToPane(key,f); ui.uploadInput.value=''; };
   if(ui.filter){
@@ -3482,6 +3718,11 @@ function wireGlobalEvents(){
   if(el.openSettingsBtn) el.openSettingsBtn.onclick=()=>openSettingsModal();
   if(el.settingsCloseBtn) el.settingsCloseBtn.onclick=()=>closeSettingsModal();
   if(el.settingsApplyBtn) el.settingsApplyBtn.onclick=async()=>{ await applySettingsFromModal(); closeSettingsModal(); };
+  if(el.aiProviderSaveBtn) el.aiProviderSaveBtn.onclick=saveAiApiKeyFromPortal;
+  if(el.aiProviderSelect) el.aiProviderSelect.onchange=()=>renderAiModelOptions(el.aiProviderSelect.value, '');
+  if(el.openAiApiKeyClearBtn) el.openAiApiKeyClearBtn.onclick=()=>clearAiApiKeyFromPortal('openai_api_key');
+  if(el.claudeApiKeyClearBtn) el.claudeApiKeyClearBtn.onclick=()=>clearAiApiKeyFromPortal('anthropic_api_key');
+  if(el.geminiApiKeyClearBtn) el.geminiApiKeyClearBtn.onclick=()=>clearAiApiKeyFromPortal('gemini_api_key');
   if(el.settingsModal) el.settingsModal.onclick=(evt)=>{ if(evt.target===el.settingsModal) closeSettingsModal(); };
   if(el.newFolderCancelBtn) el.newFolderCancelBtn.onclick=()=>closeNewFolderModal();
   if(el.newFolderCreateBtn) el.newFolderCreateBtn.onclick=()=>createFolder();

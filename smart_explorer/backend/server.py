@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import base64
+import argparse
 import fnmatch
 import io
 import logging
@@ -15,7 +16,7 @@ import time
 import unicodedata
 import zipfile
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import List, Optional, Dict, Tuple
@@ -28,15 +29,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..settings import load_config, save_config, AppConfig
+from ..services.ai_provider import (
+    default_model_for_provider,
+    effective_ai_model,
+    effective_ai_provider,
+    get_provider_api_key,
+    has_provider_api_key,
+)
 from ..services.ai_summary import AISummarizer, SummaryError, extract_text_snippet
 from ..services.ai_rename_planner import AIRenamePlanner, RenamePlanningError
 from ..services.tag_store import TagStore
 from ..translation_cache import TranslationCache
 from ..translators.base import IdentityTranslator, Translator
 try:
-    from ..translators.openai_translator import OpenAITranslator
+    from ..translators.ai_translator import AITranslator
 except Exception:
-    OpenAITranslator = None  # type: ignore[assignment]
+    AITranslator = None  # type: ignore[assignment]
 from ..sprest.client import SharePointClient
 
 
@@ -269,47 +277,84 @@ class TranslateTextResponse(BaseModel):
 class SettingsResponse(BaseModel):
     target_language: str
     model: str
+    ai_provider: str = "openai"
+    ai_model: str = "gpt-4.1-mini"
     ignore_patterns: List[str]
     has_api_key: bool
+    has_openai_api_key: bool = False
+    has_anthropic_api_key: bool = False
+    has_gemini_api_key: bool = False
     sp_base_url: Optional[str] = None
     sp_has_cookies: bool = False
+    sp_site_allowlist: List[str] = []
 
 
 class SettingsUpdateRequest(BaseModel):
     target_language: Optional[str] = None
     model: Optional[str] = None
+    ai_provider: Optional[str] = None
+    ai_model: Optional[str] = None
     ignore_patterns: Optional[List[str]] = None
     api_key: Optional[str] = None  # empty string clears
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     sp_base_url: Optional[str] = None
+    sp_site_allowlist: Optional[List[str]] = None
 
 
 def create_translator(cfg: AppConfig) -> Translator:
-    api_key = (cfg.api_key or "").strip()
-    if not api_key:
-        try:
-            from ..services import secret_store
+    provider = getattr(cfg, "translator_provider", "auto") or "auto"
 
-            api_key = secret_store.get_secret("OPENAI_API_KEY") or ""
+    def ai_instance(provider_name: str) -> Optional[Translator]:
+        if AITranslator is None:
+            return None
+        api_key = get_provider_api_key(provider_name, cfg=cfg)
+        if not api_key:
+            return None
+        if provider_name == "openai":
+            model = effective_ai_model(cfg) if effective_ai_provider(cfg) == "openai" else default_model_for_provider("openai")
+        else:
+            model = effective_ai_model(cfg) if effective_ai_provider(cfg) == provider_name else default_model_for_provider(provider_name)
+        try:
+            return AITranslator(provider_name, api_key, model)
         except Exception:
-            api_key = ""
-    if api_key and OpenAITranslator is not None:
-        return OpenAITranslator(api_key=api_key, model=cfg.model)
+            return None
+
+    if provider == "openai":
+        return ai_instance("openai") or IdentityTranslator()
+    if provider == "claude":
+        return ai_instance("claude") or IdentityTranslator()
+    if provider == "gemini":
+        return ai_instance("gemini") or IdentityTranslator()
+    if provider == "auto":
+        preferred = effective_ai_provider(cfg)
+        first = {
+            "openai": lambda: ai_instance("openai"),
+            "claude": lambda: ai_instance("claude"),
+            "gemini": lambda: ai_instance("gemini"),
+        }.get(preferred, lambda: ai_instance("openai"))
+        return (
+            first()
+            or ai_instance("openai")
+            or ai_instance("claude")
+            or ai_instance("gemini")
+            or IdentityTranslator()
+        )
     return IdentityTranslator()
 
 
 def create_rename_planner(cfg: AppConfig) -> Optional[AIRenamePlanner]:
-    api_key = (cfg.api_key or "").strip()
-    if not api_key:
-        try:
-            from ..services import secret_store
-
-            api_key = secret_store.get_secret("OPENAI_API_KEY") or ""
-        except Exception:
-            api_key = ""
+    provider = effective_ai_provider(cfg)
+    api_key = get_provider_api_key(provider, cfg=cfg)
     if not api_key:
         return None
     try:
-        return AIRenamePlanner(api_key=api_key, model=cfg.model)
+        return AIRenamePlanner(
+            api_key=api_key,
+            provider=provider,
+            model=effective_ai_model(cfg),
+        )
     except Exception:
         return None
 
@@ -317,14 +362,18 @@ def create_rename_planner(cfg: AppConfig) -> Optional[AIRenamePlanner]:
 cfg = load_config()
 app = FastAPI(title="SmartExplorer Backend", version="0.1.0")
 
+_cors_raw = (os.getenv("SMX_CORS_ORIGINS") or "").strip()
+_cors_origins = [origin.strip() for origin in _cors_raw.split(",") if origin.strip()]
+_cors_regex = None
+if not _cors_origins:
+    # LAN-friendly default for private networks.
+    _cors_regex = r"^https?://.*$"
+    _cors_origins = []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -842,18 +891,17 @@ if _web_dir.exists():
 
 
 def _create_summarizer() -> Optional[AISummarizer]:
-    api_key = (cfg.api_key or "").strip()
-    if not api_key:
-        try:
-            from ..services import secret_store
-
-            api_key = secret_store.get_secret("OPENAI_API_KEY") or ""
-        except Exception:
-            api_key = ""
+    provider = effective_ai_provider(cfg)
+    api_key = get_provider_api_key(provider, cfg=cfg)
     if not api_key:
         return None
     try:
-        return AISummarizer(api_key=api_key, model=cfg.model, timeout=45.0)
+        return AISummarizer(
+            api_key=api_key,
+            provider=provider,
+            model=effective_ai_model(cfg),
+            timeout=45.0,
+        )
     except Exception:
         return None
 
@@ -1614,13 +1662,28 @@ def extract_text_item(req: ItemAIRequest):
 
 @app.get("/api/settings", response_model=SettingsResponse)
 def get_settings():
+    ai_provider = effective_ai_provider(cfg)
+    ai_model = effective_ai_model(cfg)
+    has_openai = has_provider_api_key("openai", cfg=cfg)
+    has_anthropic = has_provider_api_key("claude", cfg=cfg)
+    has_gemini = has_provider_api_key("gemini", cfg=cfg)
     return SettingsResponse(
         target_language=cfg.target_language,
-        model=cfg.model,
+        model=ai_model,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
         ignore_patterns=cfg.ignore_patterns or [],
-        has_api_key=bool(cfg.api_key),
+        has_api_key={
+            "openai": has_openai,
+            "claude": has_anthropic,
+            "gemini": has_gemini,
+        }.get(ai_provider, False),
+        has_openai_api_key=has_openai,
+        has_anthropic_api_key=has_anthropic,
+        has_gemini_api_key=has_gemini,
         sp_base_url=(sp_client.base_url if sp_client else None),
         sp_has_cookies=(sp_client.has_cookies() if sp_client else False),
+        sp_site_allowlist=list(getattr(cfg, "sp_site_allowlist", []) or []),
     )
 
 
@@ -1634,6 +1697,14 @@ def update_settings(update: SettingsUpdateRequest):
         cfg.target_language = update.target_language or "English"
     if update.model is not None:
         cfg.model = update.model or cfg.model
+        cfg.ai_model = cfg.model
+        changed_translator = True
+    if update.ai_provider is not None:
+        cfg.ai_provider = update.ai_provider or cfg.ai_provider or "openai"
+        changed_translator = True
+    if update.ai_model is not None:
+        cfg.ai_model = (update.ai_model or "").strip() or effective_ai_model(cfg)
+        cfg.model = cfg.ai_model
         changed_translator = True
     if update.ignore_patterns is not None:
         cfg.ignore_patterns = update.ignore_patterns or []
@@ -1652,11 +1723,56 @@ def update_settings(update: SettingsUpdateRequest):
         except Exception:
             cfg.api_key = (update.api_key or "").strip() or None
         changed_translator = True
+    try:
+        from ..services import secret_store
+    except Exception:
+        secret_store = None  # type: ignore[assignment]
+    for field_name, secret_name in (
+        ("openai_api_key", "OPENAI_API_KEY"),
+        ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("gemini_api_key", "GEMINI_API_KEY"),
+    ):
+        field_value = getattr(update, field_name)
+        if field_value is None:
+            continue
+        key_text = str(field_value or "").strip()
+        if secret_store:
+            if key_text:
+                secret_store.set_secret(secret_name, key_text)
+            else:
+                secret_store.delete_secret(secret_name)
+        elif field_name == "openai_api_key":
+            cfg.api_key = key_text or None
+        changed_translator = True
     if update.sp_base_url is not None:
         if update.sp_base_url:
             sp_client = SharePointClient(update.sp_base_url)
         else:
             sp_client = None
+    if update.sp_site_allowlist is not None:
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for raw in update.sp_site_allowlist or []:
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            if value.startswith("http://") or value.startswith("https://"):
+                try:
+                    parsed = urlparse(value)
+                    value = parsed.path or value
+                except Exception:
+                    pass
+            if not value.startswith("/"):
+                value = "/" + value
+            value = value.rstrip("/") or "/"
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        cfg.sp_site_allowlist = normalized
+        global _sp_sites_cache
+        _sp_sites_cache = None
     save_config(cfg)
     if changed_translator:
         translator = create_translator(cfg)
@@ -1669,10 +1785,21 @@ def update_settings(update: SettingsUpdateRequest):
 # Removed mapped-drive endpoints
 
 
+class SPCookieRecord(BaseModel):
+    name: str
+    value: str
+    domain: Optional[str] = None
+    path: str = "/"
+    secure: bool = True
+    http_only: bool = False
+    expires_at: Optional[float] = None
+
+
 class SPCookiesRequest(BaseModel):
     base_url: str
     cookie_header: Optional[str] = None  # e.g., "FedAuth=...; rtFa=..."
     cookies: Optional[Dict[str, str]] = None
+    cookie_records: Optional[List[SPCookieRecord]] = None
 
 
 @app.post("/api/sp/cookies")
@@ -1686,6 +1813,17 @@ def sp_set_cookies(req: SPCookiesRequest):
     if req.cookies:
         for k, v in req.cookies.items():
             sp_client.set_cookie(k, v)
+    if req.cookie_records:
+        for record in req.cookie_records:
+            sp_client.set_cookie_record(
+                record.name,
+                record.value,
+                domain=record.domain,
+                path=record.path,
+                secure=record.secure,
+                http_only=record.http_only,
+                expires_at=record.expires_at,
+            )
     global _sp_sites_cache, _sp_libraries_cache
     _sp_sites_cache = None
     _sp_libraries_cache.clear()
@@ -1757,7 +1895,50 @@ class SPShareLinkResponse(BaseModel):
 
 @app.get("/api/sp/sites", response_model=SPSitesResponse)
 def sp_sites():
+    def _norm_site_row(raw: dict) -> dict:
+        rel = str(raw.get("server_relative_url") or raw.get("serverRelativeUrl") or "").strip() or None
+        title = str(raw.get("title") or "").strip() or None
+        url = str(raw.get("url") or "").strip() or None
+        ident = raw.get("id")
+        return {
+            "title": title,
+            "server_relative_url": rel,
+            "url": url,
+            "id": ident,
+        }
+
+    def _configured_sites() -> List[dict]:
+        rows: List[dict] = []
+        configured = list(getattr(cfg, "sp_site_allowlist", []) or [])
+        base_url = str(getattr(cfg, "sp_base_url", "") or "").strip()
+        parsed = urlparse(base_url) if base_url else None
+        origin = f"{parsed.scheme}://{parsed.netloc}" if parsed and parsed.scheme and parsed.netloc else ""
+        seen: set[str] = set()
+        for rel in configured:
+            path = str(rel or "").strip()
+            if not path:
+                continue
+            if not path.startswith("/"):
+                path = "/" + path
+            path = path.rstrip("/") or "/"
+            key = path.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            slug = path.split("/")[-1] if "/" in path else path
+            title = slug.replace("-", " ").replace("_", " ").strip() or path
+            rows.append(_norm_site_row({
+                "title": title,
+                "server_relative_url": path,
+                "url": (origin + path) if origin else None,
+                "id": None,
+            }))
+        return rows
+
+    configured_sites = _configured_sites()
     if not sp_client:
+        if configured_sites:
+            return SPSitesResponse(sites=[SPSite(**s) for s in configured_sites])
         raise HTTPException(status_code=400, detail="SharePoint base URL not configured")
     try:
         global _sp_sites_cache
@@ -1767,10 +1948,32 @@ def sp_sites():
         else:
             sites = sp_client.list_sites()
             _sp_sites_cache = (now, sites)
+        by_path: Dict[str, dict] = {}
+        for raw_site in sites or []:
+            site = _norm_site_row(raw_site or {})
+            rel = str(site.get("server_relative_url") or "").strip()
+            if not rel:
+                continue
+            key = rel.lower()
+            if key not in by_path:
+                by_path[key] = site
+        for raw_site in configured_sites:
+            site = _norm_site_row(raw_site or {})
+            rel = str(site.get("server_relative_url") or "").strip()
+            if not rel:
+                continue
+            key = rel.lower()
+            if key not in by_path:
+                by_path[key] = site
+        sites = list(by_path.values())
         return SPSitesResponse(sites=[SPSite(**s) for s in sites])
     except httpx.HTTPStatusError as e:
+        if configured_sites:
+            return SPSitesResponse(sites=[SPSite(**s) for s in configured_sites])
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
     except Exception as e:
+        if configured_sites:
+            return SPSitesResponse(sites=[SPSite(**s) for s in configured_sites])
         raise HTTPException(status_code=500, detail=f"Failed to list sites: {e}")
 
 
@@ -1959,18 +2162,26 @@ def _build_content_disposition(filename: str) -> str:
 
 
 @app.get("/api/sp/list", response_model=SPListResponse)
-def sp_list(site_relative_url: str = Query(..., description="e.g., /sites/PeakEnergy-All"),
+def sp_list(site_relative_url: Optional[str] = Query(None, description="e.g., /sites/PeakEnergy-All"),
             folder_server_relative_url: str = Query(..., description="e.g., /sites/PeakEnergy-All/Shared Documents")):
     if not sp_client:
         raise HTTPException(status_code=400, detail="SharePoint base URL not configured. Set via /api/settings or /api/sp/cookies.")
+    resolved_site = (site_relative_url or "").strip() or None
+    if not resolved_site:
+        folder = str(folder_server_relative_url or "").strip()
+        if folder.startswith("/"):
+            parts = [p for p in folder.split("/") if p]
+            # Typical SharePoint site prefixes: /sites/<name>/... or /teams/<name>/...
+            if len(parts) >= 2 and parts[0].lower() in {"sites", "teams"}:
+                resolved_site = f"/{parts[0]}/{parts[1]}"
     try:
-        cached = _cache_get(site_relative_url, folder_server_relative_url)
+        cached = _cache_get(resolved_site, folder_server_relative_url)
         if cached and (time.time() - cached[0]) < _SP_LIST_TTL:
             folders, files = cached[1], cached[2]
         else:
-            folders, files = sp_client.list_children(folder_server_relative_url, site_relative_url=site_relative_url)
-            _cache_put(site_relative_url, folder_server_relative_url, folders, files)
-            _schedule_prefetch(folders, site_relative_url)
+            folders, files = sp_client.list_children(folder_server_relative_url, site_relative_url=resolved_site)
+            _cache_put(resolved_site, folder_server_relative_url, folders, files)
+            _schedule_prefetch(folders, resolved_site)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=f"SharePoint error: {e.response.text}")
     except Exception as e:
@@ -2376,8 +2587,13 @@ def sp_metadata_update(req: SPMetadataUpdateRequest):
 def main(argv: Optional[list[str]] = None):
     import uvicorn
 
-    host = "127.0.0.1"
-    port = 5001
+    parser = argparse.ArgumentParser(description="SmartExplorer backend server")
+    parser.add_argument("--host", default=os.getenv("SMX_HOST", "0.0.0.0"), help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.getenv("SMX_PORT", "5001")), help="Bind port (default: 5001)")
+    args = parser.parse_args(argv or [])
+
+    host = str(args.host or "0.0.0.0").strip() or "0.0.0.0"
+    port = int(args.port or 5001)
     uvicorn.run("smart_explorer.backend.server:app", host=host, port=port, reload=False, log_level="info")
 
 
