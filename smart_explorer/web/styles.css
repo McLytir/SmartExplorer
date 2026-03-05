@@ -196,6 +196,27 @@ button:focus-visible {
   background: #ffffff;
 }
 
+/* Pane dropdowns keep dark text on white backgrounds */
+#leftKind,
+#rightKind,
+#leftSite,
+#rightSite,
+#leftLibrary,
+#rightLibrary {
+  color: #000000 !important;
+}
+
+/* Address bars should stay light text on dark background */
+#leftPath,
+#rightPath {
+  color: #e9f2ff !important;
+}
+
+/* Split-view path bars should use dark text */
+.split-pane-pathbar input {
+  color: #000000 !important;
+}
+
 .pane-filter-row {
   padding: 7px 8px;
   border-bottom: 1px solid rgba(125, 167, 224, 0.17);
@@ -662,6 +683,14 @@ hr {
 .settings-field select,
 .settings-field textarea {
   width: 100%;
+}
+
+#settingsModal .settings-field input,
+#settingsModal .settings-field select,
+#settingsModal .settings-field textarea,
+#settingsModal pre {
+  color: #0f172a !important;
+  background: #ffffff !important;
 }
 
 .split-sessions-host {

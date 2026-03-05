@@ -54,6 +54,7 @@ const state = {
   migrationBookmarkExportFormat: 'json',
   relinkImports: [],
   relinkExports: [],
+  splitClickTimers: {},
 };
 
 function paneState(key){
@@ -91,6 +92,7 @@ const el = {
   aiRenamePreviewModal:id('aiRenamePreviewModal'), aiRenamePreviewSummary:id('aiRenamePreviewSummary'), aiRenamePreviewConflicts:id('aiRenamePreviewConflicts'), aiRenamePreviewCancelBtn:id('aiRenamePreviewCancelBtn'), aiRenamePreviewProceedBtn:id('aiRenamePreviewProceedBtn'),
   transferPreviewModal:id('transferPreviewModal'), transferPreviewSummary:id('transferPreviewSummary'), transferPreviewList:id('transferPreviewList'), transferSelectSafeBtn:id('transferSelectSafeBtn'), transferSelectNoneBtn:id('transferSelectNoneBtn'), transferPreviewConflicts:id('transferPreviewConflicts'), transferPreviewCancelBtn:id('transferPreviewCancelBtn'), transferPreviewProceedBtn:id('transferPreviewProceedBtn'),
   newFolderModal:id('newFolderModal'), newFolderSummary:id('newFolderSummary'), newFolderNameInput:id('newFolderNameInput'), newFolderCancelBtn:id('newFolderCancelBtn'), newFolderCreateBtn:id('newFolderCreateBtn'),
+  renameModal:id('renameModal'), renameSummary:id('renameSummary'), renameNameInput:id('renameNameInput'), renameCancelBtn:id('renameCancelBtn'), renameApplyBtn:id('renameApplyBtn'),
   previewBtn:id('previewBtn'), extractBtn:id('extractBtn'), summaryBtn:id('summaryBtn'), questionInput:id('questionInput'), askBtn:id('askBtn'), previewFrame:id('previewFrame'), previewText:id('previewText'),
   pdfPageInput:id('pdfPageInput'), pdfJumpBtn:id('pdfJumpBtn'), pdfBookmarkAddBtn:id('pdfBookmarkAddBtn'), pdfBookmarksList:id('pdfBookmarksList'),
   checkoutBtn:id('checkoutBtn'), checkinBtn:id('checkinBtn'), undoCheckoutBtn:id('undoCheckoutBtn'), loadVersionsBtn:id('loadVersionsBtn'), versionsSelect:id('versionsSelect'), downloadVersionBtn:id('downloadVersionBtn'), restoreVersionBtn:id('restoreVersionBtn'), versionsOutput:id('versionsOutput'),
@@ -753,6 +755,35 @@ function showTransferPreviewModal(rows,sourceMap,operationLabel){
     el.transferPreviewCancelBtn.onclick=()=>close(false);
   });
 }
+function showRenameModal(currentName){
+  if(!el.renameModal||!el.renameNameInput||!el.renameApplyBtn||!el.renameCancelBtn){
+    return Promise.resolve((prompt('New name:',currentName)||'').trim());
+  }
+  return new Promise((resolve)=>{
+    if(el.renameSummary) el.renameSummary.textContent=`Rename "${currentName}" to:`;
+    el.renameNameInput.value=String(currentName||'');
+    el.renameModal.classList.remove('hidden');
+    el.renameModal.setAttribute('aria-hidden','false');
+    setTimeout(()=>{
+      el.renameNameInput?.focus();
+      el.renameNameInput?.select();
+    },0);
+    const close=(value)=>{
+      el.renameModal.classList.add('hidden');
+      el.renameModal.setAttribute('aria-hidden','true');
+      el.renameApplyBtn.onclick=null;
+      el.renameCancelBtn.onclick=null;
+      if(el.renameNameInput) el.renameNameInput.onkeydown=null;
+      document.removeEventListener('keydown',onKey);
+      resolve(value);
+    };
+    const onKey=(ev)=>{ if(ev.key==='Escape') close(''); };
+    document.addEventListener('keydown',onKey);
+    el.renameApplyBtn.onclick=()=>close(String(el.renameNameInput.value||'').trim());
+    el.renameCancelBtn.onclick=()=>close('');
+    el.renameNameInput.onkeydown=(ev)=>{ if(ev.key==='Enter'){ ev.preventDefault(); close(String(el.renameNameInput.value||'').trim()); } };
+  });
+}
 function parseExtFilterInput(raw){
   const txt=String(raw||'').trim();
   if(!txt) return [];
@@ -790,7 +821,6 @@ function focusSplitSession(sessionId){
   saveCurrentSessionSnapshot();
   state.activeSessionId=sessionId;
   syncActiveSessionFromSplitRuntime(runtime);
-  persistSessions();
   renderSessionTabs();
   return runtime;
 }
@@ -1808,7 +1838,12 @@ function renderPane(key){
     const row=document.createElement('div'); row.className=`item${p.selected.has(it.path)?' active':''}`;
     row.draggable=true;
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=p.selected.has(it.path);
-    cb.onchange=()=>{ cb.checked?p.selected.add(it.path):p.selected.delete(it.path); renderPane(key); };
+    cb.onchange=()=>{
+      state.activePane=key;
+      cb.checked?p.selected.add(it.path):p.selected.delete(it.path);
+      saveCurrentSessionSnapshot();
+      renderPane(key);
+    };
     const nm=document.createElement('span'); nm.className='name';
     const tr=p.translations.get(it.path); const trHtml=state.translationEnabled&&tr&&tr!==it.name?`<span class="translated">${tr}</span>`:'';
     nm.innerHTML=`${it.isDir?'📁':'📄'} ${it.name}${trHtml}`;
@@ -1961,7 +1996,11 @@ function syncActiveSessionFromSplitRuntime(runtime){
     target.selected=new Set(runtime[side]?.selected||[]);
     target.translations=new Map(runtime[side]?.translations||[]);
   }
-  saveCurrentSessionSnapshot();
+  const idx=state.sessions.findIndex((s)=>s.id===state.activeSessionId);
+  if(idx>=0){
+    state.sessions[idx].snapshot=snapshot;
+    persistSessions();
+  }
 }
 
 function persistSplitRuntimeSession(sessionId){
@@ -2077,7 +2116,12 @@ function renderSplitPane(sessionId, side){
     const cb=document.createElement('input');
     cb.type='checkbox';
     cb.checked=pane.selected.has(it.path);
-    cb.onchange=()=>{ cb.checked?pane.selected.add(it.path):pane.selected.delete(it.path); renderSplitPane(sessionId, side); };
+    cb.onchange=()=>{
+      focusSplitPane(sessionId, side);
+      cb.checked?pane.selected.add(it.path):pane.selected.delete(it.path);
+      persistSplitRuntimeSession(sessionId);
+      renderSplitPane(sessionId, side);
+    };
     const nm=document.createElement('span');
     nm.className='name';
     const tr=pane.translations.get(it.path);
@@ -2087,8 +2131,28 @@ function renderSplitPane(sessionId, side){
     meta.className='meta';
     meta.textContent=it.isDir?'Dir':fmtSize(it.size);
     row.appendChild(cb); row.appendChild(nm); row.appendChild(meta);
-    row.onclick=(ev)=>{ focusSplitPane(sessionId, side); if(!ev.ctrlKey&&!ev.metaKey) pane.selected.clear(); pane.selected.add(it.path); persistSplitRuntimeSession(sessionId); renderSplitPane(sessionId, side); };
-    row.ondblclick=()=>{ focusSplitPane(sessionId, side); return it.isDir?loadSplitPane(sessionId, side, it.path):window.open(downloadUrl(pane,it.path),'_blank'); };
+    row.onclick=(ev)=>{
+      ev.stopPropagation();
+      const timerKey=`${sessionId}:${side}`;
+      if(state.splitClickTimers[timerKey]) clearTimeout(state.splitClickTimers[timerKey]);
+      state.splitClickTimers[timerKey]=setTimeout(()=>{
+        focusSplitPane(sessionId, side);
+        if(!ev.ctrlKey&&!ev.metaKey) pane.selected.clear();
+        pane.selected.add(it.path);
+        persistSplitRuntimeSession(sessionId);
+        renderSplitPane(sessionId, side);
+        state.splitClickTimers[timerKey]=null;
+      }, 220);
+    };
+    row.ondblclick=()=>{
+      const timerKey=`${sessionId}:${side}`;
+      if(state.splitClickTimers[timerKey]){
+        clearTimeout(state.splitClickTimers[timerKey]);
+        state.splitClickTimers[timerKey]=null;
+      }
+      focusSplitPane(sessionId, side);
+      return it.isDir?loadSplitPane(sessionId, side, it.path):window.open(downloadUrl(pane,it.path),'_blank');
+    };
     row.ondragstart=(ev)=>startSplitDrag(sessionId, side, it.path, ev);
     if(it.isDir){
       row.ondragover=(ev)=>{ ev.preventDefault(); row.classList.add('drop-folder'); };
@@ -2198,6 +2262,7 @@ function renderSplitSessions(){
           <div class="split-pane-actions">
             <button id="${splitPaneDomId(sessionId,'session','focus')}" type="button">Focus</button>
             <button id="${splitPaneDomId(sessionId,side,'up')}" type="button">Up</button>
+            <button id="${splitPaneDomId(sessionId,'session','close')}" type="button">Close</button>
           </div>
         </div>
         <div class="split-pane-pathbar">
@@ -2217,6 +2282,8 @@ function renderSplitSessions(){
     const pane=runtime[side];
     const focusBtn=id(splitPaneDomId(sessionId,'session','focus'));
     if(focusBtn) focusBtn.onclick=()=>focusSplitSession(sessionId);
+    const closeBtn=id(splitPaneDomId(sessionId,'session','close'));
+    if(closeBtn) closeBtn.onclick=(ev)=>{ ev.stopPropagation(); closeSessionById(sessionId); };
     const card=el.splitSessionsHost?.querySelector(`[data-split-session="${sessionId}"][data-split-side="${side}"]`);
     if(card) card.onclick=()=>focusSplitPane(sessionId, side);
     const ui=splitPaneElements(sessionId, side);
@@ -2614,9 +2681,44 @@ async function applyAiRenamePlan(p,ctx,rows){
   setStatus(`AI rename applied ${applied} operation(s).${failed?` ${failed} failed.`:''}`);
 }
 async function renameSelected(){
-  const p=activePane(), path=selectedSinglePath();
+  let p=activePane(), path=selectedSinglePath(), splitSessionId='', splitSide='';
+  if(!path){
+    const paneCandidates=['left','right']
+      .map((key)=>({pane:state[key],selected:Array.from(state[key]?.selected||[])}))
+      .filter((x)=>x.selected.length===1);
+    if(paneCandidates.length===1){
+      p=paneCandidates[0].pane;
+      path=paneCandidates[0].selected[0];
+    }
+  }
+  if(state.splitViewEnabled){
+    const sessionId=state.activeSessionId||splitSessionIds()[0]||'';
+    if(sessionId){
+      const runtime=hydrateSplitRuntime(sessionId);
+      const splitCandidates=['left','right']
+        .map((side)=>({side,pane:runtime?.[side],selected:Array.from(runtime?.[side]?.selected||[])}))
+        .filter((x)=>x.selected.length===1);
+      if(splitCandidates.length===1){
+        p=splitCandidates[0].pane;
+        path=splitCandidates[0].selected[0];
+        splitSessionId=sessionId;
+        splitSide=splitCandidates[0].side;
+      }else{
+        const side=(runtime?.activePane==='right'?'right':'left');
+        const pane=runtime?.[side];
+        const selected=Array.from(pane?.selected||[]);
+        if(selected.length===1){
+          p=pane;
+          path=selected[0];
+          splitSessionId=sessionId;
+          splitSide=side;
+        }
+      }
+    }
+  }
   if(!path) return setStatus('Select exactly one item.');
-  const newName=prompt('New name:',basename(path)); if(!newName||newName===basename(path)) return;
+  const newName=String(await showRenameModal(basename(path))||'').trim();
+  if(!newName||newName===basename(path)) return;
   try{
     if(p.kind==='local') await apiPost('/api/local/rename',{path,new_name:newName});
     else{
@@ -2624,6 +2726,14 @@ async function renameSelected(){
       await apiPost('/api/sp/rename',{server_relative_url:path,new_name:newName,is_folder:!!it?.isDir,site_relative_url:p.site||null});
       const parent=normalizeSpPath(path).split('/').slice(0,-1).join('/')||'/';
       recordMigration('rename',it?.isDir?'folder':'file',path,`${parent}/${newName}`,p.site||'',p.site||'');
+    }
+    if(splitSessionId && splitSide){
+      await loadSplitPane(splitSessionId, splitSide, p.path, true);
+      if(splitSessionId===state.activeSessionId){
+        syncActiveSessionFromSplitRuntime(hydrateSplitRuntime(splitSessionId));
+      }
+      setStatus('Renamed.');
+      return;
     }
     await loadPane(p.key,p.path); setStatus('Renamed.');
   }catch(e){ setStatus(`Rename failed: ${err(e)}`); }
@@ -3632,7 +3742,27 @@ async function activateSession(id){ saveCurrentSessionSnapshot(); const s=state.
 function newSession(){ saveCurrentSessionSnapshot(); const s={id:`s-${Date.now()}`,name:'',snapshot:activeSessionSnapshot()}; state.sessions.unshift(s); state.activeSessionId=s.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Created ${sessionLabelById(s.id)}`); }
 function duplicateSession(){ saveCurrentSessionSnapshot(); const src=state.sessions.find(s=>s.id===state.activeSessionId); if(!src) return; const cp={id:`s-${Date.now()}`,name:'',snapshot:JSON.parse(JSON.stringify(src.snapshot||activeSessionSnapshot()))}; state.sessions.unshift(cp); state.activeSessionId=cp.id; persistSessions(); renderSessionTabs(); renderSplitSessions(); setStatus(`Duplicated session: ${sessionLabelById(cp.id)}`); }
 function renameSession(){ setStatus('Session labels are automatic from the current folder or SharePoint location.'); }
-async function closeSession(){ if(state.sessions.length<=1) return setStatus('At least one session is required.'); const idx=state.sessions.findIndex(s=>s.id===state.activeSessionId); if(idx<0) return; const removed=state.sessions.splice(idx,1)[0]; const removedLabel=sessionLabelFromSnapshot(removed.snapshot||{}); delete state.splitRuntime[removed.id]; state.activeSessionId=state.sessions[0].id; persistSessions(); renderSessionTabs(); renderSplitSessions(); await activateSession(state.activeSessionId); setStatus(`Closed ${removedLabel}`); }
+async function closeSession(){ return closeSessionById(state.activeSessionId); }
+async function closeSessionById(sessionId){
+  if(state.sessions.length<=1) return setStatus('At least one session is required.');
+  const idx=state.sessions.findIndex((s)=>s.id===sessionId);
+  if(idx<0){
+    if(!state.sessions.length) return;
+    state.activeSessionId=state.sessions[0].id;
+    return closeSession();
+  }
+  const removed=state.sessions.splice(idx,1)[0];
+  const removedLabel=sessionLabelFromSnapshot(removed.snapshot||{});
+  delete state.splitRuntime[removed.id];
+  if(state.activeSessionId===sessionId || !state.sessions.find((s)=>s.id===state.activeSessionId)){
+    state.activeSessionId=state.sessions[0].id;
+  }
+  persistSessions();
+  renderSessionTabs();
+  renderSplitSessions();
+  await activateSession(state.activeSessionId);
+  setStatus(`Closed ${removedLabel}`);
+}
 function toggleSplitView(){ state.splitViewEnabled=!state.splitViewEnabled; persistSessions(); renderSplitSessions(); if(state.splitViewEnabled) refreshSplitView(true); setStatus(`Split view ${state.splitViewEnabled?'enabled':'disabled'}.`); }
 async function changeSplitCompareSession(_id){ return; }
 function renderSessionTabs(){ if(!el.sessionTabs) return; el.sessionTabs.innerHTML=''; state.sessions.forEach((s)=>{ const b=document.createElement('button'); b.className=`layout-tab${s.id===state.activeSessionId?' active':''}`; b.textContent=sessionLabelById(s.id); b.onclick=()=>activateSession(s.id); el.sessionTabs.appendChild(b); }); renderSplitSessionOptions(); }
